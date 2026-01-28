@@ -1,0 +1,19 @@
+{
+  "name": "repulsive-test2",
+  "private": true,
+  "scripts": {
+    "dev": "bun --hot ./server.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  }
+}
