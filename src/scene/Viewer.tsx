@@ -1,7 +1,8 @@
 import { OrbitControls } from '@react-three/drei';
-import { Canvas, extend, type ThreeToJSXElements } from '@react-three/fiber';
+import { Canvas, extend, type ThreeToJSXElements, useFrame } from '@react-three/fiber';
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three/webgpu';
+import { step as descentStep } from '../core/optimizer';
 import { useSimStore } from '../store';
 import { Curve } from './Curve';
 
@@ -13,6 +14,59 @@ declare module '@react-three/fiber' {
 extend(THREE as any);
 
 const CAMERA_POS: [number, number, number] = [3, 3, 3];
+// zoom is reported as a ratio normalized to the starting camera distance (zoom=1 at spawn);
+// camera.position.length() assumes the orbit target is the origin (true for default OrbitControls).
+// Moving CAMERA_POS or setting a non-origin target changes the zoom baseline. @see spec §8 (zoom stat).
+const BASE_DISTANCE = Math.hypot(...CAMERA_POS);
+
+// The optimization loop. Lives inside <Canvas> so it can use useFrame. Mutates the
+// live buffer in place (no React render); publishes stats/zoom throttled (~10Hz / 5Hz).
+// @see docs/superpowers/specs/2026-07-02-react-three-webgpu-switch-design.md §4.1 (Simulation)
+function Simulation() {
+    const statAcc = useRef(0);
+    const camAcc = useRef(0);
+    const iters = useRef(0);
+
+    useFrame((state, delta) => {
+        const st = useSimStore.getState();
+
+        if (st.running) {
+            const { vertices, energy } = descentStep(st.live, st.graph.edges, st.disjointPairs, {
+                mode: st.mode,
+                stepSize: st.stepSize,
+            });
+            // Copy-then-discard: optimizer.step() is pure by design and returns a fresh
+            // Vec3[] each frame; we mutate the existing live tuples in place (preserving their
+            // identity for Curve's non-reactive buffer) and drop `vertices`. Revisit only if N
+            // grows enough that the per-frame alloc matters (scratch-buffer optimizer). @see spec §5.
+            for (let i = 0; i < st.live.length; i++) {
+                const v = vertices[i];
+                const l = st.live[i];
+                l[0] = v[0];
+                l[1] = v[1];
+                l[2] = v[2];
+            }
+            iters.current += 1;
+            statAcc.current += delta;
+            if (statAcc.current > 0.1) {
+                statAcc.current = 0;
+                useSimStore.setState({ step: iters.current, energy });
+            }
+        } else {
+            // keep the iteration counter in sync with a rebuilt/committed state
+            iters.current = st.step;
+        }
+
+        camAcc.current += delta;
+        if (camAcc.current > 0.2) {
+            camAcc.current = 0;
+            const dist = state.camera.position.length();
+            st.setZoom(dist > 0 ? BASE_DISTANCE / dist : 1);
+        }
+    });
+
+    return null;
+}
 
 // Why: the only file that touches WebGPU wiring — <Canvas flat> (no tone-mapping so the viz
 // palette stays exact) + the async WebGPURenderer gl factory + OrbitControls. @see spec §4.1/§6.
@@ -61,6 +115,7 @@ export function Viewer() {
             <directionalLight position={[5, 5, 5]} intensity={0.6} />
             <OrbitControls ref={controls} minPolarAngle={0} maxPolarAngle={Math.PI} />
             <Curve key={graphVersion} />
+            <Simulation />
         </Canvas>
     );
 }
