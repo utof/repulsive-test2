@@ -1,0 +1,16 @@
+# Git hooks managed by lefthook.
+# Installed via the package.json "prepare" script (or run `bunx lefthook install`).
+pre-commit:
+  parallel: true
+  jobs:
+    # Format + organize imports on staged files, then re-stage the fixes.
+    # Linter is disabled here so commits are never blocked on style nits;
+    # run `bun run lint` (or `bun run check`) manually for full linting.
+    - name: biome
+      glob: "*.{js,jsx,ts,tsx,json,jsonc,css}"
+      run: bunx biome check --write --linter-enabled=false --no-errors-on-unmatched {staged_files}
+      stage_fixed: true
+
+    # Report unused files / deps / exports. Non-blocking (informational only).
+    - name: knip
+      run: bunx knip --no-exit-code
