@@ -12,7 +12,7 @@ const server = Bun.serve({
         // Serve index.html for root
         if (path === '/' || path === '/index.html') {
             return new Response(readFileSync(join(import.meta.dir, 'index.html')), {
-                headers: { 'Content-Type': 'text/html' }
+                headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' },
             });
         }
 
@@ -29,7 +29,12 @@ const server = Bun.serve({
                 if (result.success && result.outputs.length > 0) {
                     const code = await result.outputs[0].text();
                     return new Response(code, {
-                        headers: { 'Content-Type': 'application/javascript' }
+                        headers: {
+                            'Content-Type': 'application/javascript',
+                            // Dev server rebuilds per request; without this the browser can serve a
+                            // heuristically-cached module bundle, so source edits appear to do nothing.
+                            'Cache-Control': 'no-store',
+                        },
                     });
                 }
             } catch (e) {
@@ -39,7 +44,7 @@ const server = Bun.serve({
         }
 
         return new Response('Not found', { status: 404 });
-    }
+    },
 });
 
 console.log(`Server running at http://localhost:${server.port}`);

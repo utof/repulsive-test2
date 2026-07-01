@@ -9,7 +9,7 @@ import {
     norm,
 } from './tangentPointEnergy';
 import { type GraphState, testConfigs, type Vec3 } from './testConfigs';
-import { clampPolar, project, projectDirection } from './viewRotation';
+import { clampPolar, project, projectArrow } from './viewRotation';
 
 // LocalStorage keys
 const STORAGE_KEY = 'repulsive-test-config';
@@ -26,17 +26,19 @@ function saveConfig(testId: string, params: Record<string, number>) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ testId, params }));
 }
 
-// View math (rotate3D / project / projectDirection) and the OrbitControls-style
-// pitch clamp live in ./viewRotation so they are unit-testable and easy to swap
-// for react-three-fiber later. @see src/viewRotation.ts
+// View math (rotate3D / project / projectArrow) and the OrbitControls-style pitch
+// clamp live in ./viewRotation so they are unit-testable and easy to swap for
+// react-three-fiber later. @see src/viewRotation.ts
 
-// Logarithmic scaling for arrow length
-function logScale(magnitude: number): number {
-    if (magnitude < 0.001) return 0;
-    // log(1 + x) gives nice compression of large values
-    // Scale so small gradients are visible but large ones don't explode
-    return Math.sign(magnitude) * Math.log(1 + Math.abs(magnitude)) * 15;
-}
+// --- Gradient-arrow display knobs -------------------------------------------
+// Arrows are the true perspective projection of the (log-compressed) 3D gradient
+// (see projectArrow), so they foreshorten correctly instead of whipping around.
+// These knobs control size + visibility. @see src/viewRotation.ts (projectArrow)
+const ARROW_SCALE = 0.2; // world-units of arrow per log-unit of |gradient| (overall size)
+const MIN_ARROW_LEN = 14; // px: floor so small / foreshortened arrows stay visible
+const MAX_ARROW_LEN = 90; // px: cap so huge (near-intersection) gradients don't shoot off-canvas
+const ARROW_WIDTH = 2.5; // px: arrow line thickness
+const ARROW_HEAD = 8; // px: max arrowhead size
 
 function App() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -175,61 +177,51 @@ function App() {
                       );
 
             ctx.strokeStyle = mode === 'analytical' ? '#00ff88' : '#ffaa00';
-            ctx.lineWidth = 2;
+            ctx.lineWidth = ARROW_WIDTH;
 
             for (let i = 0; i < graph.vertices.length; i++) {
-                const [x, y] = project(
+                const gradVec = grad[i];
+                const gradNorm = norm(gradVec);
+                if (gradNorm <= 1e-6) continue;
+
+                // Negative gradient = descent direction. Draw it as the true perspective
+                // projection of the 3D vector so it foreshortens and keeps a consistent
+                // direction across views. @see src/viewRotation.ts (projectArrow)
+                const negGrad: Vec3 = [-gradVec[0], -gradVec[1], -gradVec[2]];
+                const { baseX, baseY, tipX, tipY, len } = projectArrow(
                     graph.vertices[i],
+                    negGrad,
+                    gradNorm,
                     width,
                     height,
                     rotationY,
                     rotationX,
                     zoom,
+                    ARROW_SCALE,
+                    MIN_ARROW_LEN,
+                    MAX_ARROW_LEN,
                 );
-                const gradVec = grad[i];
-                const gradNorm = norm(gradVec);
 
-                if (gradNorm > 0.001) {
-                    // Negative gradient = descent direction
-                    const negGrad: Vec3 = [-gradVec[0], -gradVec[1], -gradVec[2]];
+                ctx.beginPath();
+                ctx.moveTo(baseX, baseY);
+                ctx.lineTo(tipX, tipY);
+                ctx.stroke();
 
-                    // Get consistent screen-space direction from 3D gradient
-                    const [dirX, dirY] = projectDirection(
-                        graph.vertices[i],
-                        negGrad,
-                        rotationY,
-                        rotationX,
-                    );
-
-                    // Logarithmic length scaling
-                    const arrowLen = logScale(gradNorm) * zoom;
-
-                    if (arrowLen > 2) {
-                        const tx = x + dirX * arrowLen;
-                        const ty = y + dirY * arrowLen;
-
-                        ctx.beginPath();
-                        ctx.moveTo(x, y);
-                        ctx.lineTo(tx, ty);
-                        ctx.stroke();
-
-                        // Arrow head
-                        const angle = Math.atan2(dirY, dirX);
-                        const headSize = Math.min(8, arrowLen * 0.3);
-                        ctx.beginPath();
-                        ctx.moveTo(tx, ty);
-                        ctx.lineTo(
-                            tx - headSize * Math.cos(angle - 0.4),
-                            ty - headSize * Math.sin(angle - 0.4),
-                        );
-                        ctx.moveTo(tx, ty);
-                        ctx.lineTo(
-                            tx - headSize * Math.cos(angle + 0.4),
-                            ty - headSize * Math.sin(angle + 0.4),
-                        );
-                        ctx.stroke();
-                    }
-                }
+                // Arrow head
+                const angle = Math.atan2(tipY - baseY, tipX - baseX);
+                const headSize = Math.min(ARROW_HEAD, len * 0.4);
+                ctx.beginPath();
+                ctx.moveTo(tipX, tipY);
+                ctx.lineTo(
+                    tipX - headSize * Math.cos(angle - 0.4),
+                    tipY - headSize * Math.sin(angle - 0.4),
+                );
+                ctx.moveTo(tipX, tipY);
+                ctx.lineTo(
+                    tipX - headSize * Math.cos(angle + 0.4),
+                    tipY - headSize * Math.sin(angle + 0.4),
+                );
+                ctx.stroke();
             }
         }
     }, [graph, rotationY, rotationX, zoom, mode, running]);
