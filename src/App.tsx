@@ -1,3 +1,4 @@
+import { Viewer } from './scene/Viewer';
 import { ControlPanel } from './ui/ControlPanel';
 import { Stats } from './ui/Stats';
 
@@ -10,7 +11,7 @@ export function App() {
             <div
                 style={{ flex: 1, position: 'relative', border: '2px solid #333', borderRadius: 8 }}
             >
-                {/* <Viewer/> mounts here in Task 6 */}
+                <Viewer />
             </div>
             <p style={{ marginTop: 10, color: '#888', fontSize: 14 }}>
                 Drag to rotate. Scroll to zoom. Arrows show negative gradient (descent direction).
