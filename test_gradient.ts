@@ -7,7 +7,7 @@
 import { testConfigs, type GraphState, type Vec3, type Edge } from './src/testConfigs';
 
 // Simple helper functions (duplicated here for standalone testing)
-function cross3D(a, b) {
+function cross3D(a: number[], b: number[]): number[] {
     return [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -15,36 +15,36 @@ function cross3D(a, b) {
     ];
 }
 
-function cross2D(a, b) {
+function cross2D(a: number[], b: number[]): number {
     return a[0] * b[1] - a[1] * b[0];
 }
 
-function dot(a, b) {
+function dot(a: number[], b: number[]): number {
     return a.reduce((sum, val, i) => sum + val * b[i], 0);
 }
 
-function subtract(a, b) {
+function subtract(a: number[], b: number[]): number[] {
     return a.map((val, i) => val - b[i]);
 }
 
-function scale(s, v) {
+function scale(s: number, v: number[]): number[] {
     return v.map(x => s * x);
 }
 
-function norm(v) {
+function norm(v: number[]): number {
     return Math.sqrt(dot(v, v));
 }
 
-function add(a, b) {
+function add(a: number[], b: number[]): number[] {
     return a.map((val, i) => val + b[i]);
 }
 
 /**
  * Calculate disjoint edge pairs (edges that share no vertices)
  */
-function calculateDisjointEdgePairs(edges) {
+function calculateDisjointEdgePairs(edges: number[][]): number[][] {
     const numEdges = edges.length;
-    const disjointPairs = [];
+    const disjointPairs: number[][] = [];
     
     for (let i = 0; i < numEdges; i++) {
         disjointPairs[i] = [];
@@ -67,7 +67,7 @@ function calculateDisjointEdgePairs(edges) {
 /**
  * Calculate the discrete energy (for verification)
  */
-function calculateEnergy(vertices, edges, alpha, beta, disjointPairs, dimension, epsilon) {
+function calculateEnergy(vertices: number[][], edges: number[][], alpha: number, beta: number, disjointPairs: number[][], dimension: number, epsilon: number): number {
     let totalEnergy = 0;
     
     for (let I = 0; I < edges.length; I++) {
@@ -114,7 +114,7 @@ function calculateEnergy(vertices, edges, alpha, beta, disjointPairs, dimension,
  * (e.g. the out-of-plane z components of a planar configuration) — a
  * finite-difference artifact, not a real gradient. Central differences cancel it.
  */
-function calculateGradientFiniteDiff(vertices, edges, alpha, beta, disjointPairs, dimension, epsilon, h) {
+function calculateGradientFiniteDiff(vertices: number[][], edges: number[][], alpha: number, beta: number, disjointPairs: number[][], dimension: number, epsilon: number, h: number): number[][] {
     const gradient = vertices.map(v => new Array(dimension).fill(0));
 
     for (let v = 0; v < vertices.length; v++) {
@@ -336,7 +336,7 @@ function gradientAnalytical(
  * is ~0 — a tiny difference divided by a tiny magnitude. The mixed tolerance
  * is the standard robust gradient-check criterion.
  */
-function checkGradients(gradFD, gradAn, atol = 1e-6, rtol = 1e-5) {
+function checkGradients(gradFD: number[][], gradAn: number[][], atol = 1e-6, rtol = 1e-5) {
     let ok = true;
     let maxAbs = 0;
     let maxRel = 0;
