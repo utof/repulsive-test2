@@ -13,13 +13,14 @@ import {
 import type { Edge, Vec3 } from './src/testConfigs';
 
 /**
- * Calculate gradient using central finite differences.
+ * Calculate gradient using CENTRAL finite differences, NOT forward.
  *
  * Central differences (E(+h) - E(-h)) / 2h are O(h^2) accurate, whereas a
  * forward difference (E(+h) - E(0)) / h is only O(h). The forward version
- * produces a spurious O(h) "gradient" wherever the true derivative is zero
- * (e.g. the out-of-plane z components of a planar configuration) — a
- * finite-difference artifact, not a real gradient. Central differences cancel it.
+ * fabricates a spurious O(h) "gradient" wherever the true derivative is zero
+ * (e.g. the out-of-plane z components of a planar configuration) and would
+ * false-fail a correct analytical gradient — central differences cancel it.
+ * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Verification (the safety net)"
  */
 function calculateGradientFiniteDiff(
     vertices: Vec3[],
@@ -48,10 +49,12 @@ function calculateGradientFiniteDiff(
 /**
  * Compare two gradients with a combined absolute + relative tolerance:
  *   |fd - an| <= atol + rtol * max(|fd|, |an|)
+ * NOT pure relative error.
  *
  * A pure relative-error test (absErr / |fd|) explodes when the true derivative
- * is ~0 — a tiny difference divided by a tiny magnitude. The mixed tolerance
- * is the standard robust gradient-check criterion.
+ * is ~0 — a tiny difference divided by a tiny magnitude false-fails. The mixed
+ * tolerance is the standard robust gradient-check criterion. Intentional —
+ * do not "simplify" to relative-only.
  */
 function checkGradients(gradFD: number[][], gradAn: number[][], atol = 1e-6, rtol = 1e-5) {
     let ok = true;

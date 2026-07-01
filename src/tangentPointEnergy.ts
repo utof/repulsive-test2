@@ -1,11 +1,30 @@
+/**
+ * Tangent-point (repulsive-curves) energy and its analytical gradient.
+ *
+ * SINGLE SOURCE OF TRUTH — imported by src/index.tsx (the app) and test_gradient.ts
+ * (which verifies gradientAnalytical against central finite differences).
+ * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md
+ *
+ * PERF: the vector helpers are inlined to x/y/z scalars to avoid per-edge-pair array
+ * allocation in the O(E²) loop (measured ~6× on the gradient hot path — the one optimization
+ * that paid off). A flat-Float64Array variant and an integer-exponent Math.pow fast path
+ * were both evaluated and REVERTED (≈5% and ≈0% respectively; not worth the complexity /
+ * loss of bit-identity). Further speedups (flat data model through the UI, Barnes–Hut/BVH,
+ * WASM-SIMD, WebGPU) are deferred to issue #1.
+ *
+ * 3D ONLY BY DESIGN. 2D configs embed as z=0: ‖cross3D‖ with z=0 equals |cross2D|, and the
+ * gradient's z-components are identically 0. Do NOT re-introduce a 2D branch.
+ * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "3D-only; 2D embeds as z=0"
+ */
 import type { Edge, Vec3 } from './testConfigs';
 
 // Vector math helpers.
-// NOTE (Opt #1, Task 3): cross3D/subtract/scale/add were inlined to scalar x/y/z math in the
-// energy/gradient hot loops to remove per-edge-pair `number[]` allocations. `norm` is kept
-// because it is exported and consumed by the viewer (src/index.tsx); `dot` is kept because
-// `norm` calls it. The inlined scalar expressions preserve op order bit-identically
-// (dot's left-assoc reduce from 0 == `x*x + y*y + z*z`; see golden.test.ts STRICT).
+// cross3D/subtract/scale/add are inlined to scalar x/y/z math in the energy/gradient hot loops
+// (see module header PERF note) to remove per-edge-pair `number[]` allocations. `norm` is kept
+// because it is exported and consumed by the viewer (src/index.tsx, for the gradient-arrow
+// magnitude); `dot` is kept because `norm` calls it. The inlined scalar expressions below
+// preserve dot's left-assoc reduce-from-0 op order bit-identically (`x*x + y*y + z*z`).
+// @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Optimizations (#1–3)"
 const dot = (a: number[], b: number[]): number => a.reduce((sum, val, i) => sum + val * b[i], 0);
 
 export const norm = (v: number[]): number => Math.sqrt(dot(v, v));
@@ -46,12 +65,16 @@ export function calculateEnergy(
         const eIx = vertices[i2][0] - vertices[i1][0];
         const eIy = vertices[i2][1] - vertices[i1][1];
         const eIz = vertices[i2][2] - vertices[i1][2];
-        // ell_I = ||e_I|| + epsilon. epsilon is added AFTER the norm (spec §Invariants).
+        // ell_I = ||e_I|| + epsilon. ε is added AFTER the norm: kernel = (‖e×d‖ + ε)^α / (‖d‖ + ε)^β.
+        // This is part of the energy DEFINITION (regularization), not a guard — moving ε
+        // inside/outside the norm changes the energy. Same placement applies at every
+        // ell_J/d_norm/c_norm below, and at d_eps/c_eps/ell_I/ell_J in gradientAnalytical.
+        // @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Invariants the inlined kernel must preserve"
         const ell_I = Math.sqrt(eIx * eIx + eIy * eIy + eIz * eIz) + epsilon;
 
         for (const J of disjointPairs[I]) {
             const [j1, j2] = edges[J];
-            // ell_J = norm(subtract(vertices[j2], vertices[j1])) + epsilon.
+            // ell_J = norm(subtract(vertices[j2], vertices[j1])) + epsilon — ε after norm, see above.
             const eJx = vertices[j2][0] - vertices[j1][0];
             const eJy = vertices[j2][1] - vertices[j1][1];
             const eJz = vertices[j2][2] - vertices[j1][2];
@@ -64,8 +87,10 @@ export function calculateEnergy(
                     const dx = vertices[i][0] - vertices[j][0];
                     const dy = vertices[i][1] - vertices[j][1];
                     const dz = vertices[i][2] - vertices[j][2];
-                    const d_norm = Math.sqrt(dx * dx + dy * dy + dz * dz) + epsilon;
-                    // c = cross3D(e_I, d); component term order matches cross3D (spec §Invariants).
+                    const d_norm = Math.sqrt(dx * dx + dy * dy + dz * dz) + epsilon; // ε after norm, see above.
+                    // c = cross3D(e_I, d); component term order matches cross3D, and ε is added
+                    // AFTER the norm below — both are load-bearing invariants of the inlined kernel.
+                    // @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Invariants the inlined kernel must preserve"
                     const cx = eIy * dz - eIz * dy;
                     const cy = eIz * dx - eIx * dz;
                     const cz = eIx * dy - eIy * dx;
@@ -78,6 +103,10 @@ export function calculateEnergy(
         }
     }
 
+    // /2 because disjointPairs lists BOTH (I,J) and (J,I) — every unordered pair is summed twice.
+    // gradientAnalytical's final *0.5 loop divides for the SAME reason. Keep energy and gradient
+    // in lockstep, or the analytical gradient stops matching the energy (test_gradient.ts fails).
+    // @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Invariants the inlined kernel must preserve"
     return totalEnergy / 2;
 }
 
@@ -128,8 +157,11 @@ export function gradientAnalytical(
 
     // f(d,e) = (||e x d|| + eps)^alpha / (||d|| + eps)^beta
     // returns f, df/dd (w.r.t dvec), df/de (w.r.t evec) as scalar triples.
-    // Vector helpers (subtract/scale/add/cross3D + safeUnit) are inlined to scalar math here;
-    // op order is preserved bit-identically (spec §Invariants).
+    // Vector math is inlined to x/y/z scalars here (subtract/scale/add/cross3D + safeUnit) to
+    // avoid per-iteration array allocation (most of the measured speedup). Keep the x→y→z
+    // accumulation order — it's what makes the inlining bit-identical to the pre-optimization
+    // baseline (golden.test.ts asserts exact equality).
+    // @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Invariants the inlined kernel must preserve"
     const kernelDerivs = (
         ex: number,
         ey: number,
@@ -138,7 +170,10 @@ export function gradientAnalytical(
         dy: number,
         dz: number,
     ) => {
-        // safeUnit(dvec): guard tests the PRE-epsilon norm with `< 1e-14` (spec §Invariants).
+        // safeUnit(dvec): guard tests the PRE-ε length `rd` (not rd+epsilon) with `< 1e-14` — a
+        // ~0-length vector has no defined unit direction, so we zero that derivative. Keep the
+        // `< 1e-14` / `>= 1e-14` exactly (see also the `rc` guard below).
+        // @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Invariants the inlined kernel must preserve"
         const rd = Math.sqrt(dx * dx + dy * dy + dz * dz);
         let dHat_x = 0;
         let dHat_y = 0;
@@ -149,15 +184,16 @@ export function gradientAnalytical(
             dHat_y = invRd * dy;
             dHat_z = invRd * dz;
         }
-        const d_eps = rd + epsilon; // epsilon added AFTER the norm (spec §Invariants).
+        const d_eps = rd + epsilon; // ε after norm — see the canonical note at ell_I in calculateEnergy.
 
-        // cvec = cross3D(e, dvec); component term order matches cross3D (spec §Invariants).
+        // cvec = cross3D(e, dvec); component term order matches cross3D — see the kernelDerivs
+        // op-order note above.
         const cx = ey * dz - ez * dy;
         const cy = ez * dx - ex * dz;
         const cz = ex * dy - ey * dx;
         // safeUnit(cvec): only the length (rc) is used here.
         const rc = Math.sqrt(cx * cx + cy * cy + cz * cz);
-        const c_eps = rc + epsilon; // epsilon added AFTER the norm (spec §Invariants).
+        const c_eps = rc + epsilon; // ε after norm — see the canonical note at ell_I in calculateEnergy.
 
         const cPowA = Math.pow(c_eps, alpha);
         const dPowB = Math.pow(d_eps, beta);
@@ -172,7 +208,7 @@ export function gradientAnalytical(
         let dc_de_y = 0;
         let dc_de_z = 0;
         if (rc >= 1e-14) {
-            // keep `>=` and 1e-14 exactly (spec §Invariants).
+            // Same PRE-ε guard rule as `rd` above (rc, not rc+epsilon). Keep `>=` and 1e-14 exactly.
             const invRc = 1 / rc;
             // cross3D(cvec, e)
             const cce_x = cy * ez - cz * ey;
@@ -217,7 +253,7 @@ export function gradientAnalytical(
         const eIy = vertices[i2][1] - vertices[i1][1];
         const eIz = vertices[i2][2] - vertices[i1][2];
 
-        // safeUnit(e_I): guard tests PRE-epsilon norm with `< 1e-14` (spec §Invariants).
+        // safeUnit(e_I): same PRE-ε `< 1e-14` guard rule as `rd`/`rc` in kernelDerivs above.
         const reI = Math.sqrt(eIx * eIx + eIy * eIy + eIz * eIz);
         let eI_hat_x = 0;
         let eI_hat_y = 0;
@@ -228,7 +264,7 @@ export function gradientAnalytical(
             eI_hat_y = invReI * eIy;
             eI_hat_z = invReI * eIz;
         }
-        const ell_I = reI + epsilon; // epsilon added AFTER the norm (spec §Invariants).
+        const ell_I = reI + epsilon; // ε after norm — see the canonical note at ell_I in calculateEnergy.
         const ell_I_pow = Math.pow(ell_I, 1 - alpha);
 
         // d(ell_I^(1-a))/dv = (1-a)*ell_I^(-a) * d(ell_I)/dv
@@ -249,7 +285,7 @@ export function gradientAnalytical(
             const eJx = vertices[j2][0] - vertices[j1][0];
             const eJy = vertices[j2][1] - vertices[j1][1];
             const eJz = vertices[j2][2] - vertices[j1][2];
-            // safeUnit(e_J): guard tests PRE-epsilon norm with `< 1e-14` (spec §Invariants).
+            // safeUnit(e_J): same PRE-ε `< 1e-14` guard rule as `rd`/`rc` in kernelDerivs above.
             const reJ = Math.sqrt(eJx * eJx + eJy * eJy + eJz * eJz);
             let eJ_hat_x = 0;
             let eJ_hat_y = 0;
@@ -260,7 +296,7 @@ export function gradientAnalytical(
                 eJ_hat_y = invReJ * eJy;
                 eJ_hat_z = invReJ * eJz;
             }
-            const ell_J = reJ + epsilon; // epsilon added AFTER the norm (spec §Invariants).
+            const ell_J = reJ + epsilon; // ε after norm — see the canonical note at ell_I in calculateEnergy.
 
             // d(ell_J)/dv_j1 = -eJ_hat, d(ell_J)/dv_j2 = +eJ_hat
             // dEllJ_dv_j1 = scale(-1, eJ_hat); dEllJ_dv_j2 = eJ_hat (used directly below).
@@ -341,8 +377,11 @@ export function gradientAnalytical(
         }
     }
 
-    // calculateEnergy divides by 2 (because disjointPairs contains both (I,J) and (J,I)),
-    // so gradient must also be divided by 2 to match finite-diff.
+    // /2 because disjointPairs lists BOTH (I,J) and (J,I) — every unordered pair is summed twice.
+    // Same reason calculateEnergy divides by 2 (see its `return totalEnergy / 2` above). Keep
+    // energy and gradient in lockstep, or the analytical gradient stops matching the energy
+    // (test_gradient.ts fails).
+    // @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "Invariants the inlined kernel must preserve"
     for (let v = 0; v < gradient.length; v++) {
         gradient[v][0] *= 0.5;
         gradient[v][1] *= 0.5;
