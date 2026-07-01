@@ -5,6 +5,7 @@ import * as THREE from 'three/webgpu';
 import { step as descentStep } from '../core/optimizer';
 import { useSimStore } from '../store';
 import { Curve } from './Curve';
+import { GradientArrows } from './GradientArrows';
 
 declare module '@react-three/fiber' {
     interface ThreeElements extends ThreeToJSXElements<typeof THREE> {}
@@ -115,6 +116,7 @@ export function Viewer() {
             <directionalLight position={[5, 5, 5]} intensity={0.6} />
             <OrbitControls ref={controls} minPolarAngle={0} maxPolarAngle={Math.PI} />
             <Curve key={graphVersion} />
+            <GradientArrows key={graphVersion} />
             <Simulation />
         </Canvas>
     );
