@@ -1,8 +1,10 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
+const port = parseInt(process.env.PORT || '3000');
+
 const server = Bun.serve({
-    port: 3000,
+    port,
     async fetch(req) {
         const url = new URL(req.url);
         const path = url.pathname;
