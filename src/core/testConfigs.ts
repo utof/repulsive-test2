@@ -27,9 +27,13 @@ function createCrossingLines(): GraphState {
             [0, 1.5, -0.3],
         ],
         edges: [
-            [0, 1], [1, 2], [2, 3],
-            [4, 5], [5, 6], [6, 7],
-        ]
+            [0, 1],
+            [1, 2],
+            [2, 3],
+            [4, 5],
+            [5, 6],
+            [6, 7],
+        ],
     };
 }
 
@@ -42,11 +46,7 @@ function createHelix(): GraphState {
     for (let i = 0; i < n; i++) {
         const t = (i / n) * Math.PI * 4;
         const r = 1.0;
-        vertices.push([
-            r * Math.cos(t),
-            (i / n) * 3 - 1.5,
-            r * Math.sin(t)
-        ]);
+        vertices.push([r * Math.cos(t), (i / n) * 3 - 1.5, r * Math.sin(t)]);
         if (i > 0) edges.push([i - 1, i]);
     }
 
@@ -71,7 +71,7 @@ function createLinkedRings(): GraphState {
     for (let i = 0; i < n; i++) {
         const t = (i / n) * Math.PI * 2;
         vertices.push([0.5 + Math.cos(t) * 0.8, 0, Math.sin(t) * 0.8]);
-        edges.push([offset + i, offset + (i + 1) % n]);
+        edges.push([offset + i, offset + ((i + 1) % n)]);
     }
 
     return { vertices, edges };
@@ -86,11 +86,13 @@ function createKnot(): GraphState {
     // Trefoil knot parametrization
     for (let i = 0; i < n; i++) {
         const t = (i / n) * Math.PI * 2;
-        vertices.push([
-            Math.sin(t) + 2 * Math.sin(2 * t),
-            Math.cos(t) - 2 * Math.cos(2 * t),
-            -Math.sin(3 * t)
-        ].map(x => x * 0.4) as Vec3);
+        vertices.push(
+            [
+                Math.sin(t) + 2 * Math.sin(2 * t),
+                Math.cos(t) - 2 * Math.cos(2 * t),
+                -Math.sin(3 * t),
+            ].map((x) => x * 0.4) as Vec3,
+        );
         edges.push([i, (i + 1) % n]);
     }
 
@@ -117,7 +119,7 @@ function createStressTest(): GraphState {
                 vertices.push([
                     (x - gridSize / 2) * spacing + (Math.random() - 0.5) * 0.2,
                     (y - gridSize / 2) * spacing + (Math.random() - 0.5) * 0.2,
-                    (z - gridSize / 2) * spacing + (Math.random() - 0.5) * 0.2
+                    (z - gridSize / 2) * spacing + (Math.random() - 0.5) * 0.2,
                 ]);
                 indexMap[x][y][z] = idx;
                 idx++;
@@ -163,11 +165,11 @@ function createRandomGraph(params?: Record<string, number>): GraphState {
     for (let i = 0; i < numVertices; i++) {
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
-        const r = Math.pow(Math.random(), 1/3) * 2; // Uniform in volume
+        const r = Math.pow(Math.random(), 1 / 3) * 2; // Uniform in volume
         vertices.push([
             r * Math.sin(phi) * Math.cos(theta),
             r * Math.sin(phi) * Math.sin(theta),
-            r * Math.cos(phi)
+            r * Math.cos(phi),
         ]);
     }
 
@@ -206,7 +208,7 @@ function createRandomChain(params?: Record<string, number>): GraphState {
         const dir: Vec3 = [
             (Math.random() - 0.5) * 0.5,
             (Math.random() - 0.5) * 0.5,
-            (Math.random() - 0.5) * 0.5
+            (Math.random() - 0.5) * 0.5,
         ];
         pos = [pos[0] + dir[0], pos[1] + dir[1], pos[2] + dir[2]];
         vertices.push([...pos]);
@@ -237,27 +239,27 @@ export const testConfigs: TestConfig[] = [
     {
         id: 'crossing',
         name: 'Crossing Lines',
-        generate: createCrossingLines
+        generate: createCrossingLines,
     },
     {
         id: 'helix',
         name: 'Helix Spiral',
-        generate: createHelix
+        generate: createHelix,
     },
     {
         id: 'linked-rings',
         name: 'Linked Rings',
-        generate: createLinkedRings
+        generate: createLinkedRings,
     },
     {
         id: 'knot',
         name: 'Trefoil Knot',
-        generate: createKnot
+        generate: createKnot,
     },
     {
         id: 'stress',
         name: 'Stress Test (200 vertices)',
-        generate: createStressTest
+        generate: createStressTest,
     },
     {
         id: 'random',
@@ -265,15 +267,13 @@ export const testConfigs: TestConfig[] = [
         generate: createRandomGraph,
         params: [
             { name: 'vertices', min: 5, max: 500, default: 30 },
-            { name: 'edges', min: 5, max: 1000, default: 50 }
-        ]
+            { name: 'edges', min: 5, max: 1000, default: 50 },
+        ],
     },
     {
         id: 'chain',
         name: 'Random Chain (configurable)',
         generate: createRandomChain,
-        params: [
-            { name: 'vertices', min: 5, max: 500, default: 50 }
-        ]
-    }
+        params: [{ name: 'vertices', min: 5, max: 500, default: 50 }],
+    },
 ];

@@ -1,4 +1,4 @@
-import type { Vec3 } from './testConfigs';
+import type { Vec3 } from './core/testConfigs';
 
 // 3D rotation (returns rotated point).
 // Orbit model: rotationY = azimuth (yaw about world +Y), rotationX = pitch. This

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { Vec3 } from '../src/testConfigs';
+import type { Vec3 } from '../src/core/testConfigs';
 import { projectArrow } from '../src/viewRotation';
 
 // Regression tests for gradient-arrow rendering. Two distinct bugs are covered:

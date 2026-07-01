@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { Vec3 } from '../src/testConfigs';
+import type { Vec3 } from '../src/core/testConfigs';
 import { clampPolar, POLAR_LIMIT, project } from '../src/viewRotation';
 
 // Regression test for the "dragging in 3D is unintuitive / vertical drag reverses

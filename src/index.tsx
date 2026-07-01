@@ -7,8 +7,8 @@ import {
     gradientAnalytical,
     gradientFiniteDiff,
     norm,
-} from './tangentPointEnergy';
-import { type GraphState, testConfigs, type Vec3 } from './testConfigs';
+} from './core/tangentPointEnergy';
+import { type GraphState, testConfigs, type Vec3 } from './core/testConfigs';
 import { clampPolar, project, projectArrow } from './viewRotation';
 
 // LocalStorage keys
