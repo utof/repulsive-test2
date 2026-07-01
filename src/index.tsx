@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type React from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
     calculateDisjointPairs,
@@ -8,6 +9,7 @@ import {
     norm,
 } from './tangentPointEnergy';
 import { type GraphState, testConfigs, type Vec3 } from './testConfigs';
+import { clampPolar, project, projectDirection } from './viewRotation';
 
 // LocalStorage keys
 const STORAGE_KEY = 'repulsive-test-config';
@@ -24,61 +26,9 @@ function saveConfig(testId: string, params: Record<string, number>) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ testId, params }));
 }
 
-// 3D rotation (returns rotated point)
-function rotate3D(point: Vec3, rotationY: number, rotationX: number): Vec3 {
-    const [x, y, z] = point;
-
-    // Rotate around Y
-    const cosY = Math.cos(rotationY);
-    const sinY = Math.sin(rotationY);
-    const x1 = x * cosY - z * sinY;
-    const z1 = x * sinY + z * cosY;
-
-    // Rotate around X
-    const cosX = Math.cos(rotationX);
-    const sinX = Math.sin(rotationX);
-    const y1 = y * cosX - z1 * sinX;
-    const z2 = y * sinX + z1 * cosX;
-
-    return [x1, y1, z2];
-}
-
-// 3D projection
-function project(
-    point: Vec3,
-    width: number,
-    height: number,
-    rotationY: number,
-    rotationX: number,
-    zoom: number = 1,
-): [number, number] {
-    const [x1, y1, z2] = rotate3D(point, rotationY, rotationX);
-
-    // Simple perspective
-    const fov = 3;
-    const s = fov / (fov + z2 + 3);
-    const screenX = width / 2 + x1 * s * 150 * zoom;
-    const screenY = height / 2 - y1 * s * 150 * zoom;
-
-    return [screenX, screenY];
-}
-
-// Project a direction vector from a point (for arrows)
-// Returns screen-space direction that's consistent regardless of view
-function projectDirection(
-    origin: Vec3,
-    direction: Vec3,
-    rotationY: number,
-    rotationX: number,
-): [number, number] {
-    // Rotate the direction vector (not a point, so no translation)
-    const rotated = rotate3D(direction, rotationY, rotationX);
-    // For screen space: x goes right, y goes down (but we flip y in project)
-    // So direction in screen space is (rotated.x, -rotated.y)
-    const len = Math.sqrt(rotated[0] * rotated[0] + rotated[1] * rotated[1]);
-    if (len < 1e-10) return [0, 0];
-    return [rotated[0] / len, -rotated[1] / len];
-}
+// View math (rotate3D / project / projectDirection) and the OrbitControls-style
+// pitch clamp live in ./viewRotation so they are unit-testable and easy to swap
+// for react-three-fiber later. @see src/viewRotation.ts
 
 // Logarithmic scaling for arrow length
 function logScale(magnitude: number): number {
@@ -367,7 +317,9 @@ function App() {
         const dx = e.clientX - lastPos.current.x;
         const dy = e.clientY - lastPos.current.y;
         setRotationY((r) => r + dx * 0.01);
-        setRotationX((r) => r + dy * 0.01);
+        // Clamp pitch to OrbitControls' polar range so the view can't tip
+        // upside-down and silently reverse the vertical drag. @see src/viewRotation.ts (clampPolar)
+        setRotationX((r) => clampPolar(r + dy * 0.01));
         lastPos.current = { x: e.clientX, y: e.clientY };
     };
 
@@ -516,7 +468,7 @@ function App() {
                         max="-2"
                         step="0.1"
                         value={Math.log10(stepSize)}
-                        onChange={(e) => setStepSize(Math.pow(10, parseFloat(e.target.value)))}
+                        onChange={(e) => setStepSize(10 ** parseFloat(e.target.value))}
                         style={{ width: 100 }}
                     />
                     <span style={{ fontFamily: 'monospace', width: 60 }}>
