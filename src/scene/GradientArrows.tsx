@@ -13,6 +13,10 @@ const ARROW_SCALE = 0.2;
 const MIN_WORLD = 0.08;
 const MAX_WORLD = 1.2;
 const CONE_RADIUS = 0.03;
+// Mirror of Curve.tsx's VERTEX_RADIUS: the cone is offset outward by this + half its length so
+// its base sits on the sphere surface and it points away from the vertex (instead of the cone
+// centre coinciding with the vertex and half the cone penetrating the sphere). Keep in sync.
+const VERTEX_RADIUS = 0.06;
 
 const UP = new THREE.Vector3(0, 1, 0);
 const tmp = new THREE.Object3D();
@@ -77,7 +81,15 @@ export function GradientArrows() {
         for (let i = 0; i < arrows.length; i++) {
             const a = arrows[i];
             dirVec.set(a.dir[0], a.dir[1], a.dir[2]);
-            tmp.position.set(a.pos[0], a.pos[1], a.pos[2]);
+            // coneGeometry is centred on its origin (height along local Y ∈ [-len/2, len/2]);
+            // push it out by sphere radius + half length so the base rests on the sphere surface
+            // and the cone extends outward along −gradient rather than straddling the vertex.
+            const off = VERTEX_RADIUS + a.len / 2;
+            tmp.position.set(
+                a.pos[0] + a.dir[0] * off,
+                a.pos[1] + a.dir[1] * off,
+                a.pos[2] + a.dir[2] * off,
+            );
             tmp.quaternion.setFromUnitVectors(UP, dirVec);
             tmp.scale.set(1, a.len, 1);
             tmp.updateMatrix();
