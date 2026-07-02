@@ -1,5 +1,5 @@
 import { testConfigs } from '../core/testConfigs';
-import { type Mode, useSimStore } from '../store';
+import { type DescentMode, type Mode, useSimStore } from '../store';
 
 const btn = (bg: string) => ({
     padding: '10px 20px',
@@ -16,12 +16,14 @@ export function ControlPanel() {
     const testParams = useSimStore((s) => s.testParams);
     const running = useSimStore((s) => s.running);
     const mode = useSimStore((s) => s.mode);
+    const descentMode = useSimStore((s) => s.descentMode);
     const stepSize = useSimStore((s) => s.stepSize);
     const setPreset = useSimStore((s) => s.setPreset);
     const setParam = useSimStore((s) => s.setParam);
     const regenerate = useSimStore((s) => s.regenerate);
     const reset = useSimStore((s) => s.reset);
     const setMode = useSimStore((s) => s.setMode);
+    const setDescentMode = useSimStore((s) => s.setDescentMode);
     const setStepSize = useSimStore((s) => s.setStepSize);
     const setRunning = useSimStore((s) => s.setRunning);
 
@@ -98,6 +100,20 @@ export function ControlPanel() {
                 <button type="button" onClick={reset} style={btn('#666')}>
                     Reset
                 </button>
+                {/* A/B toggle between the untouched raw descent and the constrained Sobolev
+                    flow — the point is comparing raw τ≈1e-5 vs Sobolev τ≈1 side by side.
+                    @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Descent:</span>
+                    <select
+                        value={descentMode}
+                        onChange={(e) => setDescentMode(e.target.value as DescentMode)}
+                        style={{ padding: 8, fontSize: 14 }}
+                    >
+                        <option value="raw">Raw L²</option>
+                        <option value="sobolev">Sobolev</option>
+                    </select>
+                </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span>Mode:</span>
                     <select

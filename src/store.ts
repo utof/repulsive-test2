@@ -1,7 +1,14 @@
 import { create } from 'zustand';
-import { DEFAULTS } from './core/optimizer';
+import { DEFAULTS, type SobolevStepStats, sobolevStep, step } from './core/optimizer';
+import { barycenterTarget } from './core/sobolev/constraints';
 import { calculateDisjointPairs, calculateEnergy } from './core/tangentPointEnergy';
-import { type GraphState, type TestConfig, testConfigs, type Vec3 } from './core/testConfigs';
+import {
+    type Edge,
+    type GraphState,
+    type TestConfig,
+    testConfigs,
+    type Vec3,
+} from './core/testConfigs';
 
 const STORAGE_KEY = 'repulsive-test-config';
 
@@ -58,13 +65,92 @@ function cloneVerts(v: Vec3[]): Vec3[] {
 
 export type Mode = 'analytical' | 'finiteDiff';
 
+/**
+ * Which descent drives the frame loop. 'raw' is the original fixed-step L²
+ * gradient descent (τ ≈ 1e-5 scale) and must stay byte-identical — the whole
+ * point of the toggle is an A/B comparison against 'sobolev', the constrained
+ * fractional Sobolev descent (τ ≈ 1 scale).
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
+ */
+export type DescentMode = 'raw' | 'sobolev';
+
+/**
+ * Result of {@link dispatchDescentStep}: the union shape of the two steppers.
+ * The raw path always reports `accepted: true, converged: false, stats: null`
+ * (it has no line search, no termination test, no saddle solve).
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (steps 5, 10)
+ */
+export interface DescentStepOutcome {
+    vertices: Vec3[];
+    energy: number;
+    accepted: boolean;
+    converged: boolean;
+    stats: SobolevStepStats | null;
+}
+
+/**
+ * The descent-mode dispatch, pure and store-independent so it is testable the
+ * same way as {@link buildGraphState}: 'sobolev' → `sobolevStep` (frozen-x0
+ * constrained Sobolev flow), 'raw' → the pre-existing `step()` with the exact
+ * arguments the frame loop always passed — the raw path must remain
+ * byte-identical when the toggle is 'raw'.
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
+ */
+export function dispatchDescentStep(args: {
+    descentMode: DescentMode;
+    vertices: Vec3[];
+    edges: Edge[];
+    disjointPairs: number[][];
+    mode: Mode;
+    stepSize: number;
+    x0: Vec3;
+}): DescentStepOutcome {
+    if (args.descentMode === 'sobolev') {
+        const r = sobolevStep(args.vertices, args.edges, args.disjointPairs, args.x0, {
+            mode: args.mode,
+        });
+        return {
+            vertices: r.vertices,
+            energy: r.energy,
+            accepted: r.accepted,
+            converged: r.converged,
+            stats: r.stats,
+        };
+    }
+    const r = step(args.vertices, args.edges, args.disjointPairs, {
+        mode: args.mode,
+        stepSize: args.stepSize,
+    });
+    return {
+        vertices: r.vertices,
+        energy: r.energy,
+        accepted: true,
+        converged: false,
+        stats: null,
+    };
+}
+
 export interface SimStore {
     // config (React-subscribed, infrequent)
     selectedTestId: string;
     testParams: Record<string, number>;
     mode: Mode;
     stepSize: number;
+    descentMode: DescentMode;
     running: boolean;
+    // FROZEN barycenter constraint target for the sobolev descent. Lifecycle
+    // (anchor — do not "fix" by recomputing per frame): recomputed via
+    // barycenterTarget ONCE each time a descent run (re)starts — on play after
+    // pause (setRunning(true)), on preset/config change (rebuild), on vertex
+    // commit (setRunning(false)) — and NEVER during a run; a target that tracks
+    // the current iterate makes the constraint vacuous.
+    // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("set x₀ once at initialization")
+    // @see src/core/sobolev/constraints.ts (barycenterTarget TSDoc)
+    sobolevX0: Vec3;
+    // Last sobolev step's diagnostics (null before any sobolev step and in raw
+    // mode); `sobolevConverged` mirrors spec §C step 5's termination outcome.
+    sobolevStats: SobolevStepStats | null;
+    sobolevConverged: boolean;
     // graph
     graph: GraphState;
     disjointPairs: number[][];
@@ -84,6 +170,7 @@ export interface SimStore {
     reset(): void;
     setMode(m: Mode): void;
     setStepSize(s: number): void;
+    setDescentMode(m: DescentMode): void;
     setRunning(b: boolean): void;
     setZoom(z: number): void;
 }
@@ -121,6 +208,11 @@ export const useSimStore = create<SimStore>()((set, get) => {
             energy: b.energy,
             running: false,
             graphVersion: s.graphVersion + 1,
+            // Preset/config change = a run (re)start boundary → re-anchor the
+            // frozen x₀ (see the sobolevX0 lifecycle anchor above).
+            sobolevX0: barycenterTarget(b.graph.vertices, b.graph.edges),
+            sobolevStats: null,
+            sobolevConverged: false,
         }));
         saveConfig(id, nextParams);
     };
@@ -130,12 +222,16 @@ export const useSimStore = create<SimStore>()((set, get) => {
         testParams: params,
         mode: 'analytical',
         stepSize: 0.001,
+        descentMode: 'raw',
         running: false,
         graph: built.graph,
         disjointPairs: built.disjointPairs,
         live: cloneVerts(built.graph.vertices),
         step: 0,
         energy: built.energy,
+        sobolevX0: barycenterTarget(built.graph.vertices, built.graph.edges),
+        sobolevStats: null,
+        sobolevConverged: false,
         zoom: 1,
         graphVersion: 0,
         viewResetNonce: 0,
@@ -156,9 +252,21 @@ export const useSimStore = create<SimStore>()((set, get) => {
         },
         setMode: (m) => set({ mode: m }),
         setStepSize: (s) => set({ stepSize: s }),
+        // Mode switch clears the other mode's stale diagnostics; x₀ needs no
+        // recompute here — it re-anchors at the next run start (see lifecycle anchor).
+        setDescentMode: (m) => set({ descentMode: m, sobolevStats: null, sobolevConverged: false }),
         setRunning: (b) => {
             if (b) {
-                set({ running: true });
+                // Play = a run (re)starts → re-anchor the frozen x₀ from the CURRENT
+                // live positions and clear last run's diagnostics (see the sobolevX0
+                // lifecycle anchor). The frame loop must never touch sobolevX0.
+                const s = get();
+                set({
+                    running: true,
+                    sobolevX0: barycenterTarget(s.live, s.graph.edges),
+                    sobolevStats: null,
+                    sobolevConverged: false,
+                });
                 return;
             }
             // Commit-on-pause: fold the live buffer back into graph.vertices so paused
@@ -176,6 +284,10 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     DEFAULTS.beta,
                     DEFAULTS.epsilon,
                 ),
+                // Vertex commit = the next run will start from these positions →
+                // re-anchor x₀ now (sobolevX0 lifecycle anchor). Diagnostics are
+                // deliberately KEPT: on auto-pause they tell the user why it stopped.
+                sobolevX0: barycenterTarget(s.live, s.graph.edges),
             });
         },
         setZoom: (z) => set({ zoom: z }),

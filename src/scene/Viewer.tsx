@@ -14,8 +14,7 @@ import { useEffect, useRef } from 'react';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
 import * as THREE from 'three/webgpu';
-import { step as descentStep } from '../core/optimizer';
-import { useSimStore } from '../store';
+import { dispatchDescentStep, useSimStore } from '../store';
 import { Curve } from './Curve';
 import { GradientArrows } from './GradientArrows';
 
@@ -56,26 +55,55 @@ function Simulation() {
         const st = useSimStore.getState();
 
         if (st.running) {
-            const { vertices, energy } = descentStep(st.live, st.graph.edges, st.disjointPairs, {
+            // ONE descent step per frame at most — a sobolev step is dense assembly +
+            // O(|V|³) saddle solves (several per line-search trial), sized for the
+            // stage-1 budget of |V| ≤ ~300; stacking multiple per frame would stall
+            // the render loop with no visual benefit.
+            // @see local_files/sobolev-gradient-handoff.md ("our targets are |V| ≤ ~300, interactive rates")
+            const result = dispatchDescentStep({
+                descentMode: st.descentMode,
+                vertices: st.live,
+                edges: st.graph.edges,
+                disjointPairs: st.disjointPairs,
                 mode: st.mode,
                 stepSize: st.stepSize,
+                x0: st.sobolevX0,
             });
-            // Copy-then-discard: optimizer.step() is pure by design and returns a fresh
-            // Vec3[] each frame; we mutate the existing live tuples in place (preserving their
-            // identity for Curve's non-reactive buffer) and drop `vertices`. Revisit only if N
-            // grows enough that the per-frame alloc matters (scratch-buffer optimizer). @see spec §5.
-            for (let i = 0; i < st.live.length; i++) {
-                const v = vertices[i];
-                const l = st.live[i];
-                l[0] = v[0];
-                l[1] = v[1];
-                l[2] = v[2];
-            }
-            iters.current += 1;
-            statAcc.current += delta;
-            if (statAcc.current > 0.1) {
-                statAcc.current = 0;
-                useSimStore.setState({ step: iters.current, energy });
+            if (result.accepted) {
+                // Copy-then-discard: both steppers are pure by design and return a fresh
+                // Vec3[] each frame; we mutate the existing live tuples in place (preserving their
+                // identity for Curve's non-reactive buffer) and drop `vertices`. Revisit only if N
+                // grows enough that the per-frame alloc matters (scratch-buffer optimizer). @see spec §5.
+                for (let i = 0; i < st.live.length; i++) {
+                    const v = result.vertices[i];
+                    const l = st.live[i];
+                    l[0] = v[0];
+                    l[1] = v[1];
+                    l[2] = v[2];
+                }
+                iters.current += 1;
+                statAcc.current += delta;
+                if (statAcc.current > 0.1) {
+                    statAcc.current = 0;
+                    useSimStore.setState({
+                        step: iters.current,
+                        energy: result.energy,
+                        sobolevStats: result.stats,
+                    });
+                }
+            } else {
+                // Sobolev converged (spec §C step 5) or rejected the step (spec §C
+                // step 10: leave vertices unchanged, report — never throw): auto-pause
+                // instead of spinning on rejected steps. Publish the diagnostics
+                // un-throttled first; setRunning(false) commits live positions and
+                // deliberately preserves them (see store).
+                // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (steps 5, 10)
+                useSimStore.setState({
+                    step: iters.current,
+                    sobolevStats: result.stats,
+                    sobolevConverged: result.converged,
+                });
+                st.setRunning(false);
             }
         } else {
             // keep the iteration counter in sync with a rebuilt/committed state
