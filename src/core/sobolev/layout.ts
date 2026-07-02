@@ -56,3 +56,27 @@ export function unflatten(flat: number[]): Vec3[] {
 export function blockIndex(coord: number, vertex: number, n: number): number {
     return coord * n + vertex;
 }
+
+/**
+ * Expands the |V|×|V| scalar Sobolev inner-product matrix A into the 3|V|×3|V| vector-valued
+ * block-diagonal operator `Ā = diag(A, A, A)`, consistent with the coordinate-block layout of
+ * {@link flatten}/{@link unflatten} (x-block, then y-block, then z-block).
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("expanded to vector-valued functions by Ā = ...")
+ * @see oracle/tpe_stage1_oracle.py (expand_vector_inner_product)
+ */
+export function expandBlockDiag(A: number[][]): number[][] {
+    const n = A.length;
+    const size = 3 * n;
+    const out: number[][] = Array.from({ length: size }, () => new Array<number>(size).fill(0));
+    // Three coordinate blocks on the diagonal, zero elsewhere — off-diagonal blocks are left as
+    // the zero-fill above; only the diagonal blocks are written.
+    for (let block = 0; block < 3; block++) {
+        const offset = block * n;
+        for (let i = 0; i < n; i++) {
+            for (let j = 0; j < n; j++) {
+                out[offset + i][offset + j] = A[i][j];
+            }
+        }
+    }
+    return out;
+}
