@@ -1,6 +1,18 @@
 import { OrbitControls } from '@react-three/drei';
-import { Canvas, extend, type ThreeToJSXElements, useFrame } from '@react-three/fiber';
+import {
+    Canvas,
+    extend,
+    type ThreeElement,
+    type ThreeToJSXElements,
+    useFrame,
+} from '@react-three/fiber';
 import { useEffect, useRef } from 'react';
+// Task 10 (fat WebGPU edges): these live in three's addons tree, not the `three/webgpu`
+// namespace, so `extend(THREE as any)` below doesn't register them — hence the separate
+// `extend({...})` call. WebGPU-safe variants only (webgpu/LineSegments2, not the WebGL-only
+// examples/jsm/lines/LineSegments2). @see docs/superpowers/specs/2026-07-02-react-three-webgpu-switch-design.md Task 10.
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
 import * as THREE from 'three/webgpu';
 import { step as descentStep } from '../core/optimizer';
 import { useSimStore } from '../store';
@@ -8,11 +20,23 @@ import { Curve } from './Curve';
 import { GradientArrows } from './GradientArrows';
 
 declare module '@react-three/fiber' {
-    interface ThreeElements extends ThreeToJSXElements<typeof THREE> {}
+    // Task 10: LineSegments2/LineSegmentsGeometry live in three/addons, so `ThreeToJSXElements<typeof
+    // THREE>` (which only walks the three/webgpu namespace) doesn't cover the <lineSegments2>/
+    // <lineSegmentsGeometry>/<line2NodeMaterial> intrinsics registered by extend({...}) below —
+    // declare them by hand, mirroring how ThreeToJSXElements derives element props.
+    interface ThreeElements extends ThreeToJSXElements<typeof THREE> {
+        lineSegments2: ThreeElement<typeof LineSegments2>;
+        lineSegmentsGeometry: ThreeElement<typeof LineSegmentsGeometry>;
+        line2NodeMaterial: ThreeElement<typeof THREE.Line2NodeMaterial>;
+    }
 }
 // `as any`: registering the whole three/webgpu namespace as R3F intrinsics; the cast is the
 // spec-sanctioned bridge for the NodeMaterial/WebGPU classes under strict. @see spec §6.
 extend(THREE as any);
+// Task 10: register the fat-line classes as R3F intrinsics (<lineSegments2>, <lineSegmentsGeometry>,
+// <line2NodeMaterial>). Line2NodeMaterial ships in the three/webgpu namespace (already imported
+// as THREE.*), unlike LineSegments2/LineSegmentsGeometry which live in three/addons.
+extend({ LineSegments2, LineSegmentsGeometry, Line2NodeMaterial: THREE.Line2NodeMaterial });
 
 const CAMERA_POS: [number, number, number] = [3, 3, 3];
 // zoom is reported as a ratio normalized to the starting camera distance (zoom=1 at spawn);

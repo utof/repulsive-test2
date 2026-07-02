@@ -1,5 +1,8 @@
 import { useFrame } from '@react-three/fiber';
 import { useMemo, useRef } from 'react';
+// Task 10 (fat WebGPU edges): fat-line geometry lives in three/addons, not the `three/webgpu`
+// namespace. @see docs/superpowers/specs/2026-07-02-react-three-webgpu-switch-design.md Task 10.
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import * as THREE from 'three/webgpu';
 import { useSimStore } from '../store';
 
@@ -13,14 +16,9 @@ export function Curve() {
     const edges = useSimStore((s) => s.graph.edges);
     const count = useSimStore((s) => s.graph.vertices.length);
 
-    const lineGeom = useMemo(() => {
-        const g = new THREE.BufferGeometry();
-        g.setAttribute(
-            'position',
-            new THREE.BufferAttribute(new Float32Array(edges.length * 2 * 3), 3),
-        );
-        return g;
-    }, [edges]);
+    // Task 10: LineSegmentsGeometry (fat lines) instead of plain BufferGeometry — positions are
+    // written via setPositions() below rather than a raw 'position' BufferAttribute.
+    const lineGeom = useMemo(() => new LineSegmentsGeometry(), [edges]);
 
     const meshRef = useRef<THREE.InstancedMesh>(null);
 
@@ -32,20 +30,23 @@ export function Curve() {
         // that keying if you add async/debounced rebuilds, else these reads go out of bounds.
         const live = useSimStore.getState().live;
 
-        const pos = lineGeom.getAttribute('position') as THREE.BufferAttribute;
-        const arr = pos.array as Float32Array;
+        // Task 10: LineSegmentsGeometry.setPositions() wants a fresh flat array (it re-derives
+        // instanceStart/instanceEnd interleaved attributes from it internally) — this per-frame
+        // allocation is a deliberate, plan-accepted cost of the fat-line path, not a Task 7-style
+        // regression of the old in-place BufferAttribute write.
+        const flat = new Float32Array(edges.length * 6);
         for (let e = 0; e < edges.length; e++) {
             const [a, b] = edges[e];
             const va = live[a];
             const vb = live[b];
-            arr[e * 6 + 0] = va[0];
-            arr[e * 6 + 1] = va[1];
-            arr[e * 6 + 2] = va[2];
-            arr[e * 6 + 3] = vb[0];
-            arr[e * 6 + 4] = vb[1];
-            arr[e * 6 + 5] = vb[2];
+            flat[e * 6 + 0] = va[0];
+            flat[e * 6 + 1] = va[1];
+            flat[e * 6 + 2] = va[2];
+            flat[e * 6 + 3] = vb[0];
+            flat[e * 6 + 4] = vb[1];
+            flat[e * 6 + 5] = vb[2];
         }
-        pos.needsUpdate = true;
+        lineGeom.setPositions(flat);
 
         const mesh = meshRef.current;
         if (mesh) {
@@ -60,9 +61,12 @@ export function Curve() {
 
     return (
         <group>
-            <lineSegments geometry={lineGeom}>
-                <lineBasicNodeMaterial color="#4a9eff" />
-            </lineSegments>
+            {/* Task 10: fat WebGPU line (parity with the old lineWidth:3) — WebGPU-safe
+                LineSegments2/Line2NodeMaterial (three/addons/lines/webgpu/*), not the WebGL-only
+                examples/jsm/lines/LineSegments2 or drei's <Line>. */}
+            <lineSegments2 args={[lineGeom]}>
+                <line2NodeMaterial color="#4a9eff" linewidth={3} worldUnits={false} />
+            </lineSegments2>
             <instancedMesh ref={meshRef} args={[undefined, undefined, count]}>
                 <sphereGeometry args={[VERTEX_RADIUS, 16, 16]} />
                 <meshStandardNodeMaterial color="#ff6b6b" />
