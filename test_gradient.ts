@@ -9,8 +9,8 @@ import {
     calculateDisjointPairs,
     calculateEnergy,
     gradientAnalytical,
-} from './src/tangentPointEnergy';
-import type { Edge, Vec3 } from './src/testConfigs';
+} from './src/core/tangentPointEnergy';
+import type { Edge, Vec3 } from './src/core/testConfigs';
 
 /**
  * Calculate gradient using CENTRAL finite differences, NOT forward.

@@ -1,8 +1,8 @@
 /**
  * Tangent-point (repulsive-curves) energy and its analytical gradient.
  *
- * SINGLE SOURCE OF TRUTH — imported by src/index.tsx (the app) and test_gradient.ts
- * (which verifies gradientAnalytical against central finite differences).
+ * SINGLE SOURCE OF TRUTH — imported by src/core/optimizer.ts, src/store.ts, and
+ * test_gradient.ts (which verifies gradientAnalytical against central finite differences).
  * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md
  *
  * PERF: the vector helpers are inlined to x/y/z scalars to avoid per-edge-pair array

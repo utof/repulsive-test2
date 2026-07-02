@@ -1,5 +1,5 @@
-import { calculateDisjointPairs, calculateEnergy } from '../src/tangentPointEnergy';
-import type { Edge, Vec3 } from '../src/testConfigs';
+import { calculateDisjointPairs, calculateEnergy } from '../src/core/tangentPointEnergy';
+import type { Edge, Vec3 } from '../src/core/testConfigs';
 
 // Fixed pseudo-trefoil-ish chain, N points, deterministic (index-based, no Math.random).
 function makeChain(n: number): { vertices: Vec3[]; edges: Edge[] } {
