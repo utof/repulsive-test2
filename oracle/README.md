@@ -21,6 +21,13 @@ formulas + property list: `local_files/2026-07-02-sobolev-gradient-rsrch-results
   degree-3 junction graph) to `fixtures/*.json`.
 - `fixtures/*.json` — oracle inputs `{name, vertices, edges, alpha, beta, epsilon}`.
 - `golden/*.json` — oracle outputs; the diff targets for the TS milestones.
+- `tpe_constraints_oracle.py` — constraints oracle (M1: barycenter + total
+  length) built ON TOP of `tpe_stage1_oracle.py` (imports it; the stage-1
+  script stays read-only). Emits `golden/<fixture>-length.json` and runs its
+  own embedded property checks (FD Jacobian of the stacked C, saddle residual,
+  descent positivity, accepted step, energy decrease, per-block Φ tolerance,
+  length drift ≤ 1e-8). Spec:
+  `docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md` §3.6.
 - `check_properties.py` — §E property checklist run against the goldens
   (symmetry, PSD, constant nullspace, quadratic-form identity via an
   independent direct-sum transcription, saddle residuals, descent positivity,
@@ -41,9 +48,24 @@ done
 bun oracle/compare_energy.ts
 ```
 
+Constraints goldens (M1, total-length constraint — self-checking, no separate
+property script needed):
+
+```bash
+for f in crossing linked-rings; do
+  uv run --with numpy --with scipy python oracle/tpe_constraints_oracle.py \
+    oracle/fixtures/$f.json oracle/golden/$f-length.json
+done
+```
+
 Status (2026-07-02): all property checks and cross-language gates pass on all
 five fixtures; every fixture accepts the full τ=1 line-search step with one
 projection iteration (vs raw-descent τ ≈ 1e-5…1e-2 — the point of the metric).
+
+Status (2026-07-03, constraints M1): `crossing-length.json` and
+`linked-rings-length.json` generated with all embedded property checks green
+on both (τ = 1 accepted, energy decreases, length drift 7.5e-11 / 1.6e-16).
+The five stage-1 goldens are untouched.
 
 Formula audit (2026-07-02): an isolated auditor diffed the results doc against
 verbatim paper excerpts — 11/11 items CONFIRMED, zero mismatches; report at

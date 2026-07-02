@@ -1,5 +1,18 @@
 import { create } from 'zustand';
-import { DEFAULTS, type SobolevStepStats, sobolevStep, step } from './core/optimizer';
+import {
+    DEFAULTS,
+    type SobolevStepStats,
+    sobolevStep,
+    sobolevStepSet,
+    step,
+} from './core/optimizer';
+import {
+    assertValidConstraintSet,
+    barycenterBlock,
+    type ConstraintSet,
+    totalLength,
+    totalLengthBlock,
+} from './core/sobolev/constraintSet';
 import { barycenterTarget } from './core/sobolev/constraints';
 import { calculateDisjointPairs, calculateEnergy } from './core/tangentPointEnergy';
 import {
@@ -90,11 +103,21 @@ export interface DescentStepOutcome {
 
 /**
  * The descent-mode dispatch, pure and store-independent so it is testable the
- * same way as {@link buildGraphState}: 'sobolev' → `sobolevStep` (frozen-x0
- * constrained Sobolev flow), 'raw' → the pre-existing `step()` with the exact
- * arguments the frame loop always passed — the raw path must remain
- * byte-identical when the toggle is 'raw'.
+ * same way as {@link buildGraphState}: 'sobolev' → constrained Sobolev flow
+ * over the ConstraintSet built from the toggle args (barycenter block FIRST
+ * when present — spec §3.2 row order; both-off = the empty set, spec §9a),
+ * 'raw' → the pre-existing `step()` with the exact arguments the frame loop
+ * always passed — the raw path must remain byte-identical when the toggle is
+ * 'raw'.
+ *
+ * The toggle args are OPTIONAL: when BOTH `barycenterConstraint` and
+ * `lengthConstraint` are absent this is a pre-M1 call shape and delegates to
+ * the legacy barycenter-only `sobolevStep(x0)` bit-identically, so
+ * pre-existing call sites and tests are unaffected. An absent individual
+ * toggle defaults to true (the store defaults). `x0` and `sobolevL0` are
+ * FROZEN targets (store lifecycle anchor, spec §3.5) — never recomputed here.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.2, §9a
  */
 export function dispatchDescentStep(args: {
     descentMode: DescentMode;
@@ -104,9 +127,38 @@ export function dispatchDescentStep(args: {
     mode: Mode;
     stepSize: number;
     x0: Vec3;
+    barycenterConstraint?: boolean;
+    lengthConstraint?: boolean;
+    sobolevL0?: number;
 }): DescentStepOutcome {
     if (args.descentMode === 'sobolev') {
-        const r = sobolevStep(args.vertices, args.edges, args.disjointPairs, args.x0, {
+        if (args.barycenterConstraint === undefined && args.lengthConstraint === undefined) {
+            // Pre-M1 call shape: legacy barycenter-only path, bit-identical to
+            // sobolevStep(x0) (spec §4.2 back-compat).
+            const r = sobolevStep(args.vertices, args.edges, args.disjointPairs, args.x0, {
+                mode: args.mode,
+            });
+            return {
+                vertices: r.vertices,
+                energy: r.energy,
+                accepted: r.accepted,
+                converged: r.converged,
+                stats: r.stats,
+            };
+        }
+        const set: ConstraintSet = [];
+        if (args.barycenterConstraint ?? true) set.push(barycenterBlock(args.x0));
+        if (args.lengthConstraint ?? true) {
+            // An enabled length constraint requires its frozen L⁰ (spec §3.5).
+            // NaN backstop if a caller omits it: Φ becomes NaN, projection can
+            // never converge, and the step is REJECTED ('projection_failed')
+            // instead of silently drifting or throwing in the frame loop.
+            set.push(totalLengthBlock(args.sobolevL0 ?? Number.NaN));
+        }
+        // Construction-time rank-rule check (spec §3.4) — validate the set once
+        // here, not per-iterate inside sobolevStepSet.
+        assertValidConstraintSet(set);
+        const r = sobolevStepSet(args.vertices, args.edges, args.disjointPairs, set, {
             mode: args.mode,
         });
         return {
@@ -138,15 +190,28 @@ export interface SimStore {
     stepSize: number;
     descentMode: DescentMode;
     running: boolean;
-    // FROZEN barycenter constraint target for the sobolev descent. Lifecycle
-    // (anchor — do not "fix" by recomputing per frame): recomputed via
-    // barycenterTarget ONCE each time a descent run (re)starts — on play after
+    // FROZEN constraint targets for the sobolev descent: x₀ (barycenter) and
+    // L⁰ (total length). Lifecycle (anchor — do not "fix" by recomputing per
+    // frame): recomputed ONCE each time a descent run (re)starts — on play after
     // pause (setRunning(true)), on preset/config change (rebuild), on vertex
     // commit (setRunning(false)) — and NEVER during a run; a target that tracks
-    // the current iterate makes the constraint vacuous.
+    // the current iterate makes its constraint vacuous.
+    // Accepted consequence (spec §3.5): L⁰ re-anchors to the CURRENT length at
+    // every pause/play boundary, so length is preserved within a run, but
+    // sub-tolerance drift can accumulate across pause cycles.
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("set x₀ once at initialization")
+    // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.5 (frozen-targets lifecycle)
     // @see src/core/sobolev/constraints.ts (barycenterTarget TSDoc)
     sobolevX0: Vec3;
+    sobolevL0: number;
+    // Per-block constraint toggles for the sobolev ConstraintSet, both default
+    // true (barycenter preserves pre-M1 behavior; length gives the flow an
+    // equilibrium so the ‖g̃‖ termination can fire). Setters clear
+    // sobolevConverged ONLY: a converged verdict is per-constraint-set, while
+    // sobolevStats describe the last step actually taken and remain valid.
+    // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.2, §9a
+    barycenterConstraint: boolean;
+    lengthConstraint: boolean;
     // Last sobolev step's diagnostics (null before any sobolev step and in raw
     // mode); `sobolevConverged` mirrors spec §C step 5's termination outcome.
     sobolevStats: SobolevStepStats | null;
@@ -175,6 +240,8 @@ export interface SimStore {
     setMode(m: Mode): void;
     setStepSize(s: number): void;
     setDescentMode(m: DescentMode): void;
+    setBarycenterConstraint(b: boolean): void;
+    setLengthConstraint(b: boolean): void;
     setShowArrows(b: boolean): void;
     setRunning(b: boolean): void;
     setZoom(z: number): void;
@@ -214,8 +281,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
             running: false,
             graphVersion: s.graphVersion + 1,
             // Preset/config change = a run (re)start boundary → re-anchor the
-            // frozen x₀ (see the sobolevX0 lifecycle anchor above).
+            // frozen targets x₀, L⁰ (see the frozen-targets lifecycle anchor above).
             sobolevX0: barycenterTarget(b.graph.vertices, b.graph.edges),
+            sobolevL0: totalLength(b.graph.vertices, b.graph.edges),
             sobolevStats: null,
             sobolevConverged: false,
         }));
@@ -235,6 +303,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
         step: 0,
         energy: built.energy,
         sobolevX0: barycenterTarget(built.graph.vertices, built.graph.edges),
+        sobolevL0: totalLength(built.graph.vertices, built.graph.edges),
+        barycenterConstraint: true,
+        lengthConstraint: true,
         sobolevStats: null,
         sobolevConverged: false,
         showArrows: true,
@@ -261,16 +332,23 @@ export const useSimStore = create<SimStore>()((set, get) => {
         // Mode switch clears the other mode's stale diagnostics; x₀ needs no
         // recompute here — it re-anchors at the next run start (see lifecycle anchor).
         setDescentMode: (m) => set({ descentMode: m, sobolevStats: null, sobolevConverged: false }),
+        // Toggling a constraint invalidates ONLY the converged verdict (it is
+        // per-constraint-set); targets re-anchor at the next run start, and
+        // sobolevStats stay — they describe the last step actually taken.
+        // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.2, §9a
+        setBarycenterConstraint: (b) => set({ barycenterConstraint: b, sobolevConverged: false }),
+        setLengthConstraint: (b) => set({ lengthConstraint: b, sobolevConverged: false }),
         setShowArrows: (b) => set({ showArrows: b }),
         setRunning: (b) => {
             if (b) {
-                // Play = a run (re)starts → re-anchor the frozen x₀ from the CURRENT
-                // live positions and clear last run's diagnostics (see the sobolevX0
-                // lifecycle anchor). The frame loop must never touch sobolevX0.
+                // Play = a run (re)starts → re-anchor the frozen targets x₀, L⁰ from
+                // the CURRENT live positions and clear last run's diagnostics (see the
+                // frozen-targets lifecycle anchor). The frame loop must never touch them.
                 const s = get();
                 set({
                     running: true,
                     sobolevX0: barycenterTarget(s.live, s.graph.edges),
+                    sobolevL0: totalLength(s.live, s.graph.edges),
                     sobolevStats: null,
                     sobolevConverged: false,
                 });
@@ -292,9 +370,10 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     DEFAULTS.epsilon,
                 ),
                 // Vertex commit = the next run will start from these positions →
-                // re-anchor x₀ now (sobolevX0 lifecycle anchor). Diagnostics are
-                // deliberately KEPT: on auto-pause they tell the user why it stopped.
+                // re-anchor x₀, L⁰ now (frozen-targets lifecycle anchor). Diagnostics
+                // are deliberately KEPT: on auto-pause they tell the user why it stopped.
                 sobolevX0: barycenterTarget(s.live, s.graph.edges),
+                sobolevL0: totalLength(s.live, s.graph.edges),
             });
         },
         setZoom: (z) => set({ zoom: z }),

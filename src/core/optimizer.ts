@@ -1,5 +1,6 @@
-import { solveConstrainedGradient } from './sobolev/gradient';
-import { type LineSearchFailureReason, l2CurveNorm, lineSearchStep } from './sobolev/lineSearch';
+import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
+import { solveConstrainedGradientSet } from './sobolev/gradient';
+import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
 import { calculateEnergy, gradientAnalytical, gradientFiniteDiff } from './tangentPointEnergy';
 import type { Edge, Vec3 } from './testConfigs';
 
@@ -99,8 +100,10 @@ export interface SobolevStepStats {
 
 /**
  * One step of the constrained fractional Sobolev descent (Repulsive Curves,
- * Yu/Schumacher/Crane 2021), spec §C: dE → constrained saddle solve for g̃ →
- * termination check → backtracking line search with barycenter projection.
+ * Yu/Schumacher/Crane 2021), spec §C, generic over a stacked
+ * {@link ConstraintSet} (spec §3.1; the EMPTY set = unconstrained Sobolev
+ * flow, spec §9a): dE → constrained saddle solve for g̃ → termination check →
+ * backtracking line search with constraint-set projection.
  * Pure like {@link step}: returns NEW arrays, never mutates inputs.
  *
  * Outcomes:
@@ -111,17 +114,22 @@ export interface SobolevStepStats {
  *   never throw.
  * - accepted: projected new vertices and their energy.
  *
- * `x0` is the FROZEN barycenter target (computed once per run start via
- * `barycenterTarget`, never from the current iterate — see the x0 contract on
- * `solveConstrainedGradient`).
+ * The set's TARGETS (x₀, L⁰, …) are FROZEN at block construction (once per
+ * run start, spec §3.5) — pass the same set every step; never rebuild blocks
+ * from the current iterate. Programmatic composition should be validated once
+ * with `assertValidConstraintSet` at construction time (spec §3.4) — this
+ * function deliberately does NOT validate per step, because it runs in the
+ * frame loop and must never throw (invalid rank surfaces as the existing
+ * 'singular_system' rejection instead).
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
- * @see oracle/tpe_stage1_oracle.py (solve_constrained_gradient / line_search_step)
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.1, §3.4, §3.5
+ * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set / line_search_step_set)
  */
-export function sobolevStep(
+export function sobolevStepSet(
     vertices: Vec3[],
     edges: Edge[],
     disjointPairs: number[][],
-    x0: Vec3,
+    set: ConstraintSet,
     opts: SobolevStepOptions,
 ): {
     vertices: Vec3[];
@@ -143,7 +151,7 @@ export function sobolevStep(
     let gTilde: Vec3[];
     let residual: number;
     try {
-        ({ gTilde, residual } = solveConstrainedGradient(
+        ({ gTilde, residual } = solveConstrainedGradientSet(
             vertices,
             edges,
             disjointPairs,
@@ -151,7 +159,7 @@ export function sobolevStep(
             beta,
             epsilon,
             dE,
-            x0,
+            set,
         ));
     } catch {
         // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
@@ -184,7 +192,7 @@ export function sobolevStep(
         };
     }
 
-    const result = lineSearchStep(
+    const result = lineSearchStepSet(
         vertices,
         edges,
         disjointPairs,
@@ -193,9 +201,9 @@ export function sobolevStep(
         epsilon,
         dE,
         gTilde,
-        x0,
+        set,
     );
-    // On failure lineSearchStep already echoes the input vertices unchanged and
+    // On failure lineSearchStepSet already echoes the input vertices unchanged and
     // reports energyAfter = energyBefore — spec §C step 10 semantics pass through.
     return {
         vertices: result.vertices,
@@ -210,4 +218,33 @@ export function sobolevStep(
             ...(result.reason !== undefined ? { reason: result.reason } : {}),
         },
     };
+}
+
+/**
+ * Back-compat x₀ signature: delegates to {@link sobolevStepSet} with the
+ * barycenter-only set `[barycenterBlock(x0)]` — numerically bit-identical to
+ * the pre-ConstraintSet implementation (regression-proven by the unmodified
+ * stage-1 golden tests plus the back-compat bit-identity test, spec §3.2).
+ *
+ * `x0` is the FROZEN barycenter target (computed once per run start via
+ * `barycenterTarget`, never from the current iterate — see the x0 contract on
+ * `solveConstrainedGradient`).
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.2
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
+ * @see oracle/tpe_stage1_oracle.py (solve_constrained_gradient / line_search_step)
+ */
+export function sobolevStep(
+    vertices: Vec3[],
+    edges: Edge[],
+    disjointPairs: number[][],
+    x0: Vec3,
+    opts: SobolevStepOptions,
+): {
+    vertices: Vec3[];
+    energy: number;
+    accepted: boolean;
+    converged: boolean;
+    stats: SobolevStepStats;
+} {
+    return sobolevStepSet(vertices, edges, disjointPairs, [barycenterBlock(x0)], opts);
 }

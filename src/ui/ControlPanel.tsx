@@ -25,6 +25,10 @@ export function ControlPanel() {
     const setMode = useSimStore((s) => s.setMode);
     const setDescentMode = useSimStore((s) => s.setDescentMode);
     const setStepSize = useSimStore((s) => s.setStepSize);
+    const barycenterConstraint = useSimStore((s) => s.barycenterConstraint);
+    const lengthConstraint = useSimStore((s) => s.lengthConstraint);
+    const setBarycenterConstraint = useSimStore((s) => s.setBarycenterConstraint);
+    const setLengthConstraint = useSimStore((s) => s.setLengthConstraint);
     const showArrows = useSimStore((s) => s.showArrows);
     const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
@@ -115,6 +119,42 @@ export function ControlPanel() {
                         <option value="raw">Raw L²</option>
                         <option value="sobolev">Sobolev</option>
                     </select>
+                </label>
+                {/* Per-constraint-block toggles for the sobolev ConstraintSet (one
+                    checkbox per block). Sobolev-only: disabled (not hidden) in raw
+                    mode — the raw path takes no constraints and stays byte-identical.
+                    @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.3, §9a */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={barycenterConstraint}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setBarycenterConstraint(e.target.checked)}
+                    />
+                    <span>Barycenter</span>
+                </label>
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={lengthConstraint}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setLengthConstraint(e.target.checked)}
+                    />
+                    <span>Fix length</span>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span>Mode:</span>
