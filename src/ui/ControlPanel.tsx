@@ -25,6 +25,8 @@ export function ControlPanel() {
     const setMode = useSimStore((s) => s.setMode);
     const setDescentMode = useSimStore((s) => s.setDescentMode);
     const setStepSize = useSimStore((s) => s.setStepSize);
+    const showArrows = useSimStore((s) => s.showArrows);
+    const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
 
     const selectedTest = testConfigs.find((t) => t.id === selectedTestId) ?? testConfigs[0];
@@ -139,6 +141,16 @@ export function ControlPanel() {
                     <span style={{ fontFamily: 'monospace', width: 60 }}>
                         {stepSize.toExponential(0)}
                     </span>
+                </label>
+                {/* Descent-direction arrows toggle — visible in BOTH paused and running
+                    states (see GradientArrows), not just on pause. */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <input
+                        type="checkbox"
+                        checked={showArrows}
+                        onChange={(e) => setShowArrows(e.target.checked)}
+                    />
+                    <span>Arrows</span>
                 </label>
             </div>
         </>

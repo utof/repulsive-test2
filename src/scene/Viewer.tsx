@@ -167,8 +167,12 @@ export function Viewer() {
             <ambientLight intensity={0.8} />
             <directionalLight position={[5, 5, 5]} intensity={0.6} />
             <OrbitControls ref={controls} minPolarAngle={0} maxPolarAngle={Math.PI} />
-            <Curve key={graphVersion} />
-            <GradientArrows key={graphVersion} />
+            {/* Distinct key PREFIXES: both siblings previously shared the bare
+                graphVersion key, and duplicate keys among siblings are undefined
+                reconciler behavior in React ("children may be duplicated and/or
+                omitted") — stale meshes could linger across preset regenerations. */}
+            <Curve key={`curve-${graphVersion}`} />
+            <GradientArrows key={`arrows-${graphVersion}`} />
             <Simulation />
         </Canvas>
     );

@@ -80,6 +80,30 @@ test('sobolevStep: rejected/converged outcomes echo the input vertices unchanged
     expect(r.vertices).not.toBe(vertices);
 });
 
+test('sobolevStep: singular saddle system (isolated vertex) → rejected step with reason, never a throw', () => {
+    const { vertices, edges, alpha, beta, epsilon } = loadFixture('crossing');
+    // An isolated vertex contributes zero rows to Ā and zero columns to C —
+    // the saddle matrix is exactly singular and luSolve throws. sobolevStep
+    // must convert that into the spec §C step 10 contract: reject, echo the
+    // input vertices, report — the frame loop must never see an exception.
+    // @see src/core/sobolev/linsolve.ts (luSolve singularity throw)
+    const withIsolated: Vec3[] = [...vertices.map((v) => [v[0], v[1], v[2]] as Vec3), [5, 5, 5]];
+    const disjointPairs = calculateDisjointPairs(edges);
+    const x0 = barycenterTarget(withIsolated, edges);
+
+    const r = sobolevStep(withIsolated, edges, disjointPairs, x0, {
+        mode: 'analytical',
+        alpha,
+        beta,
+        epsilon,
+    });
+    expect(r.accepted).toBe(false);
+    expect(r.converged).toBe(false);
+    expect(r.stats.reason).toBe('singular_system');
+    expect(r.stats.tau).toBe(0);
+    expect(r.vertices).toEqual(withIsolated);
+});
+
 // ── store-level mode dispatch ─────────────────────────────────────────────────
 
 test('dispatchDescentStep: raw mode matches step() output exactly on the same input', () => {
@@ -144,6 +168,14 @@ test('store: descentMode defaults to raw; setDescentMode toggles and clears stal
     expect(useSimStore.getState().sobolevConverged).toBe(false);
     useSimStore.getState().setDescentMode('raw');
     expect(useSimStore.getState().descentMode).toBe('raw');
+});
+
+test('store: showArrows defaults to true; setShowArrows toggles', () => {
+    expect(useSimStore.getState().showArrows).toBe(true);
+    useSimStore.getState().setShowArrows(false);
+    expect(useSimStore.getState().showArrows).toBe(false);
+    useSimStore.getState().setShowArrows(true);
+    expect(useSimStore.getState().showArrows).toBe(true);
 });
 
 test('store: x0 re-anchors on play and on commit, from the live positions', () => {

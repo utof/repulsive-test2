@@ -165,7 +165,7 @@ function createRandomGraph(params?: Record<string, number>): GraphState {
     for (let i = 0; i < numVertices; i++) {
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
-        const r = Math.pow(Math.random(), 1 / 3) * 2; // Uniform in volume
+        const r = Math.random() ** (1 / 3) * 2; // Uniform in volume
         vertices.push([
             r * Math.sin(phi) * Math.cos(theta),
             r * Math.sin(phi) * Math.sin(theta),
@@ -187,6 +187,37 @@ function createRandomGraph(params?: Record<string, number>): GraphState {
             }
         }
         attempts++;
+    }
+
+    // Connect vertices the sampler left in no edge (routine at 20v/30e). An
+    // isolated vertex has all-zero rows in the Sobolev saddle system — no edge
+    // assembles into its Ā rows or C columns — so the solve is exactly singular
+    // and sobolev descent rejects every step. Nearest-neighbor keeps the repair
+    // edge short. Guaranteed duplicate-free: no existing edge contains v.
+    // @see src/core/sobolev/linsolve.ts (luSolve singularity throw)
+    const used = new Set<number>();
+    for (const [a, b] of edges) {
+        used.add(a);
+        used.add(b);
+    }
+    for (let v = 0; v < numVertices; v++) {
+        if (used.has(v)) continue;
+        let nearest = -1;
+        let bestDistSq = Infinity;
+        for (let u = 0; u < numVertices; u++) {
+            if (u === v) continue;
+            const dx = vertices[u][0] - vertices[v][0];
+            const dy = vertices[u][1] - vertices[v][1];
+            const dz = vertices[u][2] - vertices[v][2];
+            const distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                nearest = u;
+            }
+        }
+        edges.push([v, nearest]);
+        used.add(v);
+        used.add(nearest);
     }
 
     return { vertices, edges };

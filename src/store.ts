@@ -151,6 +151,10 @@ export interface SimStore {
     // mode); `sobolevConverged` mirrors spec §C step 5's termination outcome.
     sobolevStats: SobolevStepStats | null;
     sobolevConverged: boolean;
+    // Why: descent-direction arrows are a user toggle, visible in BOTH paused and
+    // running states (GradientArrows recomputes from the live buffer); this flag
+    // only gates rendering, never the descent itself.
+    showArrows: boolean;
     // graph
     graph: GraphState;
     disjointPairs: number[][];
@@ -171,6 +175,7 @@ export interface SimStore {
     setMode(m: Mode): void;
     setStepSize(s: number): void;
     setDescentMode(m: DescentMode): void;
+    setShowArrows(b: boolean): void;
     setRunning(b: boolean): void;
     setZoom(z: number): void;
 }
@@ -232,6 +237,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         sobolevX0: barycenterTarget(built.graph.vertices, built.graph.edges),
         sobolevStats: null,
         sobolevConverged: false,
+        showArrows: true,
         zoom: 1,
         graphVersion: 0,
         viewResetNonce: 0,
@@ -255,6 +261,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         // Mode switch clears the other mode's stale diagnostics; x₀ needs no
         // recompute here — it re-anchors at the next run start (see lifecycle anchor).
         setDescentMode: (m) => set({ descentMode: m, sobolevStats: null, sobolevConverged: false }),
+        setShowArrows: (b) => set({ showArrows: b }),
         setRunning: (b) => {
             if (b) {
                 // Play = a run (re)starts → re-anchor the frozen x₀ from the CURRENT

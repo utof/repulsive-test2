@@ -71,10 +71,22 @@ export interface SobolevStepOptions {
 }
 
 /**
+ * Rejection reasons of {@link sobolevStep}: the line search's own reasons plus
+ * 'singular_system' — the saddle solve threw (exactly singular Ā, e.g. an
+ * isolated vertex whose Ā rows / C columns are all zero). The solve failure is
+ * folded into the same reject-report contract as line-search failure so the
+ * frame loop never sees an exception.
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
+ * @see src/core/sobolev/linsolve.ts (luSolve singularity throw)
+ */
+export type SobolevStepFailureReason = LineSearchFailureReason | 'singular_system';
+
+/**
  * Per-step diagnostics of {@link sobolevStep}, surfaced to the UI. `tau` is 0
  * when no step was taken (converged or rejected); `projectionIterations` is
  * null when the line search failed before/without a successful projection;
- * `reason` is present only on a rejected step.
+ * `reason` is present only on a rejected step. On 'singular_system' the
+ * residual/gradientL2Norm are NaN — the solve never produced them.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (steps 5, 10)
  */
 export interface SobolevStepStats {
@@ -82,7 +94,7 @@ export interface SobolevStepStats {
     residual: number;
     gradientL2Norm: number;
     projectionIterations: number | null;
-    reason?: LineSearchFailureReason;
+    reason?: SobolevStepFailureReason;
 }
 
 /**
@@ -128,16 +140,38 @@ export function sobolevStep(
             ? gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon)
             : gradientFiniteDiff(vertices, edges, disjointPairs, alpha, beta, epsilon, h);
 
-    const { gTilde, residual } = solveConstrainedGradient(
-        vertices,
-        edges,
-        disjointPairs,
-        alpha,
-        beta,
-        epsilon,
-        dE,
-        x0,
-    );
+    let gTilde: Vec3[];
+    let residual: number;
+    try {
+        ({ gTilde, residual } = solveConstrainedGradient(
+            vertices,
+            edges,
+            disjointPairs,
+            alpha,
+            beta,
+            epsilon,
+            dE,
+            x0,
+        ));
+    } catch {
+        // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
+        // Fold into the spec §C step 10 contract: reject, echo the input, report —
+        // the frame loop auto-pauses on accepted:false instead of crashing.
+        // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
+        return {
+            vertices,
+            energy: calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+            accepted: false,
+            converged: false,
+            stats: {
+                tau: 0,
+                residual: Number.NaN,
+                gradientL2Norm: Number.NaN,
+                projectionIterations: null,
+                reason: 'singular_system',
+            },
+        };
+    }
 
     const gradientL2Norm = l2CurveNorm(gTilde, vertices, edges);
     if (gradientL2Norm < SOBOLEV_CONVERGENCE_TOL) {
