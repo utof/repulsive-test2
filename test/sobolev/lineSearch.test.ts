@@ -1,0 +1,223 @@
+import { expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { barycenterPhiAndC, barycenterTarget } from '../../src/core/sobolev/constraints';
+import { solveConstrainedGradient } from '../../src/core/sobolev/gradient';
+import { flatten } from '../../src/core/sobolev/layout';
+import { barycenterScale, l2CurveNorm, lineSearchStep } from '../../src/core/sobolev/lineSearch';
+import {
+    calculateDisjointPairs,
+    calculateEnergy,
+    gradientAnalytical,
+} from '../../src/core/tangentPointEnergy';
+import type { Edge, Vec3 } from '../../src/core/testConfigs';
+
+// All 5 oracle fixture/golden pairs (Stage-1 Sobolev oracle harness).
+// @see oracle/README.md
+const FIXTURE_NAMES = ['crossing', 'junction-y', 'helix', 'linked-rings', 'knot'] as const;
+
+// Line-search tunables mirrored from the defaults in src/core/sobolev/lineSearch.ts,
+// used here only to re-verify Armijo from the RETURNED numbers. OUR constants,
+// not the paper's.
+// @see local_files/2026-07-02-sobolev-formula-audit.md (Item 9)
+const ARMIJO_C1 = 1e-4;
+
+interface Fixture {
+    name: string;
+    vertices: Vec3[];
+    edges: Edge[];
+    alpha: number;
+    beta: number;
+    epsilon: number;
+}
+
+interface GoldenLineSearchStep {
+    accepted: boolean;
+    tau: number;
+    energy_before: number;
+    energy_after: number;
+    slope: number;
+    gradient_l2_norm: number;
+    vertices: Vec3[];
+    projection_iterations: number;
+    projection_phi_norm: number;
+}
+
+interface Golden {
+    dE: Vec3[];
+    g_tilde: Vec3[];
+    x0_barycenter_target: Vec3;
+    gradient_l2_norm: number;
+    line_search_step: GoldenLineSearchStep;
+}
+
+// Load at runtime (avoids needing resolveJsonModule in tsconfig; test/** is typechecked),
+// mirroring test/sobolev/gradient.test.ts.
+function loadFixture(name: string): Fixture {
+    return JSON.parse(
+        readFileSync(new URL(`../../oracle/fixtures/${name}.json`, import.meta.url), 'utf8'),
+    ) as Fixture;
+}
+
+function loadGolden(name: string): Golden {
+    return JSON.parse(
+        readFileSync(new URL(`../../oracle/golden/${name}.json`, import.meta.url), 'utf8'),
+    ) as Golden;
+}
+
+function euclideanNorm(a: number[]): number {
+    let sumSq = 0;
+    for (const x of a) sumSq += x * x;
+    return Math.sqrt(sumSq);
+}
+
+function euclideanDiff(a: number[], b: number[]): number {
+    let sumSq = 0;
+    for (let i = 0; i < a.length; i++) {
+        const d = a[i] - b[i];
+        sumSq += d * d;
+    }
+    return Math.sqrt(sumSq);
+}
+
+for (const name of FIXTURE_NAMES) {
+    const fixture = loadFixture(name);
+    const golden = loadGolden(name);
+
+    // DESIGN DECISION (preserve): the INPUTS here are the oracle's own outputs —
+    // `golden.dE`, `golden.g_tilde`, `golden.x0_barycenter_target` — NOT
+    // TS-side recomputations. This decouples the norm/line-search comparison
+    // from cross-language finite-difference noise (see oracle/README.md "Known
+    // tolerance caveats"), so the gates below measure ONLY the L²ₕ norm, the
+    // projection, and the accept/reject logic. Same rationale as
+    // test/sobolev/gradient.test.ts.
+    test(`l2CurveNorm: ${name} — matches oracle gradient_l2_norm to 1e-12`, () => {
+        const { vertices, edges } = fixture;
+        const norm = l2CurveNorm(golden.g_tilde, vertices, edges);
+        const relDiff = Math.abs(norm - golden.gradient_l2_norm) / golden.gradient_l2_norm;
+        console.log(
+            `[l2CurveNorm] ${name}: TS = ${norm.toExponential(15)}, ` +
+                `oracle = ${golden.gradient_l2_norm.toExponential(15)}, rel diff = ${relDiff.toExponential(3)}`,
+        );
+        expect(relDiff).toBeLessThanOrEqual(1e-12);
+    });
+
+    test(`lineSearchStep: ${name} — matches oracle acceptance, τ, iterations, energy, vertices`, () => {
+        const { vertices, edges, alpha, beta, epsilon } = fixture;
+        const disjointPairs = calculateDisjointPairs(edges);
+        const gold = golden.line_search_step;
+
+        const result = lineSearchStep(
+            vertices,
+            edges,
+            disjointPairs,
+            alpha,
+            beta,
+            epsilon,
+            golden.dE,
+            golden.g_tilde,
+            golden.x0_barycenter_target,
+        );
+
+        const energyRelDiff =
+            Math.abs(result.energyAfter - gold.energy_after) / Math.abs(gold.energy_after);
+        const vertexRelDiff =
+            euclideanDiff(flatten(result.vertices), flatten(gold.vertices)) /
+            euclideanNorm(flatten(gold.vertices));
+
+        console.log(
+            `[lineSearch] ${name} (|V| = ${vertices.length}): accepted = ${result.accepted}, ` +
+                `τ = ${result.tau}, projection iterations = ${result.projectionIterations}, ` +
+                `E ${result.energyBefore.toExponential(6)} → ${result.energyAfter.toExponential(6)} ` +
+                `(rel diff vs oracle = ${energyRelDiff.toExponential(3)}), ` +
+                `vertices rel diff = ${vertexRelDiff.toExponential(3)}`,
+        );
+
+        // All 5 goldens accept the step (oracle/README.md status note).
+        expect(gold.accepted).toBe(true);
+        expect(result.accepted).toBe(gold.accepted);
+        // τ EXACTLY: accepted τ values are powers of two (τ₀=1 halved k times) —
+        // exact doubles, bit-identical across languages. Any drift here means the
+        // accept/reject LOGIC diverged (a different τ was accepted), not rounding.
+        expect(result.tau).toBe(gold.tau);
+        expect(result.projectionIterations).toBe(gold.projection_iterations);
+        expect(energyRelDiff).toBeLessThanOrEqual(1e-12);
+        expect(vertexRelDiff).toBeLessThanOrEqual(1e-9);
+
+        // Armijo re-verified from the RETURNED numbers (not the oracle's):
+        // E_after ≤ E_before − c₁·τ·m — spec §C step 9.
+        // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
+        expect(result.slope).toBeDefined();
+        expect(result.energyAfter).toBeLessThanOrEqual(
+            result.energyBefore - ARMIJO_C1 * result.tau * (result.slope as number),
+        );
+    });
+}
+
+// Oracle-INDEPENDENT flow test: the first full end-to-end TS descent run —
+// dE (analytical) → constrained Sobolev solve → line search → projected step,
+// iterated 3 times on the crossing fixture. No golden inputs anywhere: this
+// gates the composed pipeline's behavior (descent + constraint preservation,
+// spec §E props 11–12), not cross-language agreement.
+// @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §E (props 11–12)
+test('flow: 3 consecutive steps on crossing — accepted, energy strictly decreases, barycenter preserved', () => {
+    const { vertices, edges, alpha, beta, epsilon } = loadFixture('crossing');
+    const disjointPairs = calculateDisjointPairs(edges);
+    // x₀ computed ONCE from the initial state and FROZEN across all steps — the
+    // constraint target never tracks the current iterate, else the constraint
+    // is vacuous. Same contract as solveConstrainedGradient's x0 parameter.
+    // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("set x₀ once at initialization")
+    const x0 = barycenterTarget(vertices, edges);
+
+    let current = vertices;
+    let previousEnergy = calculateEnergy(current, edges, disjointPairs, alpha, beta, epsilon);
+    const energies: number[] = [previousEnergy];
+
+    for (let step = 0; step < 3; step++) {
+        const dE = gradientAnalytical(current, edges, disjointPairs, alpha, beta, epsilon);
+        const { gTilde, residual } = solveConstrainedGradient(
+            current,
+            edges,
+            disjointPairs,
+            alpha,
+            beta,
+            epsilon,
+            dE,
+            x0,
+        );
+        // Self-certifying saddle residual — spec §E prop 8.
+        expect(residual).toBeLessThanOrEqual(1e-10);
+
+        const result = lineSearchStep(
+            current,
+            edges,
+            disjointPairs,
+            alpha,
+            beta,
+            epsilon,
+            dE,
+            gTilde,
+            x0,
+        );
+        expect(result.accepted).toBe(true);
+        expect(result.energyAfter).toBeLessThan(previousEnergy);
+
+        current = result.vertices;
+        previousEnergy = result.energyAfter;
+        energies.push(previousEnergy);
+
+        // Barycenter preserved across the flow: ‖Φ(new γ)‖ ≤ max(1e-10, 1e-10·scale),
+        // recomputed independently of the projection internals — spec §E props 11–12.
+        const { phi } = barycenterPhiAndC(current, edges, x0);
+        const phiNorm = euclideanNorm(phi);
+        const scale = barycenterScale(current, edges, x0);
+        console.log(
+            `[flow] step ${step + 1}: τ = ${result.tau}, ` +
+                `projection iterations = ${result.projectionIterations}, ` +
+                `E = ${previousEnergy.toExponential(6)}, ‖Φ‖ = ${phiNorm.toExponential(3)} ` +
+                `(tol = ${Math.max(1e-10, 1e-10 * scale).toExponential(3)})`,
+        );
+        expect(phiNorm).toBeLessThanOrEqual(Math.max(1e-10, 1e-10 * scale));
+    }
+
+    console.log(`[flow] energy trajectory: ${energies.map((e) => e.toExponential(6)).join(' → ')}`);
+});
