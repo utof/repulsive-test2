@@ -197,6 +197,40 @@ kept so nobody re-runs this experiment at the wrong tolerance):
 
 @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
 
+## Penalties / soft constraints (5C)
+
+`tpe_constraints_oracle.py` accepts an optional trailing penalty-preset
+argument (after the projection argument) and a new constraint mode `bary`
+(barycenter-only set — the soft-constraint flow configuration). Penalties are
+the paper's catalog (SelfAvoiding.tex lines 762–767): total length Σℓ_I,
+length difference Σ_{V_int}(ℓ_I−ℓ_J)², field alignment Σℓ_I|T_I×X|² with a
+constant unit X. They enter the OBJECTIVE only — analytic gradients added to
+dE before the saddle solve, energies added to the Armijo gate — never the
+constraint rows; H^s inner product unchanged (tex line 769). Formulas +
+decision ledger: `docs/superpowers/plans/2026-07-03-sobolev-penalties.md`.
+
+```bash
+for f in "crossing bary pen-length" "helix bary pen-field" \
+         "junction-y bary pen-diff" "crossing length pen-combo"; do
+  set -- $f
+  uv run --with numpy --with scipy python oracle/tpe_constraints_oracle.py \
+    oracle/fixtures/$1.json oracle/golden/$1-$2-$3.json $2 reassemble $3
+done
+```
+
+Embedded property gates (beyond the standard ones): central-FD check of the
+analytic penalty gradient (rel ≤ 1e-6; measured 3e-10…5e-10), penalty
+actually perturbs dE, energy decrease in the TOTAL objective. Preset weights
+are OUR knobs (recorded in each golden's `penalties` field). The field preset
+uses X = [1,0,1]/√2 and the helix fixture DELIBERATELY: with X orthogonal to
+a planar fixture's tangents the field penalty degenerates to the length
+penalty (|T×X|² ≡ 1) and its (T·X) terms would be untested. Without a preset
+the penalty code is inert — verified byte-identical regeneration of
+`crossing-length.json` (2026-07-03). Status (2026-07-03): all four penalty
+goldens generated, every property check passing (pen-combo composes hard
+totalLength + all three penalties; accepts at τ=0.25 — soft length pulling
+against the hard constraint is expected to backtrack once).
+
 Formula audit (2026-07-02): an isolated auditor diffed the results doc against
 verbatim paper excerpts — 11/11 items CONFIRMED, zero mismatches; report at
 `local_files/2026-07-02-sobolev-formula-audit.md`. Two standing cautions from it:
