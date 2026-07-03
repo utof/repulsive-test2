@@ -14,7 +14,7 @@ import { useEffect, useRef } from 'react';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
 import * as THREE from 'three/webgpu';
-import { dispatchDescentStep, useSimStore } from '../store';
+import { buildStepArgs, dispatchDescentStep, useSimStore } from '../store';
 import { Curve } from './Curve';
 import { GradientArrows } from './GradientArrows';
 import { PinControls } from './PinControls';
@@ -84,44 +84,15 @@ function Simulation() {
             // stage-1 budget of |V| ≤ ~300; stacking multiple per frame would stall
             // the render loop with no visual benefit.
             // @see local_files/sobolev-gradient-handoff.md ("our targets are |V| ≤ ~300, interactive rates")
+            // §D7: assemble the dispatch args via the SHARED buildStepArgs so the
+            // main and (T3) worker drivers can never drift in how a step is built;
+            // collectTimings stays hardcoded at the call site as it was inline here.
+            // Always collect per-phase timings for the Stats.tsx readout — the raw
+            // path ignores the flag and the collector is inert when off.
+            // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D7
             const result = dispatchDescentStep({
-                descentMode: st.descentMode,
-                vertices: st.live,
-                edges: st.graph.edges,
-                disjointPairs: st.disjointPairs,
-                mode: st.mode,
-                stepSize: st.stepSize,
-                // Frozen targets + per-block toggles: dispatch builds the
-                // ConstraintSet (barycenter first) from these. The frame loop only
-                // READS the frozen x₀/L⁰/ℓ⁰ — re-anchoring happens in the store (see
-                // the frozen-targets lifecycle anchor there).
-                // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.2, §5.3, §9a
-                x0: st.sobolevX0,
-                sobolevL0: st.sobolevL0,
-                barycenterConstraint: st.barycenterConstraint,
-                lengthMode: st.lengthMode,
-                sobolevEll0: st.sobolevEll0,
-                // Interactive pins → pointBlocks (briefing §5B). Frozen targets,
-                // READ-ONLY here — the frame loop never mutates them (same
-                // contract as sobolevEll0 above); re-anchoring/drag happen in the
-                // store / PinControls. @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md
-                pins: st.pins,
-                // Projection strategy A/B (solver-perf Task 6): store default
-                // 'frozen' (reference-impl reuse), 'reassemble' selectable.
-                projectionMode: st.projectionMode,
-                // Soft-constraint penalties (5C). Default all-off ⇒ the core no-ops
-                // via penaltiesActive, bit-identical to the penalty-free build; a
-                // config change bumps penaltyEpoch (handled above).
-                // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
-                penalties: st.penalties,
-                // Always collect per-phase timings for the Stats.tsx readout; the
-                // raw path ignores this and the collector is inert when off.
-                // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
+                ...buildStepArgs(st, lastEnergy.current ?? undefined),
                 collectTimings: true,
-                // Reuse the previous accepted step's E₀ (null on the first frame
-                // of any run → fresh recompute). @see the lastEnergy ref anchor
-                // above / plan Task 4.
-                energyBefore: lastEnergy.current ?? undefined,
             });
             if (result.accepted) {
                 // Copy-then-discard: both steppers are pure by design and return a fresh
