@@ -87,6 +87,19 @@ function cloneVerts(v: Vec3[]): Vec3[] {
     return v.map((p) => [p[0], p[1], p[2]] as Vec3);
 }
 
+/**
+ * Which driver executes {@link dispatchDescentStep} each frame. 'worker'
+ * (default) posts the step to an off-main-thread Web Worker so orbit / pin-drag
+ * / UI stay at display refresh even when a step is expensive; 'main' is today's
+ * synchronous in-frame path — the fallback, the A/B baseline, and the only path
+ * the store tests exercise. The frame loop AUTO-falls back to 'main' (via
+ * {@link SimStore.setSolverDriver}) if the Worker fails to construct or posts an
+ * error (§D6). This is a main-thread concern, so it lives in the store, NOT in
+ * worker-bundle-pure src/core/**.
+ * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D6
+ */
+export type SolverDriver = 'worker' | 'main';
+
 export interface SimStore {
     // config (React-subscribed, infrequent)
     selectedTestId: string;
@@ -94,6 +107,9 @@ export interface SimStore {
     mode: Mode;
     stepSize: number;
     descentMode: DescentMode;
+    // Off-main-thread solver driver (default 'worker'); see the SolverDriver type
+    // anchor. @see docs/superpowers/plans/2026-07-04-worker-solver.md §D6
+    solverDriver: SolverDriver;
     running: boolean;
     // FROZEN constraint targets for the sobolev descent: x₀ (barycenter),
     // L⁰ (total length) and ℓ⁰ (per-edge lengths, spec §5.3). Lifecycle (anchor —
@@ -200,6 +216,9 @@ export interface SimStore {
     setMode(m: Mode): void;
     setStepSize(s: number): void;
     setDescentMode(m: DescentMode): void;
+    // Select the solver driver; also the §D6 auto-fallback entry point (the frame
+    // loop calls this with 'main' on Worker failure). @see the SolverDriver type.
+    setSolverDriver(d: SolverDriver): void;
     setBarycenterConstraint(b: boolean): void;
     setLengthMode(m: LengthMode): void;
     setLengthConstraint(b: boolean): void;
@@ -305,6 +324,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
         mode: 'analytical',
         stepSize: 0.001,
         descentMode: 'raw',
+        // Default off-main-thread (§D6): smooth interaction is the milestone goal.
+        solverDriver: 'worker',
         running: false,
         graph: built.graph,
         disjointPairs: built.disjointPairs,
@@ -350,6 +371,11 @@ export const useSimStore = create<SimStore>()((set, get) => {
         },
         setMode: (m) => set({ mode: m }),
         setStepSize: (s) => set({ stepSize: s }),
+        // Driver select / §D6 auto-fallback. Plain field write: switching drivers
+        // needs no diagnostic/target invalidation (the SAME pure step runs either
+        // way — bit-identical, §2); the frame loop reacts by (re)creating or
+        // tearing down the worker. @see …worker-solver.md §D6
+        setSolverDriver: (d) => set({ solverDriver: d }),
         // Mode switch clears the other mode's stale diagnostics; x₀ needs no
         // recompute here — it re-anchors at the next run start (see lifecycle anchor).
         setDescentMode: (m) =>

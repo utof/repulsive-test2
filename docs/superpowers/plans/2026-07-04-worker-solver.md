@@ -208,5 +208,11 @@ Commit: `feat(worker): async worker driver in frame loop + solverDriver toggle`.
 
 ## §8 Decision log (implementer appends here)
 
-- (empty — record any deviation from §3 with one-line rationale + reviewer
-  sign-off)
+- `worker.onerror` wired to the §D6 fallback in addition to D6's two listed
+  triggers (ctor throw, posted `error`): a worker that fails to LOAD fires
+  `onerror` without a ctor throw and can never post a protocol error, so without
+  this `inFlight` would stick and the worker driver would stall. Reviewer signed
+  off.
+- `SolverDriver` type lives in `src/store.ts`, not `src/core/dispatch.ts` — it is
+  a main-thread-only concern (worker vs main driver), and keeping it out of
+  `src/core/**` preserves worker-bundle purity (§D2). Reviewer signed off.
