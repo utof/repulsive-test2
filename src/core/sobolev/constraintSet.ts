@@ -5,12 +5,11 @@
  * Φ (target) and C = dΦ (Jacobian) to the stacked saddle system
  * `[[Ā, Cᵀ], [C, 0]]·[x; μ] = [dE; −Φ]`.
  *
- * M1 ships two builders: {@link barycenterBlock} (wraps the existing
- * `barycenterPhiAndC`/`barycenterScale`, unchanged) and {@link totalLengthBlock}
- * (new — total-length equality constraint). `edgeLengths` and `point` are
- * catalogued in the `kind` union now so the type is future-proof, but their
- * builders arrive in M2.
- * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.1
+ * All four catalog builders ship here: {@link barycenterBlock} (wraps the
+ * existing `barycenterPhiAndC`/`barycenterScale`, unchanged) and
+ * {@link totalLengthBlock} from M1; {@link edgeLengthsBlock} (per-edge length,
+ * |E| rows) and {@link pointBlock} (vertex pin, 3 rows) from M2.
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.1, §5.1
  */
 import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterPhiAndC } from './constraints';
@@ -158,6 +157,145 @@ export function totalLengthBlock(L0: number): ConstraintBlock {
             // @see local_files/2026-07-02-sobolev-formula-audit.md (Item 9 — "Unstated inventions")
             // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.3
             return Math.max(1, totalLength(vertices, edges));
+        },
+    };
+}
+
+/**
+ * Raw per-edge geometric lengths ℓ_I = ‖γ_{i2} − γ_{i1}‖ in edge order — NO +ε
+ * (constraints are geometric; same raw-length rule as {@link totalLength}, do
+ * NOT "unify" with the ℓ^ε of innerProduct.ts). Shared by
+ * {@link edgeLengthsBlock}'s targets and the store's frozen-ℓ⁰ lifecycle.
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Use raw geometric lengths ... not ℓ^ε")
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §2, §3.5
+ */
+export function edgeLengths(vertices: Vec3[], edges: Edge[]): number[] {
+    return edges.map(([i1, i2]) => {
+        const p1 = vertices[i1];
+        const p2 = vertices[i2];
+        const ex = p2[0] - p1[0];
+        const ey = p2[1] - p1[1];
+        const ez = p2[2] - p1[2];
+        return Math.sqrt(ex * ex + ey * ey + ez * ez);
+    });
+}
+
+/**
+ * Per-edge length constraint block: Φ_{len,I}(γ) = ℓ⁰_I − ℓ_I ∈ R, one row per
+ * edge (|E| rows, edge order), paper sign convention (target minus current).
+ * Row I touches ONLY edge I's endpoints: `+T_I` at i1's columns, `−T_I` at
+ * i2's (dΦ_I = −dℓ_I, dℓ_I = T_I·(dγ_{i2} − dγ_{i1})). The total-length row is
+ * exactly the SUM of these rows — hence the §3.4 mutual exclusion with
+ * `totalLengthBlock`, enforced at construction by {@link assertValidConstraintSet}.
+ *
+ * Degenerate guard: T_I = [0,0,0] when ℓ_I < 1e-14 — same guard, same constant
+ * as `totalLengthBlock` / `barycenterPhiAndC` (constraints.ts). A degenerate
+ * edge zeroes its row → singular saddle → the existing `singular_system`
+ * rejection path is the backstop (spec §2 — never crash the frame loop).
+ *
+ * A mismatched `ell0` (length ≠ |E|) yields NaN Φ rows instead of throwing:
+ * projection then never converges and the step is REJECTED
+ * ('projection_failed') — the same never-throw backstop as the dispatch's
+ * missing-L⁰ NaN in store.ts.
+ *
+ * Projection-tolerance scale: max(1, L), L = Σℓ_I raw — OUR tunable choice,
+ * NOT paper-sourced (same flagging convention as `totalLengthBlock`).
+ * @see local_files/2026-07-02-sobolev-formula-audit.md (Item 9 — "Unstated inventions")
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §2, §3.3, §3.4, §5.1
+ */
+export function edgeLengthsBlock(ell0: number[]): ConstraintBlock {
+    return {
+        kind: 'edgeLengths',
+        evaluate(vertices, edges) {
+            const n = vertices.length;
+            const m = edges.length;
+            const phi = new Array<number>(m).fill(0);
+            const C: number[][] = Array.from({ length: m }, () => new Array<number>(3 * n).fill(0));
+            for (let r = 0; r < m; r++) {
+                const [i1, i2] = edges[r];
+                const p1 = vertices[i1];
+                const p2 = vertices[i2];
+                const ex = p2[0] - p1[0];
+                const ey = p2[1] - p1[1];
+                const ez = p2[2] - p1[2];
+                // RAW geometric length, no +ε — see the edgeLengths/totalLength anchors.
+                const ell = Math.sqrt(ex * ex + ey * ey + ez * ez);
+                // NaN backstop for a mismatched ell0 — see the TSDoc above.
+                phi[r] = (ell0[r] ?? Number.NaN) - ell;
+                // Degenerate guard: T_I = 0 when ‖e_I‖ < 1e-14 (same constant as
+                // barycenterPhiAndC's guard, constraints.ts).
+                // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B
+                let T: Vec3;
+                if (ell < 1e-14) {
+                    T = [0, 0, 0];
+                } else {
+                    const inv = 1 / ell;
+                    T = [ex * inv, ey * inv, ez * inv];
+                }
+                for (let c = 0; c < 3; c++) {
+                    C[r][blockIndex(c, i1, n)] += T[c];
+                    C[r][blockIndex(c, i2, n)] += -T[c];
+                }
+            }
+            return { phi, C };
+        },
+        scale(vertices, edges) {
+            // OUR tunable choice, NOT paper-sourced — same flagging convention as
+            // lineSearch.ts's barycenterScale.
+            // @see local_files/2026-07-02-sobolev-formula-audit.md (Item 9 — "Unstated inventions")
+            // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.3
+            return Math.max(1, totalLength(vertices, edges));
+        },
+    };
+}
+
+/**
+ * Point (pin) constraint block: Φ_pt,i(γ) = γ_i − x_i ∈ R³ (3 rows) —
+ * paper-verbatim sign (CURRENT minus target, unlike the length constraints'
+ * target-minus-current; keep as-is so future audits can diff against the
+ * excerpts 1:1, spec §2). Jacobian: identity block,
+ * C[r][blockIndex(r, i, n)] = 1 — no length terms.
+ *
+ * M2 ships MACHINERY + tests only (no picking UI, spec §5.3); knip may flag
+ * this export as unused from src/ — expected and non-blocking.
+ *
+ * An out-of-range `vertexIndex` yields NaN Φ rows (and zero C rows) instead of
+ * throwing — the same never-throw projection_failed backstop as
+ * `edgeLengthsBlock`'s mismatched ℓ⁰.
+ *
+ * Projection-tolerance scale: max(1, R), R = max distance from ANY vertex to
+ * the pin target — OUR tunable choice, NOT paper-sourced.
+ * @see local_files/2026-07-02-sobolev-formula-audit.md (Item 9 — "Unstated inventions")
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §2, §3.3, §5.1, §5.3
+ */
+export function pointBlock(vertexIndex: number, target: Vec3): ConstraintBlock {
+    return {
+        kind: 'point',
+        evaluate(vertices, _edges) {
+            const n = vertices.length;
+            const C: number[][] = Array.from({ length: 3 }, () => new Array<number>(3 * n).fill(0));
+            const p = vertices[vertexIndex];
+            if (p === undefined) {
+                // NaN backstop (out-of-range pin) — see the TSDoc above.
+                return { phi: [Number.NaN, Number.NaN, Number.NaN], C };
+            }
+            for (let r = 0; r < 3; r++) {
+                C[r][blockIndex(r, vertexIndex, n)] = 1;
+            }
+            return { phi: [p[0] - target[0], p[1] - target[1], p[2] - target[2]], C };
+        },
+        scale(vertices, _edges) {
+            // OUR tunable choice, NOT paper-sourced.
+            // @see local_files/2026-07-02-sobolev-formula-audit.md (Item 9 — "Unstated inventions")
+            // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.3
+            let R = 0;
+            for (const v of vertices) {
+                const dx = v[0] - target[0];
+                const dy = v[1] - target[1];
+                const dz = v[2] - target[2];
+                R = Math.max(R, Math.sqrt(dx * dx + dy * dy + dz * dz));
+            }
+            return Math.max(1, R);
         },
     };
 }

@@ -1,5 +1,5 @@
 import { testConfigs } from '../core/testConfigs';
-import { type DescentMode, type Mode, useSimStore } from '../store';
+import { type DescentMode, type LengthMode, type Mode, useSimStore } from '../store';
 
 const btn = (bg: string) => ({
     padding: '10px 20px',
@@ -26,9 +26,9 @@ export function ControlPanel() {
     const setDescentMode = useSimStore((s) => s.setDescentMode);
     const setStepSize = useSimStore((s) => s.setStepSize);
     const barycenterConstraint = useSimStore((s) => s.barycenterConstraint);
-    const lengthConstraint = useSimStore((s) => s.lengthConstraint);
+    const lengthMode = useSimStore((s) => s.lengthMode);
     const setBarycenterConstraint = useSimStore((s) => s.setBarycenterConstraint);
-    const setLengthConstraint = useSimStore((s) => s.setLengthConstraint);
+    const setLengthMode = useSimStore((s) => s.setLengthMode);
     const showArrows = useSimStore((s) => s.showArrows);
     const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
@@ -140,6 +140,12 @@ export function ControlPanel() {
                     />
                     <span>Barycenter</span>
                 </label>
+                {/* 3-way Length select (M2, spec §5.3) replacing the M1 "Fix length"
+                    checkbox: none | total | per-edge. The §3.4 totalLength/edgeLengths
+                    mutual exclusion is enforced BY CONSTRUCTION — one select, one
+                    value. Sobolev-only: disabled (not hidden) in raw mode, same as
+                    the Barycenter checkbox.
+                    @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §5.3, §3.4 */}
                 <label
                     style={{
                         display: 'flex',
@@ -148,13 +154,17 @@ export function ControlPanel() {
                         opacity: descentMode === 'sobolev' ? 1 : 0.4,
                     }}
                 >
-                    <input
-                        type="checkbox"
-                        checked={lengthConstraint}
+                    <span>Length:</span>
+                    <select
+                        value={lengthMode}
                         disabled={descentMode !== 'sobolev'}
-                        onChange={(e) => setLengthConstraint(e.target.checked)}
-                    />
-                    <span>Fix length</span>
+                        onChange={(e) => setLengthMode(e.target.value as LengthMode)}
+                        style={{ padding: 8, fontSize: 14 }}
+                    >
+                        <option value="none">None</option>
+                        <option value="total">Total</option>
+                        <option value="perEdge">Per-edge</option>
+                    </select>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span>Mode:</span>

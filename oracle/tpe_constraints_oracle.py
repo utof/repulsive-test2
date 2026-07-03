@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Constraints oracle for the Sobolev flow constraint milestones (M1: total
-length; M2 will extend with per-edge lengths + point pins).
+length; M2: per-edge lengths + point pins).
 
 Imports the stage-1 oracle (`tpe_stage1_oracle.py`, read-only deliverable)
 and adds the generalized ConstraintSet machinery mirroring the TS side
 (`src/core/sobolev/constraintSet.ts`): stacked constraint rows
-(barycenter FIRST, then total length), a per-block projection stopping
-tolerance, and the set-generic line-search step. Emits `<fixture>-length.json`
-goldens and runs embedded property checks (exit code 0 iff all pass).
+(barycenter FIRST, spec §3.2), a per-block projection stopping tolerance,
+and the set-generic line-search step. Emits `<fixture>-<mode>.json` goldens
+and runs embedded property checks (exit code 0 iff all pass).
 
 Spec: docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md
 (§2 rows/signs, §3.1 stacking, §3.3 per-block tolerance — OUR invention,
@@ -17,7 +17,9 @@ not paper-sourced, see local_files/2026-07-02-sobolev-formula-audit.md item 9).
 Usage:
     python tpe_constraints_oracle.py fixture.json golden.json [mode]
 
-mode: "length" (default; the only M1 mode) = [barycenter, totalLength].
+mode: "length" (default, M1) = [barycenter, totalLength];
+      "edgelengths" (M2)     = [barycenter, edgeLengths];
+      "point" (M2)           = [barycenter, point(vertex 0, initial position)].
 """
 from __future__ import annotations
 
@@ -104,6 +106,76 @@ def total_length_block(L0: float) -> Block:
         "kind": "totalLength",
         "evaluate": lambda V, E: total_length_phi_and_C(V, E, L0),
         "scale": lambda V, E: max(1.0, total_length(V, E)),
+    }
+
+
+def edge_lengths(vertices: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Raw per-edge lengths ell_I = ||e_I|| in edge order, NO +eps.
+
+    Constraints are geometric — same raw-length rule as total_length /
+    barycenter_phi_and_C (spec §2)."""
+    return np.array(
+        [safe_norm(vertices[int(i2)] - vertices[int(i1)]) for i1, i2 in edges],
+        dtype=float,
+    )
+
+
+def edge_lengths_phi_and_C(
+    vertices: np.ndarray, edges: np.ndarray, ell0: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Phi_I = ell0_I - ell_I (paper sign, target minus current), |E| rows.
+
+    Row I: +T_I at i1's columns, -T_I at i2's, THAT EDGE ONLY (spec §2:
+    dPhi_I = -dell_I, dell_I = T_I . (dgamma_i2 - dgamma_i1)). The totalLength
+    row is exactly the SUM of these rows — the §3.4 rank rule. Degenerate
+    edges contribute T = 0 (safe_unit's 1e-14 guard)."""
+    n = vertices.shape[0]
+    m = edges.shape[0]
+    phi = np.zeros(m, dtype=float)
+    C = np.zeros((m, 3 * n), dtype=float)
+    for r, (i1, i2) in enumerate(edges):
+        i1 = int(i1)
+        i2 = int(i2)
+        ev = vertices[i2] - vertices[i1]
+        phi[r] = float(ell0[r]) - safe_norm(ev)
+        T = safe_unit(ev)
+        for c in range(3):
+            C[r, block_index(c, i1, n)] += T[c]
+            C[r, block_index(c, i2, n)] += -T[c]
+    return phi, C
+
+
+def point_phi_and_C(
+    vertices: np.ndarray, vertex_index: int, target: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Phi = gamma_i - x_i (paper-verbatim sign: CURRENT minus target, spec §2),
+    3 rows; C is the identity block C[r, block_index(r, i, n)] = 1 — no
+    length terms."""
+    n = vertices.shape[0]
+    C = np.zeros((3, 3 * n), dtype=float)
+    for r in range(3):
+        C[r, block_index(r, vertex_index, n)] = 1.0
+    return vertices[vertex_index] - target, C
+
+
+def edge_lengths_block(ell0: np.ndarray) -> Block:
+    # scale max(1, L) is OUR tunable choice, not paper-sourced (spec §3.3;
+    # formula-audit item 9).
+    return {
+        "kind": "edgeLengths",
+        "evaluate": lambda V, E: edge_lengths_phi_and_C(V, E, ell0),
+        "scale": lambda V, E: max(1.0, total_length(V, E)),
+    }
+
+
+def point_block(vertex_index: int, target: np.ndarray) -> Block:
+    # scale max(1, R), R = max distance from ANY vertex to the pin target —
+    # OUR tunable choice, not paper-sourced (spec §3.3).
+    t = np.asarray(target, dtype=float)
+    return {
+        "kind": "point",
+        "evaluate": lambda V, E: point_phi_and_C(V, vertex_index, t),
+        "scale": lambda V, E: max(1.0, float(max(safe_norm(v - t) for v in V))),
     }
 
 
@@ -332,9 +404,11 @@ def main(argv: List[str]) -> int:
         )
         return 2
     mode = argv[3] if len(argv) == 4 else "length"
-    if mode != "length":
-        # M2 will add "edgelengths" / "point" modes (spec §5.2).
-        print(f"unknown mode {mode!r}; M1 supports only 'length'", file=sys.stderr)
+    if mode not in ("length", "edgelengths", "point"):
+        print(
+            f"unknown mode {mode!r}; expected length | edgelengths | point",
+            file=sys.stderr,
+        )
         return 2
 
     with open(argv[1], "r", encoding="utf-8") as f:
@@ -350,7 +424,26 @@ def main(argv: List[str]) -> int:
     dE = finite_difference_dE(vertices, edges, alpha, beta, eps, h)
     x0 = length_weighted_barycenter(vertices, edges)
     L0 = total_length(vertices, edges)
-    blocks = [barycenter_block(x0), total_length_block(L0)]
+
+    # Mode -> ConstraintSet. Barycenter FIRST in every mode (spec §3.2 row
+    # order); targets frozen from the INITIAL geometry (spec §3.5).
+    extra_targets: Dict[str, Any] = {}
+    if mode == "length":
+        blocks = [barycenter_block(x0), total_length_block(L0)]
+        row_order = "barycenter rows 0..2, totalLength row 3"
+        extra_targets["L0_total_length_target"] = float(L0)
+    elif mode == "edgelengths":
+        ell0 = edge_lengths(vertices, edges)
+        blocks = [barycenter_block(x0), edge_lengths_block(ell0)]
+        row_order = "barycenter rows 0..2, edgeLengths rows 3..2+|E| (edge order)"
+        extra_targets["ell0_edge_length_targets"] = [float(x) for x in ell0]
+    else:  # point
+        pin_index = 0
+        pin_target = vertices[pin_index].copy()
+        blocks = [barycenter_block(x0), point_block(pin_index, pin_target)]
+        row_order = "barycenter rows 0..2, point rows 3..5 (pinned vertex x,y,z)"
+        extra_targets["pin_vertex_index"] = pin_index
+        extra_targets["pin_target"] = [float(x) for x in pin_target]
 
     phi0, C0, counts = evaluate_constraint_set(blocks, vertices, edges)
     g_tilde, lambdas, residual = solve_constrained_gradient_set(
@@ -375,9 +468,27 @@ def main(argv: List[str]) -> int:
             f"E {step['energy_before']:.9e} -> {step['energy_after']:.9e}",
         )
         newV = np.asarray(step["vertices"], dtype=float)
-        L1 = total_length(newV, edges)
-        drift = abs(L1 - L0) / max(1.0, L0)
-        check("length drift |L-L0|/max(1,L0) <= 1e-8 after step", drift <= 1.0e-8, f"drift = {drift:.3e}")
+        if mode == "length":
+            L1 = total_length(newV, edges)
+            drift = abs(L1 - L0) / max(1.0, L0)
+            check("length drift |L-L0|/max(1,L0) <= 1e-8 after step", drift <= 1.0e-8, f"drift = {drift:.3e}")
+        elif mode == "edgelengths":
+            ell1 = edge_lengths(newV, edges)
+            ell0_arr = np.asarray(extra_targets["ell0_edge_length_targets"], dtype=float)
+            worst = float(np.max(np.abs(ell1 - ell0_arr) / ell0_arr))
+            check(
+                "per-edge drift max_I |l_I - l0_I|/l0_I <= 1e-8 after step",
+                worst <= 1.0e-8,
+                f"max drift = {worst:.3e}",
+            )
+        else:  # point
+            pin = newV[int(extra_targets["pin_vertex_index"])]
+            dist = safe_norm(pin - np.asarray(extra_targets["pin_target"], dtype=float))
+            check(
+                "pin distance ||gamma_pin - target|| <= 1e-8 after step",
+                dist <= 1.0e-8,
+                f"dist = {dist:.3e}",
+            )
         phi1, _, counts1 = evaluate_constraint_set(blocks, newV, edges)
         per_block_ok = constraint_set_converged(blocks, newV, edges, phi1, counts1, 1.0e-10, 1.0e-10)
         check("per-block Phi tolerances hold after step (spec §3.3)", per_block_ok, f"||Phi|| = {safe_norm(phi1):.3e}")
@@ -385,8 +496,8 @@ def main(argv: List[str]) -> int:
     out: Dict[str, Any] = {
         "conventions": {
             "flattening": "coordinate-block: [x0..xN-1, y0..yN-1, z0..zN-1]",
-            "constraint_set": ["barycenter", "totalLength"],
-            "row_order": "barycenter rows 0..2, totalLength row 3",
+            "constraint_set": [b["kind"] for b in blocks],
+            "row_order": row_order,
             "per_block_projection_tolerance": "spec §3.3 (our invention, not paper)",
             "degenerate_unit_tangent_tol": 1.0e-14,
         },
@@ -398,7 +509,6 @@ def main(argv: List[str]) -> int:
         "dE": to_jsonable_vec3(dE),
         "dE_flat": [float(x) for x in flatten_vec3_block(dE)],
         "x0_barycenter_target": [float(x) for x in x0],
-        "L0_total_length_target": float(L0),
         "block_kinds": [b["kind"] for b in blocks],
         "block_row_counts": counts,
         "block_scales": [float(b["scale"](vertices, edges)) for b in blocks],
@@ -410,6 +520,7 @@ def main(argv: List[str]) -> int:
         "saddle_relative_residual": float(residual),
         "gradient_l2_norm": float(l2_curve_norm_vec3(g_tilde, vertices, edges)),
         "line_search_step": step,
+        **extra_targets,
     }
 
     with open(argv[2], "w", encoding="utf-8") as f:

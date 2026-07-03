@@ -69,13 +69,14 @@ function Simulation() {
                 stepSize: st.stepSize,
                 // Frozen targets + per-block toggles: dispatch builds the
                 // ConstraintSet (barycenter first) from these. The frame loop only
-                // READS the frozen x₀/L⁰ — re-anchoring happens in the store (see
+                // READS the frozen x₀/L⁰/ℓ⁰ — re-anchoring happens in the store (see
                 // the frozen-targets lifecycle anchor there).
-                // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.2, §9a
+                // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.2, §5.3, §9a
                 x0: st.sobolevX0,
                 sobolevL0: st.sobolevL0,
                 barycenterConstraint: st.barycenterConstraint,
-                lengthConstraint: st.lengthConstraint,
+                lengthMode: st.lengthMode,
+                sobolevEll0: st.sobolevEll0,
             });
             if (result.accepted) {
                 // Copy-then-discard: both steppers are pure by design and return a fresh

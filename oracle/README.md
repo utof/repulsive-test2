@@ -22,12 +22,15 @@ formulas + property list: `local_files/2026-07-02-sobolev-gradient-rsrch-results
 - `fixtures/*.json` — oracle inputs `{name, vertices, edges, alpha, beta, epsilon}`.
 - `golden/*.json` — oracle outputs; the diff targets for the TS milestones.
 - `tpe_constraints_oracle.py` — constraints oracle (M1: barycenter + total
-  length) built ON TOP of `tpe_stage1_oracle.py` (imports it; the stage-1
-  script stays read-only). Emits `golden/<fixture>-length.json` and runs its
-  own embedded property checks (FD Jacobian of the stacked C, saddle residual,
-  descent positivity, accepted step, energy decrease, per-block Φ tolerance,
-  length drift ≤ 1e-8). Spec:
-  `docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md` §3.6.
+  length; M2: per-edge lengths + point pins) built ON TOP of
+  `tpe_stage1_oracle.py` (imports it; the stage-1 script stays read-only).
+  Modes `length` / `edgelengths` / `point` emit `golden/<fixture>-length.json`,
+  `golden/<fixture>-edgelengths.json`, `golden/<fixture>-point.json` and run
+  their own embedded property checks (FD Jacobian of the stacked C, saddle
+  residual, descent positivity, accepted step, energy decrease, per-block Φ
+  tolerance, and the mode drift: total-length drift / max per-edge drift /
+  pin distance, each ≤ 1e-8). Spec:
+  `docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md` §3.6, §5.2.
 - `check_properties.py` — §E property checklist run against the goldens
   (symmetry, PSD, constant nullspace, quadratic-form identity via an
   independent direct-sum transcription, saddle residuals, descent positivity,
@@ -58,6 +61,20 @@ for f in crossing linked-rings; do
 done
 ```
 
+Constraints goldens (M2, per-edge length + point pin — same self-checking
+script, modes `edgelengths` / `point`):
+
+```bash
+for f in crossing junction-y; do
+  uv run --with numpy --with scipy python oracle/tpe_constraints_oracle.py \
+    oracle/fixtures/$f.json oracle/golden/$f-edgelengths.json edgelengths
+done
+for f in crossing linked-rings; do
+  uv run --with numpy --with scipy python oracle/tpe_constraints_oracle.py \
+    oracle/fixtures/$f.json oracle/golden/$f-point.json point
+done
+```
+
 Status (2026-07-02): all property checks and cross-language gates pass on all
 five fixtures; every fixture accepts the full τ=1 line-search step with one
 projection iteration (vs raw-descent τ ≈ 1e-5…1e-2 — the point of the metric).
@@ -66,6 +83,14 @@ Status (2026-07-03, constraints M1): `crossing-length.json` and
 `linked-rings-length.json` generated with all embedded property checks green
 on both (τ = 1 accepted, energy decreases, length drift 7.5e-11 / 1.6e-16).
 The five stage-1 goldens are untouched.
+
+Status (2026-07-03, constraints M2): `crossing-edgelengths.json`,
+`junction-y-edgelengths.json`, `crossing-point.json`,
+`linked-rings-point.json` generated with all embedded property checks green
+(τ = 1 accepted on all four; max per-edge drift 2.2e-16 / 1.1e-15; pin
+distance 2.3e-22 / 1.4e-24). The `length`-mode output was verified
+semantically identical to the committed M1 goldens after the M2 script
+extension. Stage-1 and M1 goldens are untouched.
 
 Formula audit (2026-07-02): an isolated auditor diffed the results doc against
 verbatim paper excerpts — 11/11 items CONFIRMED, zero mismatches; report at
