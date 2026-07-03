@@ -1,5 +1,11 @@
 import { testConfigs } from '../core/testConfigs';
-import { type DescentMode, type LengthMode, type Mode, useSimStore } from '../store';
+import {
+    type DescentMode,
+    type LengthMode,
+    type Mode,
+    type ProjectionMode,
+    useSimStore,
+} from '../store';
 
 const btn = (bg: string) => ({
     padding: '10px 20px',
@@ -29,6 +35,8 @@ export function ControlPanel() {
     const lengthMode = useSimStore((s) => s.lengthMode);
     const setBarycenterConstraint = useSimStore((s) => s.setBarycenterConstraint);
     const setLengthMode = useSimStore((s) => s.setLengthMode);
+    const projectionMode = useSimStore((s) => s.projectionMode);
+    const setProjectionMode = useSimStore((s) => s.setProjectionMode);
     const showArrows = useSimStore((s) => s.showArrows);
     const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
@@ -164,6 +172,30 @@ export function ControlPanel() {
                         <option value="none">None</option>
                         <option value="total">Total</option>
                         <option value="perEdge">Per-edge</option>
+                    </select>
+                </label>
+                {/* Projection strategy A/B (solver-perf Task 6): frozen = the
+                    reference implementation's one-LU-per-step reuse (default),
+                    reassemble = per-iterate rebuild (stricter step quality on
+                    junction fixtures — see oracle/README.md measurement table).
+                    Sobolev-only, same disabled treatment as the Length select. */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                    }}
+                >
+                    <span>Projection:</span>
+                    <select
+                        value={projectionMode}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setProjectionMode(e.target.value as ProjectionMode)}
+                        style={{ padding: 8, fontSize: 14 }}
+                    >
+                        <option value="frozen">Frozen (reuse)</option>
+                        <option value="reassemble">Reassemble</option>
                     </select>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

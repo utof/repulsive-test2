@@ -20,7 +20,7 @@
  */
 import { execSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { DEFAULTS, sobolevStepSet } from '../src/core/optimizer';
+import { DEFAULTS, type ProjectionMode, sobolevStepSet } from '../src/core/optimizer';
 import {
     barycenterBlock,
     type ConstraintSet,
@@ -49,7 +49,7 @@ interface CaseResult {
     nV: number;
     nE: number;
     constraintMode: ConstraintMode;
-    projectionMode: 'reassemble' | 'frozen';
+    projectionMode: ProjectionMode;
     phases: Record<string, { ms: number; calls: number }>;
     isolated: Record<string, number>;
     fullStepMsMedian: number;
@@ -128,7 +128,14 @@ const PHASE_ORDER = [
     'step',
 ];
 
-function runCase(nV: number, constraintMode: ConstraintMode): CaseResult {
+// Case names: reassemble keeps the historical `N60-total` shape so Δ% joins
+// against pre-Task-6 baselines still work; frozen cases get a `-frozen`
+// suffix (projectionMode is a case dimension — plan Task 6 step 6.6).
+function runCase(
+    nV: number,
+    constraintMode: ConstraintMode,
+    projectionMode: ProjectionMode,
+): CaseResult {
     const { vertices, edges } = trefoil(nV);
     const disjointPairs = calculateDisjointPairs(edges);
     const set = buildSet(constraintMode, vertices, edges);
@@ -139,7 +146,12 @@ function runCase(nV: number, constraintMode: ConstraintMode): CaseResult {
     // energy eval — instead of re-measuring the pre-reuse path.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
     const energyBefore = calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    const opts = { mode: 'analytical' as const, collectTimings: true, energyBefore };
+    const opts = {
+        mode: 'analytical' as const,
+        collectTimings: true,
+        energyBefore,
+        projectionMode,
+    };
 
     // 2 warmup full steps (discarded), then K=5 measured — each from the SAME
     // initial vertices (the step is pure/deterministic → identical work).
@@ -194,11 +206,11 @@ function runCase(nV: number, constraintMode: ConstraintMode): CaseResult {
     };
 
     return {
-        name: `N${nV}-${constraintMode}`,
+        name: `N${nV}-${constraintMode}${projectionMode === 'frozen' ? '-frozen' : ''}`,
         nV,
         nE: edges.length,
         constraintMode,
-        projectionMode: 'reassemble',
+        projectionMode,
         phases,
         isolated,
         fullStepMsMedian: round3(median(fullMs)),
@@ -221,11 +233,15 @@ if (baselinePath) {
     baseline = JSON.parse(readFileSync(baselinePath, 'utf8')) as ResultsFile;
 }
 
+const projModes: ProjectionMode[] = ['reassemble', 'frozen'];
+
 const cases: CaseResult[] = [];
 for (const n of sizes) {
     for (const mode of modes) {
-        process.stderr.write(`running ${`N${n}-${mode}`}…\n`);
-        cases.push(runCase(n, mode));
+        for (const proj of projModes) {
+            process.stderr.write(`running N${n}-${mode}-${proj}…\n`);
+            cases.push(runCase(n, mode, proj));
+        }
     }
 }
 
@@ -254,12 +270,12 @@ lines.push(`# Sobolev step bench — ${date} · bun ${Bun.version} · ${gitShaSh
 if (baseline) lines.push(`Δ% vs baseline: **${baseline.label}** (${baseline.gitShaShort})`);
 lines.push('');
 lines.push('## Full step (median of 5)');
-lines.push('| case | |V| | |E| | constraint | full step ms |');
-lines.push('|---|---|---|---|---|');
+lines.push('| case | |V| | |E| | constraint | projection | full step ms |');
+lines.push('|---|---|---|---|---|---|');
 for (const c of cases) {
     const b = baseCase(c.name);
     lines.push(
-        `| ${c.name} | ${c.nV} | ${c.nE} | ${c.constraintMode} | ${c.fullStepMsMedian}${pct(c.fullStepMsMedian, b?.fullStepMsMedian)} |`,
+        `| ${c.name} | ${c.nV} | ${c.nE} | ${c.constraintMode} | ${c.projectionMode} | ${c.fullStepMsMedian}${pct(c.fullStepMsMedian, b?.fullStepMsMedian)} |`,
     );
 }
 lines.push('');

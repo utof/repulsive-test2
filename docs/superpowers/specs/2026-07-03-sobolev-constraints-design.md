@@ -124,6 +124,15 @@ all blocks' rows in set order.
 
 ### 3.3 Projection stopping tolerance with mixed rows (OUR invention — flag it)
 
+> **SUPERSEDED VALUE (2026-07-03, solver-perf Task 6):** tolAbs = tolRel =
+> **1e-4** — the reference implementation's `backproj_threshold`
+> (ythea/repulsive-curves src/tpe_flow_sc.cpp:15). The per-block RULE below is
+> unchanged and still ours. The original 1e-10 caused a false kill of the
+> paper's factorization-reuse scheme; it survives only in the read-only
+> stage-1 oracle and its pinned golden tests. The 1e-8 drift gates quoted in
+> §4.4.3/§5.2/§5.4 correspondingly became stopping-rule-tracking bounds
+> (≤ 1e-4·scale_b). @see oracle/README.md ("Projection tolerance provenance")
+
 Current: ‖Φ‖₂ ≤ max(tolAbs, tolRel·barycenterScale). With heterogeneous rows,
 check per block: converged iff EVERY block satisfies
 `‖Φ_block‖₂ ≤ max(tolAbs, tolRel·block.scale(...))`, with tolAbs = tolRel = 1e-10

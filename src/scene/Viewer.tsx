@@ -86,6 +86,9 @@ function Simulation() {
                 barycenterConstraint: st.barycenterConstraint,
                 lengthMode: st.lengthMode,
                 sobolevEll0: st.sobolevEll0,
+                // Projection strategy A/B (solver-perf Task 6): store default
+                // 'frozen' (reference-impl reuse), 'reassemble' selectable.
+                projectionMode: st.projectionMode,
                 // Always collect per-phase timings for the Stats.tsx readout; the
                 // raw path ignores this and the collector is inert when off.
                 // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)

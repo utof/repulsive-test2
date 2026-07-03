@@ -18,7 +18,8 @@ bun bench/sobolev.bench.ts --big                     # add the N=240 cases
 
 - `--save <label>` writes `bench/results/<YYYY-MM-DD>-<label>.json`.
 - `--baseline <path>` adds a `Δ%` column to every printed number, matched by case
-  name (`N<nV>-<constraintMode>`).
+  name (`N<nV>-<constraintMode>`; frozen-projection cases append `-frozen` —
+  reassemble names stay unsuffixed so pre-Task-6 baselines keep joining).
 
 ## Cases
 
@@ -29,6 +30,10 @@ constraint sets:
 
 - `total` — `[barycenter, totalLength]`
 - `perEdge` — `[barycenter, edgeLengths]`
+
+and two projection strategies (`projectionMode`, solver-perf Task 6):
+`reassemble` (per-iterate rebuild) and `frozen` (one K(γ₀) LU per step —
+reference-impl reuse).
 
 Targets are frozen from the initial geometry, mirroring the store's
 frozen-target lifecycle (spec §3.5).

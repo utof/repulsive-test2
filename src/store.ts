@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
     DEFAULTS,
+    type ProjectionMode,
     type SobolevStepStats,
     sobolevStep,
     sobolevStepSet,
@@ -25,6 +26,10 @@ import {
     testConfigs,
     type Vec3,
 } from './core/testConfigs';
+
+// Re-exported so UI components can import all sim-facing types from the store
+// (same pattern as Mode/DescentMode/LengthMode).
+export type { ProjectionMode } from './core/optimizer';
 
 const STORAGE_KEY = 'repulsive-test-config';
 
@@ -168,6 +173,12 @@ export function dispatchDescentStep(args: {
     // is structurally impossible. Ignored on the raw path.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
     energyBefore?: number;
+    // Projection solve strategy passthrough (solver-perf Task 6). Absent →
+    // sobolevStepSet's default ('reassemble'), so pre-existing call sites and
+    // tests are bit-identical; the app passes the store's projectionMode
+    // (store default 'frozen' — the reference-implementation scheme).
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+    projectionMode?: ProjectionMode;
 }): DescentStepOutcome {
     if (args.descentMode === 'sobolev') {
         if (
@@ -218,6 +229,8 @@ export function dispatchDescentStep(args: {
             // E₀ reuse (Task 4): passthrough to the step; undefined → recompute.
             // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
             energyBefore: args.energyBefore,
+            // Projection strategy (Task 6): passthrough; undefined → 'reassemble'.
+            projectionMode: args.projectionMode,
         });
         return {
             vertices: r.vertices,
@@ -281,6 +294,16 @@ export interface SimStore {
     // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.2, §9a
     barycenterConstraint: boolean;
     lengthConstraint: boolean;
+    // Projection solve strategy for the sobolev step (solver-perf Task 6).
+    // Default 'frozen' — the reference implementation's per-step
+    // factorization-reuse scheme (paper line 734): cheapest, paper-shipped
+    // behavior; 'reassemble' is the stricter-step-quality A/B alternative
+    // (see the measured trade-off in oracle/README.md "Frozen-projection
+    // mode", incl. the junction-fixture τ-backtracking caveat). A/B-selectable
+    // in the ControlPanel; does NOT touch the frozen targets or the
+    // constraint set, so switching it never invalidates sobolevConverged.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+    projectionMode: ProjectionMode;
     // Last sobolev step's diagnostics (null before any sobolev step and in raw
     // mode); `sobolevConverged` mirrors spec §C step 5's termination outcome.
     sobolevStats: SobolevStepStats | null;
@@ -316,6 +339,7 @@ export interface SimStore {
     setBarycenterConstraint(b: boolean): void;
     setLengthMode(m: LengthMode): void;
     setLengthConstraint(b: boolean): void;
+    setProjectionMode(m: ProjectionMode): void;
     setShowArrows(b: boolean): void;
     setRunning(b: boolean): void;
     setZoom(z: number): void;
@@ -384,6 +408,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         lengthMode: 'total',
         barycenterConstraint: true,
         lengthConstraint: true,
+        projectionMode: 'frozen',
         sobolevStats: null,
         sobolevConverged: false,
         sobolevTimings: null,
@@ -427,6 +452,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
         // Legacy M1 setter: writes THROUGH the 3-way mode so the boolean mirror
         // and lengthMode can never diverge (see the lengthMode field anchor).
         setLengthConstraint: (b) => get().setLengthMode(b ? 'total' : 'none'),
+        // Solver strategy, not a constraint toggle: leaves targets, stats, and
+        // the converged verdict alone (see the projectionMode field anchor).
+        setProjectionMode: (m) => set({ projectionMode: m }),
         setShowArrows: (b) => set({ showArrows: b }),
         setRunning: (b) => {
             if (b) {

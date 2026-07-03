@@ -443,10 +443,25 @@ export function solveSaddleFromA(
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
     const fac = timed('factor', () => luFactor(K, size));
     const z = luSolveFactored(fac, rhs);
+    const residual = structuredSaddleResidual(a, n, C, z, rhs);
 
-    // Self-certifying residual — computed on EVERY solve, never skipped.
-    // Structured matvec against the original a/C (the factorization destroyed K).
-    // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B / §E (prop 8: saddle residual)
+    return { x: z.slice(0, m), lambda: z.slice(m), residual, fac };
+}
+
+// Self-certifying residual ‖K·z − rhs‖₂ / max(1, ‖rhs‖₂) via a STRUCTURED
+// matvec against the original a/C (the in-place factorization destroyed K):
+// K·z = [A·x per coordinate block + Cᵀ·λ ; C·x]. Extracted verbatim from
+// solveSaddleFromA (loop and term order unchanged — the golden-gated value is
+// bit-identical) so solveSaddleFrozen certifies its reuse solves the same way.
+function structuredSaddleResidual(
+    a: Float64Array,
+    n: number,
+    C: number[][],
+    z: number[],
+    rhs: number[],
+): number {
+    const m = 3 * n;
+    const k = C.length;
     let resNormSq = 0;
     let rhsNormSq = 0;
     for (let b = 0; b < 3; b++) {
@@ -476,7 +491,59 @@ export function solveSaddleFromA(
         resNormSq += d * d;
         rhsNormSq += rhs[m + r] * rhs[m + r];
     }
-    const residual = Math.sqrt(resNormSq) / Math.max(1, Math.sqrt(rhsNormSq));
+    return Math.sqrt(resNormSq) / Math.max(1, Math.sqrt(rhsNormSq));
+}
 
-    return { x: z.slice(0, m), lambda: z.slice(m), residual, fac };
+/**
+ * The frozen saddle operator K(γ₀) = [[Ā(γ₀), C(γ₀)ᵀ], [C(γ₀), 0]], packed for
+ * per-step factorization reuse (solver-perf Task 6): `fac` is the one LU that
+ * the gradient solve and every projection iterate of every τ-trial share —
+ * the authors' reference-implementation scheme (ythea/repulsive-curves
+ * src/tpe_flow_sc.cpp, ProjectGradient + LSBackproject; paper line 734).
+ * `a` (flat scalar |V|×|V| Ā) and `C` are retained UNfactored so every reuse
+ * solve can compute the same self-certifying structured residual as
+ * solveSaddleFromA — never skipped.
+ * @see oracle/tpe_constraints_oracle.py (Frozen / build_frozen_saddle)
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+ */
+export interface FrozenSaddleOperator {
+    a: Float64Array;
+    n: number;
+    C: number[][];
+    fac: LuFactorization;
+}
+
+/**
+ * Solves K(γ₀)·[x; λ] = [rhsTop; rhsBottom] against a {@link FrozenSaddleOperator}
+ * — forward/back substitution only, no assembly, no factorization ('factor'
+ * never fires here; that is the point of the reuse). The relative residual is
+ * ALWAYS computed against the frozen a/C via the same structured matvec as
+ * solveSaddleFromA (spec §E prop 8 self-certification survives the reuse).
+ * `rhsBottom` defaults to zeros(k); the frozen projection passes −Φ(γ^q) there.
+ * @see oracle/tpe_constraints_oracle.py (solve_saddle_frozen)
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+ */
+export function solveSaddleFrozen(
+    op: FrozenSaddleOperator,
+    rhsTop: number[],
+    rhsBottom?: number[],
+): { x: number[]; lambda: number[]; residual: number } {
+    const { a, n, C, fac } = op;
+    const m = 3 * n;
+    const k = C.length;
+    if (rhsTop.length !== m) {
+        throw new Error(
+            `solveSaddleFrozen: rhsTop length ${rhsTop.length} does not match 3n = ${m}`,
+        );
+    }
+    const bottom = rhsBottom ?? new Array<number>(k).fill(0);
+    if (bottom.length !== k) {
+        throw new Error(
+            `solveSaddleFrozen: rhsBottom length ${bottom.length} does not match C rows ${k}`,
+        );
+    }
+    const rhs = [...rhsTop, ...bottom];
+    const z = luSolveFactored(fac, rhs);
+    const residual = structuredSaddleResidual(a, n, C, z, rhs);
+    return { x: z.slice(0, m), lambda: z.slice(m), residual };
 }

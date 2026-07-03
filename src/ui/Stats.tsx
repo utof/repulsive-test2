@@ -65,8 +65,8 @@ export function Stats() {
                 @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (steps 5, 10) */}
             {/* Sobolev-only length readout: current L and drift |L − L⁰|/L⁰ against
                 the frozen target (shown even before the first step, when
-                sobolevStats is still null). Drift ≤ ~1e-8 with "Fix length" on is
-                projection tolerance, not error.
+                sobolevStats is still null). Drift ≤ ~1e-4 with "Fix length" on is
+                projection tolerance (reference backproj_threshold), not error.
                 @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.3, §3.5 */}
             {descentMode === 'sobolev' && (
                 <>

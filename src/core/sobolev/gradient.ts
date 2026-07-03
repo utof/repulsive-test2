@@ -14,7 +14,7 @@ import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterBlock, type ConstraintSet, evaluateConstraintSet } from './constraintSet';
 import { assembleAFlat } from './innerProduct';
 import { flatten, unflatten } from './layout';
-import { solveSaddleFromA } from './linsolve';
+import { type FrozenSaddleOperator, solveSaddleFromA } from './linsolve';
 import { timed } from './phaseTimings';
 
 /**
@@ -49,6 +49,42 @@ export function solveConstrainedGradientSet(
     dE: Vec3[],
     set: ConstraintSet,
 ): { gTilde: Vec3[]; lambda: number[]; residual: number } {
+    // Same solve as the frozen variant — the operator is simply dropped, so
+    // the default path stays numerically bit-identical (golden-gated).
+    const { gTilde, lambda, residual } = solveConstrainedGradientSetFrozen(
+        vertices,
+        edges,
+        disjointPairs,
+        alpha,
+        beta,
+        epsilon,
+        dE,
+        set,
+    );
+    return { gTilde, lambda, residual };
+}
+
+/**
+ * {@link solveConstrainedGradientSet} that ALSO returns the frozen saddle
+ * operator K(γ₀) it factored (solver-perf Task 6): assembled at the step base
+ * point γ₀ = `vertices`, its one LU is consumed by this gradient solve and is
+ * meant to be reused for every projection iterate of every τ-trial of the SAME
+ * step — the authors' reference-implementation scheme (ythea/repulsive-curves
+ * src/tpe_flow_sc.cpp; paper line 734). NEVER reuse the operator across steps
+ * or for a different constraint set: it is γ₀- and set-specific.
+ * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set_frozen)
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+ */
+export function solveConstrainedGradientSetFrozen(
+    vertices: Vec3[],
+    edges: Edge[],
+    disjointPairs: number[][],
+    alpha: number,
+    beta: number,
+    epsilon: number,
+    dE: Vec3[],
+    set: ConstraintSet,
+): { gTilde: Vec3[]; lambda: number[]; residual: number; frozen: FrozenSaddleOperator } {
     // Typed-array fast path (solver-perf Task 5): flat scalar A straight into
     // solveSaddleFromA, which writes Ā's diagonal blocks itself — the 'expand'
     // phase (expandBlockDiag) intentionally no longer fires here. 'saddle'
@@ -60,10 +96,15 @@ export function solveConstrainedGradientSet(
     // constraint-projection solve which passes −Φ there.
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
     const { C } = evaluateConstraintSet(set, vertices, edges);
-    const { x, lambda, residual } = timed('saddle', () =>
+    const { x, lambda, residual, fac } = timed('saddle', () =>
         solveSaddleFromA(A, vertices.length, C, flatten(dE)),
     );
-    return { gTilde: unflatten(x), lambda, residual };
+    return {
+        gTilde: unflatten(x),
+        lambda,
+        residual,
+        frozen: { a: A, n: vertices.length, C, fac },
+    };
 }
 
 /**

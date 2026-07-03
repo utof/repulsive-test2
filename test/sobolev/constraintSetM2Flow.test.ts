@@ -9,6 +9,7 @@ import {
     edgeLengthsBlock,
     evaluateConstraintSet,
     pointBlock,
+    totalLength,
 } from '../../src/core/sobolev/constraintSet';
 import { barycenterTarget } from '../../src/core/sobolev/constraints';
 import { solveConstrainedGradientSet } from '../../src/core/sobolev/gradient';
@@ -249,14 +250,43 @@ function maxEdgeDrift(current: Vec3[], edges: Edge[], ell0: number[]): number {
     return worst;
 }
 
+// Drift bounds below MIRROR the per-block projection stopping rule
+// ‖Φ_b‖₂ ≤ 1e-4·scale_b that the default projection enforces (value 1e-4 =
+// reference-impl backproj_threshold; rule = spec §3.3). Recomputed here
+// independently of the projection internals. The old fixed 1e-8 bounds were
+// only satisfiable at the pre-provenance 1e-10 tolerance.
+// @see oracle/README.md ("Projection tolerance provenance")
+function edgeLengthsRuleBound(current: Vec3[], edges: Edge[]): number {
+    // edgeLengths block scale = max(1, L) — see constraintSet.ts.
+    return 1e-4 * Math.max(1, totalLength(current, edges));
+}
+
+function stackedEdgeDrift(current: Vec3[], edges: Edge[], ell0: number[]): number {
+    const now = edgeLengths(current, edges);
+    let sq = 0;
+    for (let i = 0; i < now.length; i++) {
+        const d = now[i] - ell0[i];
+        sq += d * d;
+    }
+    return Math.sqrt(sq);
+}
+
+function pointRuleBound(current: Vec3[], target: Vec3): number {
+    // point block scale = max(1, R), R = max vertex distance to the target.
+    let R = 0;
+    for (const p of current) R = Math.max(R, distTo(p, target));
+    return 1e-4 * Math.max(1, R);
+}
+
 function distTo(p: Vec3, q: Vec3): number {
     return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
 }
 
 // Flow property (spec §5.4.3, oracle-independent): per-edge mode on crossing —
-// "isometric untangling": every edge's |ℓ_I − ℓ⁰_I|/ℓ⁰_I ≤ 1e-8 after EVERY
-// step, energy strictly decreases, all steps accepted.
-test('flow: 5 steps on crossing with [barycenter, edgeLengths] — accepted, energy ↓, every-edge drift ≤ 1e-8 each step', () => {
+// "isometric untangling": after EVERY step the stacked edge-length drift
+// satisfies the projection stopping rule (edgeLengthsRuleBound above), energy
+// strictly decreases, all steps accepted.
+test('flow: 5 steps on crossing with [barycenter, edgeLengths] — accepted, energy ↓, edge drift within stopping rule each step', () => {
     const { vertices, edges, alpha, beta, epsilon } = loadFixture('crossing');
     const disjointPairs = calculateDisjointPairs(edges);
     // Frozen targets: computed ONCE from the initial state (spec §3.5).
@@ -273,19 +303,22 @@ test('flow: 5 steps on crossing with [barycenter, edgeLengths] — accepted, ene
         expect(r.energy).toBeLessThan(previousEnergy);
         current = r.vertices;
         previousEnergy = r.energy;
-        const worst = maxEdgeDrift(current, edges, ell0);
+        const stacked = stackedEdgeDrift(current, edges, ell0);
+        const bound = edgeLengthsRuleBound(current, edges);
         console.log(
             `[flowM2:perEdge] step ${step + 1}: τ = ${r.stats.tau}, E = ${r.energy.toExponential(6)}, ` +
-                `‖g̃‖ = ${r.stats.gradientL2Norm.toExponential(3)}, max per-edge drift = ${worst.toExponential(3)}`,
+                `‖g̃‖ = ${r.stats.gradientL2Norm.toExponential(3)}, ‖ℓ−ℓ⁰‖ = ${stacked.toExponential(3)} ` +
+                `(bound ${bound.toExponential(3)}, max per-edge rel ${maxEdgeDrift(current, edges, ell0).toExponential(3)})`,
         );
-        expect(worst).toBeLessThanOrEqual(1e-8);
+        expect(stacked).toBeLessThanOrEqual(bound);
     }
 });
 
-// Point flow (spec §5.4.5): pin vertex 0 on crossing, 3 steps — γ₀ within 1e-8
-// of the target after every step while energy decreases. The pin-only set also
-// exercises a barycenter-less ConstraintSet (spec §9a).
-test('flow: 3 steps on crossing with [point(0)] — accepted, energy ↓, ‖γ₀ − target‖ ≤ 1e-8 each step', () => {
+// Point flow (spec §5.4.5): pin vertex 0 on crossing, 3 steps — γ₀ within the
+// stopping-rule bound (pointRuleBound above) of the target after every step
+// while energy decreases. The pin-only set also exercises a barycenter-less
+// ConstraintSet (spec §9a).
+test('flow: 3 steps on crossing with [point(0)] — accepted, energy ↓, pin within stopping rule each step', () => {
     const { vertices, edges, alpha, beta, epsilon } = loadFixture('crossing');
     const disjointPairs = calculateDisjointPairs(edges);
     const target: Vec3 = [vertices[0][0], vertices[0][1], vertices[0][2]];
@@ -301,11 +334,12 @@ test('flow: 3 steps on crossing with [point(0)] — accepted, energy ↓, ‖γ�
         current = r.vertices;
         previousEnergy = r.energy;
         const pinDist = distTo(current[0], target);
+        const bound = pointRuleBound(current, target);
         console.log(
             `[flowM2:point] step ${step + 1}: τ = ${r.stats.tau}, E = ${r.energy.toExponential(6)}, ` +
-                `‖γ₀ − target‖ = ${pinDist.toExponential(3)}`,
+                `‖γ₀ − target‖ = ${pinDist.toExponential(3)} (bound ${bound.toExponential(3)})`,
         );
-        expect(pinDist).toBeLessThanOrEqual(1e-8);
+        expect(pinDist).toBeLessThanOrEqual(bound);
     }
 });
 
@@ -334,6 +368,8 @@ test('rank rule: [edgeLengths, point(0)] on crossing — construction passes, ac
     );
     expect(r.accepted).toBe(true);
     expect(r.energy).toBeLessThan(e0);
-    expect(distTo(r.vertices[0], target)).toBeLessThanOrEqual(1e-8);
-    expect(maxEdgeDrift(r.vertices, edges, ell0)).toBeLessThanOrEqual(1e-8);
+    expect(distTo(r.vertices[0], target)).toBeLessThanOrEqual(pointRuleBound(r.vertices, target));
+    expect(stackedEdgeDrift(r.vertices, edges, ell0)).toBeLessThanOrEqual(
+        edgeLengthsRuleBound(r.vertices, edges),
+    );
 });

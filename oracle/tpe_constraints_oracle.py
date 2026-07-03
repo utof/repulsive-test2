@@ -15,11 +15,32 @@ Spec: docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md
 not paper-sourced, see local_files/2026-07-02-sobolev-formula-audit.md item 9).
 
 Usage:
-    python tpe_constraints_oracle.py fixture.json golden.json [mode]
+    python tpe_constraints_oracle.py fixture.json golden.json [mode] [projection]
 
 mode: "length" (default, M1) = [barycenter, totalLength];
       "edgelengths" (M2)     = [barycenter, edgeLengths];
       "point" (M2)           = [barycenter, point(vertex 0, initial position)].
+
+Tolerance provenance: the projection stopping tolerance 1e-4 is the reference
+implementation's backproj_threshold (ythea/repulsive-curves
+src/tpe_flow_sc.cpp:15) — reference VALUE fed into OUR per-block scaled rule
+(spec §3.3). The original 1e-10 was our invention; gating the frozen mode at
+it caused the 2026-07-03 false kill (see oracle/README.md "Projection
+tolerance provenance"). The stage-1 oracle (read-only deliverable) keeps its
+baked-in 1e-10; its goldens are a frozen 1e-10-era contract.
+
+projection: "reassemble" (default) = reassemble + refactor K at every
+      projection iterate (the M1/M2 golden semantics, regenerated 2026-07-03
+      at the reference tolerance);
+      "frozen" = factor K(gamma_0) ONCE (scipy.linalg.lu_factor) and reuse it
+      for the gradient solve and every projection iterate of every tau-trial,
+      with Phi evaluated FRESH each iterate (quasi-Newton: frozen metric +
+      frozen Jacobian, live residual). Paper-sanctioned: "constraint projection
+      with direct solvers comes nearly for free, since a factorization of [the
+      constraint saddle] can be reused to solve [the gradient saddle]"
+      (SelfAvoiding.tex line 734). Emits `<fixture>-<mode>-frozen.json` and
+      additionally gates projection_iterations <= 3 on the accepted step.
+      @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
 """
 from __future__ import annotations
 
@@ -29,6 +50,7 @@ import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+import scipy.linalg as la
 
 from tpe_stage1_oracle import (
     DEFAULT_FD_H,
@@ -215,6 +237,73 @@ def solve_constrained_gradient_set(
     return unflatten_vec3_block(g_flat), lam, residual
 
 
+# Frozen operator: (K, lu_factor(K), m = 3n). K and m are retained so every
+# reuse solve can compute the same self-certifying relative residual as
+# solve_saddle — never skipped.
+Frozen = Tuple[np.ndarray, Any, int]
+
+
+def build_frozen_saddle(
+    vertices: np.ndarray,
+    edges: np.ndarray,
+    alpha: float,
+    beta: float,
+    eps: float,
+    blocks: List[Block],
+) -> Frozen:
+    """K(gamma_0) = [[A3(gamma_0), C(gamma_0)^T], [C(gamma_0), 0]] assembled and
+    LU-factored ONCE at the step base point gamma_0, then reused for the
+    gradient solve AND every projection iterate of every tau-trial.
+
+    Paper-sanctioned (SelfAvoiding.tex line 734): "constraint projection with
+    direct solvers comes nearly for free, since a factorization of [the
+    constraint saddle] can be reused to solve [the gradient saddle]".
+    @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+    """
+    _B, _B0, A, _info = assemble_inner_product(vertices, edges, alpha, beta, eps)
+    A3 = expand_vector_inner_product(A)
+    _phi, C, _counts = evaluate_constraint_set(blocks, vertices, edges)
+    k = C.shape[0]
+    K = np.block([[A3, C.T], [C, np.zeros((k, k), dtype=float)]])
+    fac = la.lu_factor(K, check_finite=True)
+    return K, fac, A3.shape[0]
+
+
+def solve_saddle_frozen(
+    frozen: Frozen, rhs_top: np.ndarray, rhs_bottom: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """lu_solve against the frozen factorization. Same relative-residual
+    definition as solve_saddle (||K.z - rhs|| / max(1, ||rhs||)), computed on
+    EVERY solve against the frozen K — the self-certifying gate survives the
+    reuse. @see oracle/tpe_stage1_oracle.py (solve_saddle)"""
+    K, fac, m = frozen
+    k = K.shape[0] - m
+    if rhs_bottom is None:
+        rhs_bottom = np.zeros(k, dtype=float)
+    rhs = np.concatenate([rhs_top, rhs_bottom])
+    sol = la.lu_solve(fac, rhs, check_finite=True)
+    residual = safe_norm(K @ sol - rhs) / max(1.0, safe_norm(rhs))
+    return sol[:m], sol[m:], residual
+
+
+def solve_constrained_gradient_set_frozen(
+    vertices: np.ndarray,
+    edges: np.ndarray,
+    alpha: float,
+    beta: float,
+    eps: float,
+    dE_vec3: np.ndarray,
+    blocks: List[Block],
+) -> Tuple[np.ndarray, np.ndarray, float, Frozen]:
+    """Frozen-mode gradient solve: builds the frozen operator at gamma_0 and
+    consumes it for [[A3, C^T], [C, 0]][g; lam] = [dE; 0]; returns the operator
+    so the line search reuses the SAME factorization for every projection
+    iterate (paper line 734, see build_frozen_saddle)."""
+    frozen = build_frozen_saddle(vertices, edges, alpha, beta, eps, blocks)
+    g_flat, lam, residual = solve_saddle_frozen(frozen, flatten_vec3_block(dE_vec3))
+    return unflatten_vec3_block(g_flat), lam, residual, frozen
+
+
 def constraint_set_converged(
     blocks: List[Block],
     vertices: np.ndarray,
@@ -243,14 +332,24 @@ def project_constraint_set(
     beta: float,
     eps: float,
     blocks: List[Block],
-    tol_abs: float = 1.0e-10,
-    tol_rel: float = 1.0e-10,
+    # 1e-4: reference-impl backproj_threshold (ythea/repulsive-curves
+    # src/tpe_flow_sc.cpp:15); see module docstring "Tolerance provenance".
+    tol_abs: float = 1.0e-4,
+    tol_rel: float = 1.0e-4,
     max_iter: int = 8,
+    frozen: Optional[Frozen] = None,
 ) -> Tuple[np.ndarray, bool, int, float]:
     """Set-generic mirror of the stage-1 project_barycenter: same
     check-before-correct loop (max_iter + 1 checks), same reassembly of A per
     iterate, same failure semantics; only the convergence test is per-block and
-    the reported phi_norm is the STACKED ||Phi||_2."""
+    the reported phi_norm is the STACKED ||Phi||_2.
+
+    frozen (Task 6): when given, the per-iterate solve reuses the frozen
+    K(gamma_0) factorization (lu_solve, fresh -Phi RHS) instead of
+    reassembling — everything else (stopping rule, tolerances, max_iter,
+    non-finite -> ok False, exception -> ok False) is IDENTICAL by
+    construction: the same loop runs, only the solve line differs.
+    @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)"""
     cur = vertices.copy()
     final_phi_norm = math.inf
     for it in range(max_iter + 1):
@@ -261,11 +360,17 @@ def project_constraint_set(
         if it == max_iter:
             break
         try:
-            _B, _B0, A, _info = assemble_inner_product(cur, edges, alpha, beta, eps)
-            A3 = expand_vector_inner_product(A)
-            x_flat, _mu, _res = solve_saddle(
-                A3, C, np.zeros(3 * cur.shape[0], dtype=float), -phi
-            )
+            if frozen is not None:
+                # Frozen K(gamma_0), fresh Phi(gamma_q): quasi-Newton correction.
+                x_flat, _mu, _res = solve_saddle_frozen(
+                    frozen, np.zeros(3 * cur.shape[0], dtype=float), -phi
+                )
+            else:
+                _B, _B0, A, _info = assemble_inner_product(cur, edges, alpha, beta, eps)
+                A3 = expand_vector_inner_product(A)
+                x_flat, _mu, _res = solve_saddle(
+                    A3, C, np.zeros(3 * cur.shape[0], dtype=float), -phi
+                )
             step = unflatten_vec3_block(x_flat)
             if not np.all(np.isfinite(step)):
                 return cur, False, it, final_phi_norm
@@ -288,9 +393,14 @@ def line_search_step_set(
     shrink: float = 0.5,
     tau0: float = 1.0,
     tau_min: float = 1.0e-12,
+    frozen: Optional[Frozen] = None,
 ) -> Dict[str, Any]:
     """Set-generic mirror of the stage-1 line_search_step (identical control
-    flow and payloads; projection swapped for project_constraint_set)."""
+    flow and payloads; projection swapped for project_constraint_set).
+
+    frozen (Task 6): the gradient solve's K(gamma_0) factorization, forwarded
+    to project_constraint_set so EVERY projection iterate of EVERY tau-trial
+    reuses it (paper line 734 semantics; see build_frozen_saddle)."""
     e0 = energy(vertices, edges, alpha, beta, eps)
     grad_norm = l2_curve_norm_vec3(g_tilde, vertices, edges)
     if not np.isfinite(grad_norm) or grad_norm <= 0.0:
@@ -325,7 +435,7 @@ def line_search_step_set(
     while tau >= tau_min:
         raw = vertices - tau * direction
         projected, ok, proj_iters, phi_norm = project_constraint_set(
-            raw, edges, alpha, beta, eps, blocks
+            raw, edges, alpha, beta, eps, blocks, frozen=frozen
         )
         if ok and np.all(np.isfinite(projected)):
             e1 = energy(projected, edges, alpha, beta, eps)
@@ -397,16 +507,23 @@ def fd_jacobian_check(
 
 
 def main(argv: List[str]) -> int:
-    if len(argv) not in (3, 4):
+    if len(argv) not in (3, 4, 5):
         print(
-            "Usage: python tpe_constraints_oracle.py fixture.json golden.json [mode]",
+            "Usage: python tpe_constraints_oracle.py fixture.json golden.json [mode] [projection]",
             file=sys.stderr,
         )
         return 2
-    mode = argv[3] if len(argv) == 4 else "length"
+    mode = argv[3] if len(argv) >= 4 else "length"
     if mode not in ("length", "edgelengths", "point"):
         print(
             f"unknown mode {mode!r}; expected length | edgelengths | point",
+            file=sys.stderr,
+        )
+        return 2
+    projection = argv[4] if len(argv) == 5 else "reassemble"
+    if projection not in ("reassemble", "frozen"):
+        print(
+            f"unknown projection {projection!r}; expected reassemble | frozen",
             file=sys.stderr,
         )
         return 2
@@ -446,10 +563,21 @@ def main(argv: List[str]) -> int:
         extra_targets["pin_target"] = [float(x) for x in pin_target]
 
     phi0, C0, counts = evaluate_constraint_set(blocks, vertices, edges)
-    g_tilde, lambdas, residual = solve_constrained_gradient_set(
-        vertices, edges, alpha, beta, eps, dE, blocks
+    if projection == "frozen":
+        # Factor K(gamma_0) ONCE; the gradient solve consumes it and the SAME
+        # factorization drives every projection iterate of every tau-trial
+        # (paper line 734 — see build_frozen_saddle).
+        g_tilde, lambdas, residual, frozen = solve_constrained_gradient_set_frozen(
+            vertices, edges, alpha, beta, eps, dE, blocks
+        )
+    else:
+        g_tilde, lambdas, residual = solve_constrained_gradient_set(
+            vertices, edges, alpha, beta, eps, dE, blocks
+        )
+        frozen = None
+    step = line_search_step_set(
+        vertices, edges, alpha, beta, eps, dE, g_tilde, blocks, frozen=frozen
     )
-    step = line_search_step_set(vertices, edges, alpha, beta, eps, dE, g_tilde, blocks)
 
     # --- property checks --------------------------------------------------
     fd_rel, fd_ok = fd_jacobian_check(blocks, vertices, edges)
@@ -468,37 +596,65 @@ def main(argv: List[str]) -> int:
             f"E {step['energy_before']:.9e} -> {step['energy_after']:.9e}",
         )
         newV = np.asarray(step["vertices"], dtype=float)
+        # Drift gates TRACK the projection stopping rule (reference tolerance
+        # 1e-4 into the per-block scaled rule — module docstring "Tolerance
+        # provenance"), recomputed independently of the projection internals.
+        # Measured values are printed so the README table records ACTUAL drift
+        # (typically far below the bound thanks to Newton overshoot); the old
+        # fixed 1e-8 gates were only satisfiable at the pre-provenance 1e-10.
         if mode == "length":
             L1 = total_length(newV, edges)
-            drift = abs(L1 - L0) / max(1.0, L0)
-            check("length drift |L-L0|/max(1,L0) <= 1e-8 after step", drift <= 1.0e-8, f"drift = {drift:.3e}")
+            bound = 1.0e-4 * max(1.0, L1)
+            check(
+                "length drift |L-L0| <= 1e-4*max(1,L) after step (stopping rule)",
+                abs(L1 - L0) <= bound,
+                f"|L-L0| = {abs(L1 - L0):.3e} (bound {bound:.3e})",
+            )
         elif mode == "edgelengths":
             ell1 = edge_lengths(newV, edges)
             ell0_arr = np.asarray(extra_targets["ell0_edge_length_targets"], dtype=float)
+            stacked = float(np.sqrt(np.sum((ell1 - ell0_arr) ** 2)))
+            bound = 1.0e-4 * max(1.0, total_length(newV, edges))
             worst = float(np.max(np.abs(ell1 - ell0_arr) / ell0_arr))
             check(
-                "per-edge drift max_I |l_I - l0_I|/l0_I <= 1e-8 after step",
-                worst <= 1.0e-8,
-                f"max drift = {worst:.3e}",
+                "edge-length drift ||l - l0||_2 <= 1e-4*max(1,L) after step (stopping rule)",
+                stacked <= bound,
+                f"||l-l0|| = {stacked:.3e} (bound {bound:.3e}, max per-edge rel {worst:.3e})",
             )
         else:  # point
             pin = newV[int(extra_targets["pin_vertex_index"])]
-            dist = safe_norm(pin - np.asarray(extra_targets["pin_target"], dtype=float))
+            target = np.asarray(extra_targets["pin_target"], dtype=float)
+            dist = safe_norm(pin - target)
+            bound = 1.0e-4 * max(1.0, float(max(safe_norm(v - target) for v in newV)))
             check(
-                "pin distance ||gamma_pin - target|| <= 1e-8 after step",
-                dist <= 1.0e-8,
-                f"dist = {dist:.3e}",
+                "pin distance <= 1e-4*max(1,R) after step (stopping rule)",
+                dist <= bound,
+                f"dist = {dist:.3e} (bound {bound:.3e})",
             )
         phi1, _, counts1 = evaluate_constraint_set(blocks, newV, edges)
-        per_block_ok = constraint_set_converged(blocks, newV, edges, phi1, counts1, 1.0e-10, 1.0e-10)
+        # 1e-4: same reference tolerance as project_constraint_set's defaults.
+        per_block_ok = constraint_set_converged(blocks, newV, edges, phi1, counts1, 1.0e-4, 1.0e-4)
         check("per-block Phi tolerances hold after step (spec §3.3)", per_block_ok, f"||Phi|| = {safe_norm(phi1):.3e}")
+        if projection == "frozen":
+            # The frozen mode's kill gate (plan Task 6): <= 3 is BOTH the
+            # paper's stated expectation (SelfAvoiding.tex line 611) and the
+            # reference implementation's hard cap (ythea/repulsive-curves
+            # src/tpe_flow_sc.cpp:306, `for (int i = 0; i < 3; i++)`). Only
+            # meaningful at the reference tolerance — at the pre-provenance
+            # 1e-10 this gate false-killed the mode on 2026-07-03.
+            iters = int(step["projection_iterations"])
+            check(
+                "frozen projection iterations <= 3 (reference-impl hard cap)",
+                iters <= 3,
+                f"iterations = {iters}",
+            )
 
     out: Dict[str, Any] = {
         "conventions": {
             "flattening": "coordinate-block: [x0..xN-1, y0..yN-1, z0..zN-1]",
             "constraint_set": [b["kind"] for b in blocks],
             "row_order": row_order,
-            "per_block_projection_tolerance": "spec §3.3 (our invention, not paper)",
+            "per_block_projection_tolerance": "rule: spec §3.3 (ours); value 1e-4: reference backproj_threshold (tpe_flow_sc.cpp:15)",
             "degenerate_unit_tangent_tol": 1.0e-14,
         },
         "alpha": alpha,
@@ -522,6 +678,10 @@ def main(argv: List[str]) -> int:
         "line_search_step": step,
         **extra_targets,
     }
+    if projection == "frozen":
+        # Recorded ONLY in frozen mode so the default reassemble output stays
+        # byte-identical to the committed M1/M2 goldens (plan Task 6 gate).
+        out["conventions"]["projection"] = "frozen"
 
     with open(argv[2], "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, sort_keys=True)

@@ -1,6 +1,7 @@
 import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
-import { solveConstrainedGradientSet } from './sobolev/gradient';
+import { solveConstrainedGradientSetFrozen } from './sobolev/gradient';
 import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
+import type { FrozenSaddleOperator } from './sobolev/linsolve';
 import { type SobolevStepTimings, timed, timingsBegin, timingsEnd } from './sobolev/phaseTimings';
 import { calculateEnergy, gradientAnalytical, gradientFiniteDiff } from './tangentPointEnergy';
 import type { Edge, Vec3 } from './testConfigs';
@@ -58,6 +59,14 @@ export function step(
 export const SOBOLEV_CONVERGENCE_TOL = 1e-4;
 
 /**
+ * Constraint-projection solve strategy of the Sobolev step (solver-perf
+ * Task 6) — see the `projectionMode` option on {@link SobolevStepOptions} for
+ * the semantics and the measured trade-off.
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+ */
+export type ProjectionMode = 'reassemble' | 'frozen';
+
+/**
  * Options for {@link sobolevStep}. `mode` selects how the differential dE is
  * produced (same pluggability contract as {@link step} and
  * `solveConstrainedGradient`); the solve/line-search behavior is identical
@@ -90,6 +99,23 @@ export interface SobolevStepOptions {
      * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
      */
     energyBefore?: number;
+    /**
+     * Constraint-projection solve strategy (solver-perf Task 6).
+     * 'frozen': one K(γ₀) LU per step serves the gradient solve AND every
+     * projection iterate of every τ-trial (fresh −Φ RHS each iterate) — the
+     * authors' reference-implementation scheme (ythea/repulsive-curves
+     * src/tpe_flow_sc.cpp; paper line 734); cheaper (no per-iterate
+     * reassembly + refactorization) but a stale-Jacobian quasi-Newton
+     * projection: on junction-heavy fixtures the τ=1 trial can fail to
+     * project and the step backtracks (measured: junction-y-edgelengths
+     * τ 1.0 → 0.5 vs 'reassemble' — oracle/README.md table).
+     * 'reassemble' (default, and the semantics of ALL pre-existing goldens):
+     * rebuild + refactor Ā/C at every projection iterate — stricter step
+     * quality, more dense work.
+     * @see oracle/README.md ("Frozen-projection mode")
+     * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+     */
+    projectionMode?: ProjectionMode;
 }
 
 /**
@@ -191,8 +217,13 @@ export function sobolevStepSet(
 
             let gTilde: Vec3[];
             let residual: number;
+            let frozen: FrozenSaddleOperator | undefined;
             try {
-                ({ gTilde, residual } = solveConstrainedGradientSet(
+                // The frozen-capable solve IS the default solve (same numbers,
+                // one factorization — gradient.ts); the returned operator is
+                // simply ignored unless projectionMode === 'frozen'.
+                // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+                const solved = solveConstrainedGradientSetFrozen(
                     vertices,
                     edges,
                     disjointPairs,
@@ -201,7 +232,10 @@ export function sobolevStepSet(
                     epsilon,
                     dE,
                     set,
-                ));
+                );
+                gTilde = solved.gTilde;
+                residual = solved.residual;
+                frozen = opts.projectionMode === 'frozen' ? solved.frozen : undefined;
             } catch {
                 // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
                 // Fold into the spec §C step 10 contract: reject, echo the input, report —
@@ -261,8 +295,14 @@ export function sobolevStepSet(
                     set,
                     // E₀ reuse (Task 4): forward the precomputed E₀ so the line
                     // search skips its own calculateEnergy(γ₀); undefined → recompute.
-                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
-                    { energyBefore: opts.energyBefore },
+                    // Frozen operator (Task 6): forwarded only in 'frozen' mode —
+                    // spread keeps the default-path options object IDENTICAL to
+                    // before (bit-identity guard in frozenProjection.test.ts).
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 4, 6)
+                    {
+                        energyBefore: opts.energyBefore,
+                        ...(frozen ? { projection: { frozen } } : {}),
+                    },
                 ),
             );
             // On failure lineSearchStepSet already echoes the input vertices unchanged and

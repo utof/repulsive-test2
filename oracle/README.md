@@ -92,6 +92,111 @@ distance 2.3e-22 / 1.4e-24). The `length`-mode output was verified
 semantically identical to the committed M1 goldens after the M2 script
 extension. Stage-1 and M1 goldens are untouched.
 
+Status (2026-07-03, solver-perf Task 6 / tolerance provenance): **all six
+M1/M2 goldens regenerated** at the reference projection tolerance 1e-4 (see
+"Projection tolerance provenance" below) — τ unchanged on every fixture,
+projection iteration counts drop (looser stop), measured drift still
+1e-12…1e-7. The five STAGE-1 goldens are untouched (frozen 1e-10-era
+contract; their TS tests pin the tolerance explicitly).
+
+## Projection tolerance provenance (READ BEFORE TOUCHING ANY TOLERANCE)
+
+The projection stopping tolerance is **1e-4** (`tolAbs = tolRel = 1e-4` in the
+per-block rule ‖Φ_b‖₂ ≤ max(tolAbs, tolRel·scale_b)). The VALUE is the
+authors' reference implementation's `backproj_threshold = 1e-4`
+(github.com/ythea/repulsive-curves — formerly icethrush —
+`src/tpe_flow_sc.cpp:15`); the per-block scaled RULE is ours (spec §3.3).
+Reference-code facts, verified 2026-07-03 at file:line level:
+
+- The reference dense path assembles + LU-factors ONE saddle matrix
+  [[Ā, Cᵀ], [C, 0]] per time step, at the pre-step curve, and reuses that
+  factorization for the gradient solve AND every projection Newton iterate
+  (`ProjectGradient` + `LSBackproject`, `tpe_flow_sc.cpp`) — the paper's
+  line-734 remark describes exactly this.
+- Their projection allows at most **3** Newton iterates per attempt
+  (`tpe_flow_sc.cpp:306`); the fallback on non-convergence is HALVING τ with
+  the same LU, never refactorizing.
+- Their loop always performs ≥1 solve before measuring (solve-then-check);
+  ours checks before correcting, so our "0 iterations" ≈ their "1 Newton
+  step". Don't compare iteration counts across the two naively.
+
+History: the tolerance was originally 1e-10 (our invention, audit item 9).
+Gating the frozen mode at ≤3 iterations *at 1e-10* produced a **false kill**
+on 2026-07-03 (table below) — a quasi-Newton projection converges linearly,
+so demanding 6 extra digits costs ~2× the iterations. The stage-1 oracle
+(`tpe_stage1_oracle.py`, read-only deliverable) keeps its baked-in 1e-10; its
+five goldens are a frozen 1e-10-era contract and the TS stage-1 golden tests
+pin `{tolAbs: 1e-10, tolRel: 1e-10}` explicitly. Everything else (TS defaults,
+this oracle, M1/M2 goldens — regenerated 2026-07-03) runs the reference value.
+Post-step drift gates now TRACK the stopping rule (≤ 1e-4·scale_b) instead of
+the old fixed 1e-8; measured actual drift stays far below the bound
+(1e-12…1e-7 on the six goldens) because the last Newton correction overshoots.
+
+## Frozen-projection mode (solver-perf Task 6 — UN-KILLED at reference tolerance, ported to TS)
+
+`tpe_constraints_oracle.py` accepts an optional trailing `projection` argument,
+`reassemble` (default) | `frozen`:
+
+```bash
+for f in "crossing length" "linked-rings length" "knot length" \
+         "crossing edgelengths" "junction-y edgelengths" "crossing point"; do
+  set -- $f
+  uv run --with numpy --with scipy python oracle/tpe_constraints_oracle.py \
+    oracle/fixtures/$1.json oracle/golden/$1-$2-frozen.json $2 frozen
+done
+```
+
+Frozen semantics (plan-locked): factor K(γ₀) = [[Ā(γ₀), C(γ₀)ᵀ], [C(γ₀), 0]]
+ONCE via `scipy.linalg.lu_factor`; the gradient solve consumes it; every
+projection iterate of every τ-trial solves `lu_solve(fac, [0; −Φ(γ^q)])` with
+Φ evaluated FRESH at the current iterate (quasi-Newton: frozen metric + frozen
+Jacobian, live residual) — the reference implementation's scheme (see the
+provenance section above). Stopping rule, tolerances, max_iter = 8, and failure
+semantics are identical to the reassemble path; frozen mode adds one property
+gate, `projection_iterations ≤ 3` on the accepted step (the reference-impl
+hard cap).
+
+**Status (2026-07-03, revised same day): the earlier KILL was a tolerance
+artifact; at the reference tolerance every gate passes and the TS port is
+live** (`projectionMode: 'frozen' | 'reassemble'` through
+`sobolevStepSet`/store/UI, default 'reassemble' at the function level, store
+default 'frozen'; goldens `golden/*-frozen.json`, tests
+`test/sobolev/frozenProjection.test.ts` — τ/iterations exact, vertices ~1e-16).
+
+A/B at the REFERENCE tolerance 1e-4 (both modes, accepted step):
+
+| fixture-mode | reassemble τ / iters | frozen τ / iters | gate ≤ 3 |
+|---|---|---|---|
+| crossing-length | 1.0 / 1 | 1.0 / 1 | pass |
+| linked-rings-length | 1.0 / 2 | 1.0 / 2 | pass |
+| knot-length | 0.25 / 1 | 0.25 / 1 | pass |
+| crossing-edgelengths | 1.0 / 1 | 1.0 / 1 | pass |
+| junction-y-edgelengths | 1.0 / 2 | **0.5** / 3 | pass (**τ regression**) |
+| crossing-point | 1.0 / 2 | 1.0 / 2 | pass |
+
+The one standing trade-off: on `junction-y-edgelengths` the frozen τ=1 trial's
+projection does not converge (stale junction Jacobian) and the step backtracks
+to τ = 0.5 — the reference implementation behaves the same way by
+construction (3-iterate cap + τ-halving fallback). Bench
+(`bench/results/2026-07-03-frozen-reuse.json`, closed trefoil): frozen ≈
+**1.9× full-step** vs reassemble at the same commit (N120-total 89.2→47.4 ms;
+N120-perEdge 135.8→71.2 ms); per step, assemblies+factorizations drop 2→1 and
+the projection phase collapses 33.6→0.6 ms at N120-total.
+
+Historical (2026-07-03, PRE-provenance, tolerance 1e-10 — the false kill;
+kept so nobody re-runs this experiment at the wrong tolerance):
+
+| fixture-mode | reassemble τ / iters | frozen τ / iters | gate ≤ 3 |
+|---|---|---|---|
+| crossing-length | 1.0 / 1 | 1.0 / 3 | pass |
+| linked-rings-length | 1.0 / 3 | 1.0 / **5** | **FAIL (kill)** |
+| knot-length | 0.25 / 2 | 0.25 / **4** | **FAIL (kill)** |
+| crossing-edgelengths | 1.0 / 2 | 1.0 / 3 | pass |
+| junction-y-edgelengths | 1.0 / 3 | **0.25** / **6** | **FAIL** (+ τ regression) |
+| crossing-point | 1.0 / 2 | 1.0 / **7** | **FAIL** |
+
+@see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+
 Formula audit (2026-07-02): an isolated auditor diffed the results doc against
 verbatim paper excerpts — 11/11 items CONFIRMED, zero mismatches; report at
 `local_files/2026-07-02-sobolev-formula-audit.md`. Two standing cautions from it:
