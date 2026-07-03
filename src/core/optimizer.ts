@@ -1,6 +1,7 @@
 import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
 import { solveConstrainedGradientSet } from './sobolev/gradient';
 import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
+import { type SobolevStepTimings, timed, timingsBegin, timingsEnd } from './sobolev/phaseTimings';
 import { calculateEnergy, gradientAnalytical, gradientFiniteDiff } from './tangentPointEnergy';
 import type { Edge, Vec3 } from './testConfigs';
 
@@ -69,6 +70,13 @@ export interface SobolevStepOptions {
     beta?: number;
     epsilon?: number;
     h?: number;
+    /**
+     * Opt into per-phase wall-clock collection (default false). When absent the
+     * phase wraps are provably inert (see {@link timed}) and `sobolevStepSet`'s
+     * outputs are bit-identical to today — the golden suites are the backstop.
+     * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+     */
+    collectTimings?: boolean;
 }
 
 /**
@@ -137,87 +145,120 @@ export function sobolevStepSet(
     accepted: boolean;
     converged: boolean;
     stats: SobolevStepStats;
+    timings?: SobolevStepTimings;
 } {
-    const alpha = opts.alpha ?? DEFAULTS.alpha;
-    const beta = opts.beta ?? DEFAULTS.beta;
-    const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
-    const h = opts.h ?? DEFAULTS.h;
+    // Phase-timing collection is opt-in and provably inert when off: timingsBegin
+    // arms the module collector, timed('step', …) records the whole step, and the
+    // inner call-site wraps (dE / energy / lineSearch here, plus the assembleA /
+    // saddle / projection wraps deeper in the pipeline) attach to the same ledger.
+    // With collectTimings absent, timed() is a plain call and the result is
+    // bit-identical to today (the golden suites are the backstop).
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+    const collect = opts.collectTimings ?? false;
+    if (collect) timingsBegin();
+    const outcome = timed(
+        'step',
+        (): {
+            vertices: Vec3[];
+            energy: number;
+            accepted: boolean;
+            converged: boolean;
+            stats: SobolevStepStats;
+        } => {
+            const alpha = opts.alpha ?? DEFAULTS.alpha;
+            const beta = opts.beta ?? DEFAULTS.beta;
+            const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
+            const h = opts.h ?? DEFAULTS.h;
 
-    const dE =
-        opts.mode === 'analytical'
-            ? gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon)
-            : gradientFiniteDiff(vertices, edges, disjointPairs, alpha, beta, epsilon, h);
+            const dE = timed('dE', () =>
+                opts.mode === 'analytical'
+                    ? gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon)
+                    : gradientFiniteDiff(vertices, edges, disjointPairs, alpha, beta, epsilon, h),
+            );
 
-    let gTilde: Vec3[];
-    let residual: number;
-    try {
-        ({ gTilde, residual } = solveConstrainedGradientSet(
-            vertices,
-            edges,
-            disjointPairs,
-            alpha,
-            beta,
-            epsilon,
-            dE,
-            set,
-        ));
-    } catch {
-        // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
-        // Fold into the spec §C step 10 contract: reject, echo the input, report —
-        // the frame loop auto-pauses on accepted:false instead of crashing.
-        // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
-        return {
-            vertices,
-            energy: calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-            accepted: false,
-            converged: false,
-            stats: {
-                tau: 0,
-                residual: Number.NaN,
-                gradientL2Norm: Number.NaN,
-                projectionIterations: null,
-                reason: 'singular_system',
-            },
-        };
-    }
+            let gTilde: Vec3[];
+            let residual: number;
+            try {
+                ({ gTilde, residual } = solveConstrainedGradientSet(
+                    vertices,
+                    edges,
+                    disjointPairs,
+                    alpha,
+                    beta,
+                    epsilon,
+                    dE,
+                    set,
+                ));
+            } catch {
+                // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
+                // Fold into the spec §C step 10 contract: reject, echo the input, report —
+                // the frame loop auto-pauses on accepted:false instead of crashing.
+                // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
+                return {
+                    vertices,
+                    energy: timed('energy', () =>
+                        calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+                    ),
+                    accepted: false,
+                    converged: false,
+                    stats: {
+                        tau: 0,
+                        residual: Number.NaN,
+                        gradientL2Norm: Number.NaN,
+                        projectionIterations: null,
+                        reason: 'singular_system',
+                    },
+                };
+            }
 
-    const gradientL2Norm = l2CurveNorm(gTilde, vertices, edges);
-    if (gradientL2Norm < SOBOLEV_CONVERGENCE_TOL) {
-        return {
-            vertices,
-            energy: calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-            accepted: false,
-            converged: true,
-            stats: { tau: 0, residual, gradientL2Norm, projectionIterations: 0 },
-        };
-    }
+            const gradientL2Norm = l2CurveNorm(gTilde, vertices, edges);
+            if (gradientL2Norm < SOBOLEV_CONVERGENCE_TOL) {
+                return {
+                    vertices,
+                    energy: timed('energy', () =>
+                        calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+                    ),
+                    accepted: false,
+                    converged: true,
+                    stats: { tau: 0, residual, gradientL2Norm, projectionIterations: 0 },
+                };
+            }
 
-    const result = lineSearchStepSet(
-        vertices,
-        edges,
-        disjointPairs,
-        alpha,
-        beta,
-        epsilon,
-        dE,
-        gTilde,
-        set,
-    );
-    // On failure lineSearchStepSet already echoes the input vertices unchanged and
-    // reports energyAfter = energyBefore — spec §C step 10 semantics pass through.
-    return {
-        vertices: result.vertices,
-        energy: result.energyAfter,
-        accepted: result.accepted,
-        converged: false,
-        stats: {
-            tau: result.tau,
-            residual,
-            gradientL2Norm,
-            projectionIterations: result.projectionIterations,
-            ...(result.reason !== undefined ? { reason: result.reason } : {}),
+            const result = timed('lineSearch', () =>
+                lineSearchStepSet(
+                    vertices,
+                    edges,
+                    disjointPairs,
+                    alpha,
+                    beta,
+                    epsilon,
+                    dE,
+                    gTilde,
+                    set,
+                ),
+            );
+            // On failure lineSearchStepSet already echoes the input vertices unchanged and
+            // reports energyAfter = energyBefore — spec §C step 10 semantics pass through.
+            return {
+                vertices: result.vertices,
+                energy: result.energyAfter,
+                accepted: result.accepted,
+                converged: false,
+                stats: {
+                    tau: result.tau,
+                    residual,
+                    gradientL2Norm,
+                    projectionIterations: result.projectionIterations,
+                    ...(result.reason !== undefined ? { reason: result.reason } : {}),
+                },
+            };
         },
-    };
+    );
+    if (collect) {
+        const timings = timingsEnd();
+        if (timings) return { ...outcome, timings };
+    }
+    return outcome;
 }
 
 /**

@@ -77,6 +77,10 @@ function Simulation() {
                 barycenterConstraint: st.barycenterConstraint,
                 lengthMode: st.lengthMode,
                 sobolevEll0: st.sobolevEll0,
+                // Always collect per-phase timings for the Stats.tsx readout; the
+                // raw path ignores this and the collector is inert when off.
+                // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
+                collectTimings: true,
             });
             if (result.accepted) {
                 // Copy-then-discard: both steppers are pure by design and return a fresh
@@ -98,6 +102,7 @@ function Simulation() {
                         step: iters.current,
                         energy: result.energy,
                         sobolevStats: result.stats,
+                        sobolevTimings: result.timings,
                     });
                 }
             } else {
@@ -111,6 +116,7 @@ function Simulation() {
                     step: iters.current,
                     sobolevStats: result.stats,
                     sobolevConverged: result.converged,
+                    sobolevTimings: result.timings,
                 });
                 st.setRunning(false);
             }

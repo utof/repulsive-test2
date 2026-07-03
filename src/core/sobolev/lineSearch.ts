@@ -22,6 +22,7 @@ import { barycenterBlock, type ConstraintSet } from './constraintSet';
 import { assembleA } from './innerProduct';
 import { expandBlockDiag, flatten, unflatten } from './layout';
 import { solveSaddle } from './linsolve';
+import { timed } from './phaseTimings';
 
 /**
  * Mass-lumped discrete curve L²ₕ norm of a per-vertex Vec3 field:
@@ -207,9 +208,14 @@ export function projectOntoConstraintSet(
         try {
             // Reassemble Ā(current iterate) — see the anchor in the TSDoc above.
             const A = assembleA(cur, edges, disjointPairs, alpha, beta, epsilon);
-            const A3 = expandBlockDiag(A);
+            // Phase-timing wraps (opt-in, default-inert) — same 'expand'/'saddle'
+            // keys as the gradient-solve call site (assembleA is timed in its own
+            // body). @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+            const A3 = timed('expand', () => expandBlockDiag(A));
             const negPhi = phi.map((v) => -v);
-            const { x } = solveSaddle(A3, C, new Array<number>(3 * cur.length).fill(0), negPhi);
+            const { x } = timed('saddle', () =>
+                solveSaddle(A3, C, new Array<number>(3 * cur.length).fill(0), negPhi),
+            );
             const step = unflatten(x);
             for (const s of step) {
                 if (!Number.isFinite(s[0]) || !Number.isFinite(s[1]) || !Number.isFinite(s[2])) {
@@ -331,7 +337,11 @@ export function lineSearchStepSet(
     const tau0 = opts?.tau0 ?? 1;
     const tauMin = opts?.tauMin ?? 1e-12;
 
-    const e0 = calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon);
+    // Phase-timing wrap (opt-in, default-inert): E₀ is one of the 'energy'
+    // call-site evals. @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+    const e0 = timed('energy', () =>
+        calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+    );
     const gradNorm = l2CurveNorm(gTilde, vertices, edges);
     if (!Number.isFinite(gradNorm) || gradNorm <= 0) {
         return {
@@ -382,12 +392,19 @@ export function lineSearchStepSet(
             p[1] - tau * direction[i][1],
             p[2] - tau * direction[i][2],
         ]);
-        const proj = projectOntoConstraintSet(raw, edges, disjointPairs, alpha, beta, epsilon, set);
+        // Phase-timing wraps (opt-in, default-inert): 'projection' is the whole
+        // projectOntoConstraintSet call; each Armijo trial energy is 'energy'.
+        // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+        const proj = timed('projection', () =>
+            projectOntoConstraintSet(raw, edges, disjointPairs, alpha, beta, epsilon, set),
+        );
         const projFinite = proj.vertices.every(
             (p) => Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]),
         );
         if (proj.ok && projFinite) {
-            const e1 = calculateEnergy(proj.vertices, edges, disjointPairs, alpha, beta, epsilon);
+            const e1 = timed('energy', () =>
+                calculateEnergy(proj.vertices, edges, disjointPairs, alpha, beta, epsilon),
+            );
             if (Number.isFinite(e1) && e1 <= e0 - c1 * tau * slope) {
                 return {
                     accepted: true,

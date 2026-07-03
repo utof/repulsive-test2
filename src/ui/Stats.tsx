@@ -1,5 +1,30 @@
 import { totalLength } from '../core/sobolev/constraintSet';
+import type { SobolevStepTimings } from '../core/sobolev/phaseTimings';
 import { useSimStore } from '../store';
+
+// Curated (label, key) subset shown on the timings line, in this order; the
+// leading `step` becomes the `Δt …ms —` prefix. `×n` marks calls>1 (single
+// calls print no ×); values are `.toFixed(1)` ms; absent keys are omitted.
+// @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3 — UI format)
+const TIMING_LINE: Array<[keyof SobolevStepTimings, string]> = [
+    ['dE', 'dE'],
+    ['assembleA', 'A'],
+    ['saddle', 'saddle'],
+    ['energy', 'E'],
+    ['projection', 'proj'],
+    ['lineSearch', 'LS'],
+];
+
+function formatStepTimings(t: SobolevStepTimings): string {
+    const parts: string[] = [];
+    for (const [key, label] of TIMING_LINE) {
+        const s = t[key];
+        if (!s) continue;
+        parts.push(`${label} ${s.ms.toFixed(1)}${s.calls > 1 ? `×${s.calls}` : ''}`);
+    }
+    const prefix = t.step ? `Δt ${t.step.ms.toFixed(1)}ms — ` : '';
+    return `${prefix}${parts.join(' · ')}`;
+}
 
 export function Stats() {
     const step = useSimStore((s) => s.step);
@@ -9,6 +34,7 @@ export function Stats() {
     const descentMode = useSimStore((s) => s.descentMode);
     const sobolevStats = useSimStore((s) => s.sobolevStats);
     const sobolevConverged = useSimStore((s) => s.sobolevConverged);
+    const sobolevTimings = useSimStore((s) => s.sobolevTimings);
     const sobolevL0 = useSimStore((s) => s.sobolevL0);
     const vertices = useSimStore((s) => s.graph.vertices.length);
     const edges = useSimStore((s) => s.graph.edges.length);
@@ -71,6 +97,14 @@ export function Stats() {
             )}
             {descentMode === 'sobolev' && sobolevConverged && (
                 <span style={{ color: '#00ff88' }}>converged</span>
+            )}
+            {/* Second line: per-phase step timings (sobolev mode only, when
+                collected). Δt is the whole-step wall clock; the rest are the
+                curated hot phases. @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3) */}
+            {descentMode === 'sobolev' && sobolevTimings?.step && (
+                <div style={{ marginTop: 4, color: '#88aabb' }}>
+                    {formatStepTimings(sobolevTimings)}
+                </div>
             )}
         </div>
     );

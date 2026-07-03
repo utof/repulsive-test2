@@ -13,6 +13,7 @@ import { barycenterBlock, type ConstraintSet, evaluateConstraintSet } from './co
 import { assembleA } from './innerProduct';
 import { expandBlockDiag, flatten, unflatten } from './layout';
 import { solveSaddle } from './linsolve';
+import { timed } from './phaseTimings';
 
 /**
  * Solves the constrained Sobolev-gradient saddle system
@@ -47,13 +48,15 @@ export function solveConstrainedGradientSet(
     set: ConstraintSet,
 ): { gTilde: Vec3[]; lambda: number[]; residual: number } {
     const A = assembleA(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    const A3 = expandBlockDiag(A);
+    // Phase-timing wraps (opt-in, default-inert) — same 'expand'/'saddle' keys
+    // as the projection call site. @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+    const A3 = timed('expand', () => expandBlockDiag(A));
     // Only the Jacobian C enters the gradient solve. Φ itself does NOT: the
     // saddle RHS bottom block is 0 (solveSaddle's default), unlike the
     // constraint-projection solve which passes −Φ there.
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
     const { C } = evaluateConstraintSet(set, vertices, edges);
-    const { x, lambda, residual } = solveSaddle(A3, C, flatten(dE));
+    const { x, lambda, residual } = timed('saddle', () => solveSaddle(A3, C, flatten(dE)));
     return { gTilde: unflatten(x), lambda, residual };
 }
 

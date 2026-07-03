@@ -16,6 +16,7 @@ import {
     totalLengthBlock,
 } from './core/sobolev/constraintSet';
 import { barycenterTarget } from './core/sobolev/constraints';
+import type { SobolevStepTimings } from './core/sobolev/phaseTimings';
 import { calculateDisjointPairs, calculateEnergy } from './core/tangentPointEnergy';
 import {
     type Edge,
@@ -111,6 +112,11 @@ export interface DescentStepOutcome {
     accepted: boolean;
     converged: boolean;
     stats: SobolevStepStats | null;
+    // Per-phase step timings when `collectTimings` was requested in sobolev
+    // mode; null in raw mode and when timings were not collected. Surfaced to
+    // the UI (Stats.tsx second line) via the store's `sobolevTimings`.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
+    timings: SobolevStepTimings | null;
 }
 
 /**
@@ -151,6 +157,10 @@ export function dispatchDescentStep(args: {
     lengthMode?: LengthMode;
     sobolevL0?: number;
     sobolevEll0?: number[];
+    // Opt into per-phase step timings (sobolev mode only); the raw path ignores
+    // it and reports `timings: null`.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
+    collectTimings?: boolean;
 }): DescentStepOutcome {
     if (args.descentMode === 'sobolev') {
         if (
@@ -169,6 +179,9 @@ export function dispatchDescentStep(args: {
                 accepted: r.accepted,
                 converged: r.converged,
                 stats: r.stats,
+                // Pre-M1 back-compat shape: never collects timings (the app never
+                // takes this branch — it always passes the M-set toggles).
+                timings: null,
             };
         }
         const set: ConstraintSet = [];
@@ -194,6 +207,7 @@ export function dispatchDescentStep(args: {
         assertValidConstraintSet(set);
         const r = sobolevStepSet(args.vertices, args.edges, args.disjointPairs, set, {
             mode: args.mode,
+            collectTimings: args.collectTimings,
         });
         return {
             vertices: r.vertices,
@@ -201,6 +215,7 @@ export function dispatchDescentStep(args: {
             accepted: r.accepted,
             converged: r.converged,
             stats: r.stats,
+            timings: r.timings ?? null,
         };
     }
     const r = step(args.vertices, args.edges, args.disjointPairs, {
@@ -213,6 +228,7 @@ export function dispatchDescentStep(args: {
         accepted: true,
         converged: false,
         stats: null,
+        timings: null,
     };
 }
 
@@ -259,6 +275,10 @@ export interface SimStore {
     // mode); `sobolevConverged` mirrors spec §C step 5's termination outcome.
     sobolevStats: SobolevStepStats | null;
     sobolevConverged: boolean;
+    // Last sobolev step's per-phase timings (null before any timed step and in
+    // raw mode); cleared alongside sobolevStats. Surfaced as the Stats.tsx second
+    // line. @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
+    sobolevTimings: SobolevStepTimings | null;
     // Why: descent-direction arrows are a user toggle, visible in BOTH paused and
     // running states (GradientArrows recomputes from the live buffer); this flag
     // only gates rendering, never the descent itself.
@@ -331,6 +351,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
             sobolevEll0: edgeLengths(b.graph.vertices, b.graph.edges),
             sobolevStats: null,
             sobolevConverged: false,
+            sobolevTimings: null,
         }));
         saveConfig(id, nextParams);
     };
@@ -355,6 +376,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         lengthConstraint: true,
         sobolevStats: null,
         sobolevConverged: false,
+        sobolevTimings: null,
         showArrows: true,
         zoom: 1,
         graphVersion: 0,
@@ -378,7 +400,13 @@ export const useSimStore = create<SimStore>()((set, get) => {
         setStepSize: (s) => set({ stepSize: s }),
         // Mode switch clears the other mode's stale diagnostics; x₀ needs no
         // recompute here — it re-anchors at the next run start (see lifecycle anchor).
-        setDescentMode: (m) => set({ descentMode: m, sobolevStats: null, sobolevConverged: false }),
+        setDescentMode: (m) =>
+            set({
+                descentMode: m,
+                sobolevStats: null,
+                sobolevConverged: false,
+                sobolevTimings: null,
+            }),
         // Toggling a constraint invalidates ONLY the converged verdict (it is
         // per-constraint-set); targets re-anchor at the next run start, and
         // sobolevStats stay — they describe the last step actually taken.
@@ -403,6 +431,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     sobolevEll0: edgeLengths(s.live, s.graph.edges),
                     sobolevStats: null,
                     sobolevConverged: false,
+                    sobolevTimings: null,
                 });
                 return;
             }

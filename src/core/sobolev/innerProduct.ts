@@ -11,6 +11,7 @@
  * @see oracle/tpe_stage1_oracle.py (assemble_inner_product — the B-only slice of it)
  */
 import type { Edge, Vec3 } from '../testConfigs';
+import { timed } from './phaseTimings';
 
 /**
  * Assembles the |V|×|V| high-order matrix B.
@@ -260,14 +261,23 @@ export function assembleA(
     beta: number,
     epsilon: number,
 ): number[][] {
-    const B = assembleBHigh(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    const B0 = assembleBLow(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    const n = vertices.length;
-    const A: number[][] = Array.from({ length: n }, () => new Array<number>(n));
-    for (let i = 0; i < n; i++) {
-        for (let j = 0; j < n; j++) {
-            A[i][j] = B[i][j] + B0[i][j];
+    // Phase-timing wraps (opt-in, default-inert): the whole body is 'assembleA';
+    // the two assembler calls are the 'bHigh'/'bLow' sub-phases that overlap it.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+    return timed('assembleA', () => {
+        const B = timed('bHigh', () =>
+            assembleBHigh(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        );
+        const B0 = timed('bLow', () =>
+            assembleBLow(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        );
+        const n = vertices.length;
+        const A: number[][] = Array.from({ length: n }, () => new Array<number>(n));
+        for (let i = 0; i < n; i++) {
+            for (let j = 0; j < n; j++) {
+                A[i][j] = B[i][j] + B0[i][j];
+            }
         }
-    }
-    return A;
+        return A;
+    });
 }
