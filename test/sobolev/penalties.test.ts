@@ -11,13 +11,18 @@
  */
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { sobolevStepSet } from '../../src/core/optimizer';
+import { barycenterBlock, totalLengthBlock } from '../../src/core/sobolev/constraintSet';
+import { solveConstrainedGradientSet } from '../../src/core/sobolev/gradient';
 import { flatten } from '../../src/core/sobolev/layout';
+import { lineSearchStepSet } from '../../src/core/sobolev/lineSearch';
 import {
     type PenaltyConfig,
     penaltiesActive,
     penaltyEnergy,
     penaltyGradient,
 } from '../../src/core/sobolev/penalties';
+import { calculateDisjointPairs, calculateEnergy } from '../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
 
 interface Fixture {
@@ -26,6 +31,9 @@ interface Fixture {
 }
 
 interface PenaltyGolden {
+    alpha: number;
+    beta: number;
+    epsilon: number;
     penalties: {
         preset: string;
         w_length: number;
@@ -34,7 +42,32 @@ interface PenaltyGolden {
         X: [number, number, number];
     };
     penalty_energy_initial: number;
+    objective_energy_initial: number;
     dE_penalty_flat: number[];
+    dE: Vec3[];
+    g_tilde: Vec3[];
+    g_tilde_flat: number[];
+    x0_barycenter_target: Vec3;
+    L0_total_length_target?: number;
+    line_search_step: {
+        accepted: boolean;
+        tau: number;
+        energy_before: number;
+        energy_after: number;
+        vertices: Vec3[];
+        projection_iterations: number;
+    };
+}
+
+// Barycenter first (spec §3.2); the pen-combo golden runs the hard
+// totalLength constraint alongside the penalties (composition case).
+function setFromGolden(gold: PenaltyGolden) {
+    return gold.L0_total_length_target !== undefined
+        ? [
+              barycenterBlock(gold.x0_barycenter_target),
+              totalLengthBlock(gold.L0_total_length_target),
+          ]
+        : [barycenterBlock(gold.x0_barycenter_target)];
 }
 
 function loadFixture(name: string): Fixture {
@@ -249,6 +282,133 @@ test('degenerate edge (ℓ < 1e-14) contributes zero to every penalty', () => {
     };
     expect(penaltyEnergy(vertices, edges, config)).toBe(0);
     expect(flatten(penaltyGradient(vertices, edges, config)).every((x) => x === 0)).toBe(true);
+});
+
+// --- threading (5C Task 4): line search / solve / full step vs goldens ------
+
+for (const { fixture, golden } of GOLDEN_CASES) {
+    test(`lineSearchStepSet with penalties vs oracle ${golden}: τ exact, objective 1e-12, vertices 1e-9`, () => {
+        const { vertices, edges } = loadFixture(fixture);
+        const gold = loadGolden(golden);
+        const config = configFromGolden(gold);
+        const disjointPairs = calculateDisjointPairs(edges);
+        const set = setFromGolden(gold);
+
+        // Oracle's own dE/g̃ as inputs (decoupled from cross-language FD
+        // noise — the constraintSetFlow.test.ts design decision).
+        const result = lineSearchStepSet(
+            vertices,
+            edges,
+            disjointPairs,
+            gold.alpha,
+            gold.beta,
+            gold.epsilon,
+            gold.dE,
+            gold.g_tilde,
+            set,
+            { penalties: config },
+        );
+        const goldStep = gold.line_search_step;
+        const e0Rel =
+            Math.abs(result.energyBefore - goldStep.energy_before) /
+            Math.abs(goldStep.energy_before);
+        const e1Rel =
+            Math.abs(result.energyAfter - goldStep.energy_after) / Math.abs(goldStep.energy_after);
+        const vRel =
+            euclideanDiff(flatten(result.vertices), flatten(goldStep.vertices)) /
+            euclideanNorm(flatten(goldStep.vertices));
+
+        console.log(
+            `[penalties] lineSearch ${golden}: τ = ${result.tau}, iters = ${result.projectionIterations}, ` +
+                `E₀ rel ${e0Rel.toExponential(3)}, E₁ rel ${e1Rel.toExponential(3)}, vertices rel ${vRel.toExponential(3)}`,
+        );
+        expect(goldStep.accepted).toBe(true);
+        expect(result.accepted).toBe(true);
+        // τ and iteration counts EXACT — divergence means accept/reject logic
+        // differs, not rounding (constraintSetFlow.test.ts gate).
+        expect(result.tau).toBe(goldStep.tau);
+        expect(result.projectionIterations).toBe(goldStep.projection_iterations);
+        expect(e0Rel).toBeLessThanOrEqual(1e-12);
+        expect(e1Rel).toBeLessThanOrEqual(1e-12);
+        expect(vRel).toBeLessThanOrEqual(1e-9);
+    });
+}
+
+test('solveConstrainedGradientSet on the bary set with penalty dE_total matches oracle g̃ (helix)', () => {
+    const { vertices, edges } = loadFixture('helix');
+    const gold = loadGolden('helix-bary-pen-field');
+    const disjointPairs = calculateDisjointPairs(edges);
+    const { gTilde, residual } = solveConstrainedGradientSet(
+        vertices,
+        edges,
+        disjointPairs,
+        gold.alpha,
+        gold.beta,
+        gold.epsilon,
+        gold.dE,
+        setFromGolden(gold),
+    );
+    const gRel =
+        euclideanDiff(flatten(gTilde), gold.g_tilde_flat) / euclideanNorm(gold.g_tilde_flat);
+    console.log(
+        `[penalties] solve helix-bary: g̃ rel = ${gRel.toExponential(3)}, residual = ${residual.toExponential(3)}`,
+    );
+    expect(gRel).toBeLessThanOrEqual(1e-9);
+    expect(residual).toBeLessThanOrEqual(1e-10);
+});
+
+test('sobolevStepSet: absent / empty / all-zero penalty configs are bit-identical', () => {
+    const { vertices, edges } = loadFixture('crossing');
+    const gold = loadGolden('crossing-bary-pen-length');
+    const disjointPairs = calculateDisjointPairs(edges);
+    const set = [barycenterBlock(gold.x0_barycenter_target)];
+    const base = {
+        mode: 'analytical' as const,
+        alpha: gold.alpha,
+        beta: gold.beta,
+        epsilon: gold.epsilon,
+    };
+
+    const plain = sobolevStepSet(vertices, edges, disjointPairs, set, base);
+    const empty = sobolevStepSet(vertices, edges, disjointPairs, set, { ...base, penalties: {} });
+    const zeros = sobolevStepSet(vertices, edges, disjointPairs, set, {
+        ...base,
+        penalties: { totalLength: 0, lengthDiff: 0, field: { weight: 0.5, X: [0, 0, 0] } },
+    });
+
+    // Deep numeric equality — the plan §2.4 bit-identity gate (same pattern
+    // as frozenProjection.test.ts's default-path guard).
+    expect(empty).toEqual(plain);
+    expect(zeros).toEqual(plain);
+});
+
+test('sobolevStepSet with penalties: returned energy IS the total objective at the returned vertices', () => {
+    const { vertices, edges } = loadFixture('crossing');
+    const gold = loadGolden('crossing-bary-pen-length');
+    const config = configFromGolden(gold);
+    const disjointPairs = calculateDisjointPairs(edges);
+    const set = [barycenterBlock(gold.x0_barycenter_target)];
+
+    const result = sobolevStepSet(vertices, edges, disjointPairs, set, {
+        mode: 'analytical',
+        alpha: gold.alpha,
+        beta: gold.beta,
+        epsilon: gold.epsilon,
+        penalties: config,
+    });
+    expect(result.accepted).toBe(true);
+    const expected =
+        calculateEnergy(
+            result.vertices,
+            edges,
+            disjointPairs,
+            gold.alpha,
+            gold.beta,
+            gold.epsilon,
+        ) + penaltyEnergy(result.vertices, edges, config);
+    // Exact: the step computed its energy through the identical expression
+    // (plan §2.4 — E₀-reuse chaining depends on this).
+    expect(result.energy).toBe(expected);
 });
 
 test('penaltiesActive: zero/absent/degenerate-X configs are inactive', () => {

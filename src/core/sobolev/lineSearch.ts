@@ -29,6 +29,7 @@ import { barycenterBlock, type ConstraintSet } from './constraintSet';
 import { assembleAFlat } from './innerProduct';
 import { flatten, unflatten } from './layout';
 import { type FrozenSaddleOperator, solveSaddleFromA, solveSaddleFrozen } from './linsolve';
+import { type PenaltyConfig, penaltiesActive, penaltyEnergy } from './penalties';
 import { timed } from './phaseTimings';
 
 /**
@@ -321,15 +322,29 @@ export interface LineSearchOptions {
     tau0?: number;
     tauMin?: number;
     /**
-     * Precomputed E₀ = E(γ₀) at the CURRENT vertices, reused instead of calling
-     * calculateEnergy here. MUST be exactly `calculateEnergy(vertices, edges,
-     * disjointPairs, alpha, beta, epsilon)` for the same γ₀ — a continuous run
-     * gets this for free from the previous accepted step's returned energy.
+     * Precomputed E₀ at the CURRENT vertices, reused instead of recomputing
+     * here. MUST be exactly the OBJECTIVE at the same γ₀:
+     * `calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon)`,
+     * PLUS `penaltyEnergy(vertices, edges, penalties)` when `penalties` is
+     * active — a continuous run gets this for free from the previous accepted
+     * step's returned energy UNDER THE SAME penalty config (a config change
+     * invalidates the cache; the caller owns that too).
      * A stale value corrupts the Armijo gate `E(γ_proj) ≤ E₀ − c₁·τ·m`, so the
      * caller owns the invariant; when omitted, E₀ is recomputed (unchanged
      * behavior). @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+     * @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
      */
     energyBefore?: number;
+    /**
+     * Soft-constraint penalties (5C). When active, Armijo gates on the TOTAL
+     * objective E_tpe + E_pen — still "the exact energy the flow is
+     * minimizing" (the module's non-pluggability rule is about arbitrary
+     * energy functions, not about what the objective IS); the caller must
+     * have fed the matching dE_total into the gradient solve. Absent/zero ⇒
+     * bit-identical to the penalty-free path.
+     * @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+     */
+    penalties?: PenaltyConfig;
     /**
      * Projection tolerances/maxIter forwarded verbatim to
      * {@link projectOntoConstraintSet} for every τ-trial. Omitted → that
@@ -381,9 +396,12 @@ export interface LineSearchStepResult {
  *
  * `dE` is a PARAMETER (same pluggability contract as
  * `solveConstrainedGradientSet` in `./gradient`); the ENERGY is not — it is
- * the app's own `calculateEnergy`, because Armijo must gate on the exact
- * energy the flow is minimizing. The set must be the SAME frozen-target set
- * used for the gradient solve (spec §3.5).
+ * the app's own objective, because Armijo must gate on the exact energy the
+ * flow is minimizing: `calculateEnergy`, plus the active soft-constraint
+ * penalties when `opts.penalties` is set (plan §2.4 — the penalties are part
+ * of the objective, not a pluggable energy). The set must be the SAME
+ * frozen-target set used for the gradient solve (spec §3.5).
+ * @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
  * @see local_files/sobolev-gradient-handoff.md §1 ("The dE fed into the solve must be pluggable")
  * @see oracle/tpe_constraints_oracle.py (line_search_step_set)
@@ -404,18 +422,27 @@ export function lineSearchStepSet(
     const shrink = opts?.shrink ?? 0.5;
     const tau0 = opts?.tau0 ?? 1;
     const tauMin = opts?.tauMin ?? 1e-12;
+    const pen = penaltiesActive(opts?.penalties) ? opts?.penalties : undefined;
 
-    // E₀ reuse (Task 4): a provided energyBefore (bit-identical to
-    // calculateEnergy at γ₀ per the option's invariant) short-circuits the
+    // The Armijo objective (plan §2.4): E_tpe plus the active penalties. With
+    // pen undefined this IS the pre-penalties expression — bit-identical path,
+    // and penaltyEnergy stays outside the 'energy' timing wrap (O(E),
+    // negligible next to the O(E²) energy kernel).
+    // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+    const objectiveEnergy = (V: Vec3[]): number => {
+        const e = timed('energy', () =>
+            calculateEnergy(V, edges, disjointPairs, alpha, beta, epsilon),
+        );
+        return pen ? e + penaltyEnergy(V, edges, pen) : e;
+    };
+
+    // E₀ reuse (Task 4): a provided energyBefore (bit-identical to the
+    // objective at γ₀ per the option's invariant) short-circuits the
     // recompute, so the 'energy' timing wrap does NOT fire for E₀ in that case.
     // Phase-timing wrap (opt-in, default-inert): E₀ is one of the 'energy'
     // call-site evals only when recomputed here.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 1, 4)
-    const e0 =
-        opts?.energyBefore ??
-        timed('energy', () =>
-            calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-        );
+    const e0 = opts?.energyBefore ?? objectiveEnergy(vertices);
     const gradNorm = l2CurveNorm(gTilde, vertices, edges);
     if (!Number.isFinite(gradNorm) || gradNorm <= 0) {
         return {
@@ -485,9 +512,7 @@ export function lineSearchStepSet(
             (p) => Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]),
         );
         if (proj.ok && projFinite) {
-            const e1 = timed('energy', () =>
-                calculateEnergy(proj.vertices, edges, disjointPairs, alpha, beta, epsilon),
-            );
+            const e1 = objectiveEnergy(proj.vertices);
             if (Number.isFinite(e1) && e1 <= e0 - c1 * tau * slope) {
                 return {
                     accepted: true,
