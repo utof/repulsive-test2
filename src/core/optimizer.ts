@@ -1,6 +1,14 @@
 import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
-import { solveConstrainedGradientSet } from './sobolev/gradient';
+import { solveConstrainedGradientSetFrozen } from './sobolev/gradient';
 import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
+import type { FrozenSaddleOperator } from './sobolev/linsolve';
+import {
+    type PenaltyConfig,
+    penaltiesActive,
+    penaltyEnergy,
+    penaltyGradient,
+} from './sobolev/penalties';
+import { type SobolevStepTimings, timed, timingsBegin, timingsEnd } from './sobolev/phaseTimings';
 import { calculateEnergy, gradientAnalytical, gradientFiniteDiff } from './tangentPointEnergy';
 import type { Edge, Vec3 } from './testConfigs';
 
@@ -57,6 +65,14 @@ export function step(
 export const SOBOLEV_CONVERGENCE_TOL = 1e-4;
 
 /**
+ * Constraint-projection solve strategy of the Sobolev step (solver-perf
+ * Task 6) — see the `projectionMode` option on {@link SobolevStepOptions} for
+ * the semantics and the measured trade-off.
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+ */
+export type ProjectionMode = 'reassemble' | 'frozen';
+
+/**
  * Options for {@link sobolevStep}. `mode` selects how the differential dE is
  * produced (same pluggability contract as {@link step} and
  * `solveConstrainedGradient`); the solve/line-search behavior is identical
@@ -69,6 +85,57 @@ export interface SobolevStepOptions {
     beta?: number;
     epsilon?: number;
     h?: number;
+    /**
+     * Opt into per-phase wall-clock collection (default false). When absent the
+     * phase wraps are provably inert (see {@link timed}) and `sobolevStepSet`'s
+     * outputs are bit-identical to today — the golden suites are the backstop.
+     * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+     */
+    collectTimings?: boolean;
+    /**
+     * Precomputed E₀ at the CURRENT input vertices, forwarded to the line
+     * search (and reused on the converged/singular echo paths, which return
+     * these same vertices) instead of recomputing. MUST be exactly the
+     * OBJECTIVE at γ₀: `calculateEnergy(vertices, edges, disjointPairs,
+     * alpha, beta, epsilon)` plus `penaltyEnergy(vertices, edges, penalties)`
+     * when `penalties` is active — a continuous run gets this for free from
+     * the previous accepted step's returned energy UNDER THE SAME penalty
+     * config (a config change invalidates the cache; the caller owns that
+     * too). A stale value corrupts the Armijo gate; the caller owns the
+     * invariant (same contract as the line search's `energyBefore` option in
+     * `./sobolev/lineSearch`). Omitted → E₀ recomputed (unchanged behavior).
+     * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+     * @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+     */
+    energyBefore?: number;
+    /**
+     * Soft-constraint penalties (5C): the paper's catalog (total length,
+     * length difference, field alignment) entering the OBJECTIVE — analytic
+     * penalty gradients ADD to dE before the saddle solve, penalty energies
+     * ADD to the Armijo gate and to the returned `energy`. Never constraint
+     * rows; H^s inner product unchanged (SelfAvoiding.tex line 769). Absent
+     * or all-zero ⇒ every code path bit-identical to the penalty-free build.
+     * @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md
+     * @see src/core/sobolev/penalties.ts
+     */
+    penalties?: PenaltyConfig;
+    /**
+     * Constraint-projection solve strategy (solver-perf Task 6).
+     * 'frozen': one K(γ₀) LU per step serves the gradient solve AND every
+     * projection iterate of every τ-trial (fresh −Φ RHS each iterate) — the
+     * authors' reference-implementation scheme (ythea/repulsive-curves
+     * src/tpe_flow_sc.cpp; paper line 734); cheaper (no per-iterate
+     * reassembly + refactorization) but a stale-Jacobian quasi-Newton
+     * projection: on junction-heavy fixtures the τ=1 trial can fail to
+     * project and the step backtracks (measured: junction-y-edgelengths
+     * τ 1.0 → 0.5 vs 'reassemble' — oracle/README.md table).
+     * 'reassemble' (default, and the semantics of ALL pre-existing goldens):
+     * rebuild + refactor Ā/C at every projection iterate — stricter step
+     * quality, more dense work.
+     * @see oracle/README.md ("Frozen-projection mode")
+     * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+     */
+    projectionMode?: ProjectionMode;
 }
 
 /**
@@ -137,87 +204,166 @@ export function sobolevStepSet(
     accepted: boolean;
     converged: boolean;
     stats: SobolevStepStats;
+    timings?: SobolevStepTimings;
 } {
-    const alpha = opts.alpha ?? DEFAULTS.alpha;
-    const beta = opts.beta ?? DEFAULTS.beta;
-    const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
-    const h = opts.h ?? DEFAULTS.h;
+    // Phase-timing collection is opt-in and provably inert when off: timingsBegin
+    // arms the module collector, timed('step', …) records the whole step, and the
+    // inner call-site wraps (dE / energy / lineSearch here, plus the assembleA /
+    // saddle / projection wraps deeper in the pipeline) attach to the same ledger.
+    // With collectTimings absent, timed() is a plain call and the result is
+    // bit-identical to today (the golden suites are the backstop).
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+    const collect = opts.collectTimings ?? false;
+    if (collect) timingsBegin();
+    const outcome = timed(
+        'step',
+        (): {
+            vertices: Vec3[];
+            energy: number;
+            accepted: boolean;
+            converged: boolean;
+            stats: SobolevStepStats;
+        } => {
+            const alpha = opts.alpha ?? DEFAULTS.alpha;
+            const beta = opts.beta ?? DEFAULTS.beta;
+            const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
+            const h = opts.h ?? DEFAULTS.h;
+            const pen = penaltiesActive(opts.penalties) ? opts.penalties : undefined;
 
-    const dE =
-        opts.mode === 'analytical'
-            ? gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon)
-            : gradientFiniteDiff(vertices, edges, disjointPairs, alpha, beta, epsilon, h);
+            const dETpe = timed('dE', () =>
+                opts.mode === 'analytical'
+                    ? gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon)
+                    : gradientFiniteDiff(vertices, edges, disjointPairs, alpha, beta, epsilon, h),
+            );
+            // Penalties enter the objective's differential BEFORE the solve
+            // (plan §2.4): dE_total = dE_tpe + Σ w·dÊ. Inactive ⇒ dE IS dETpe
+            // (same array — bit-identical path). Outside the 'dE' timing wrap:
+            // penaltyGradient is O(E), negligible next to the O(E²) kernel.
+            // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+            let dE: Vec3[];
+            if (pen) {
+                const pg = penaltyGradient(vertices, edges, pen);
+                dE = dETpe.map((v, i) => [v[0] + pg[i][0], v[1] + pg[i][1], v[2] + pg[i][2]]);
+            } else {
+                dE = dETpe;
+            }
+            // The objective for the echo paths below (converged / singular):
+            // E_tpe plus active penalties — same composition as the line
+            // search's Armijo energy (plan §2.4).
+            const echoEnergy = (): number => {
+                const e = timed('energy', () =>
+                    calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+                );
+                return pen ? e + penaltyEnergy(vertices, edges, pen) : e;
+            };
 
-    let gTilde: Vec3[];
-    let residual: number;
-    try {
-        ({ gTilde, residual } = solveConstrainedGradientSet(
-            vertices,
-            edges,
-            disjointPairs,
-            alpha,
-            beta,
-            epsilon,
-            dE,
-            set,
-        ));
-    } catch {
-        // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
-        // Fold into the spec §C step 10 contract: reject, echo the input, report —
-        // the frame loop auto-pauses on accepted:false instead of crashing.
-        // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
-        return {
-            vertices,
-            energy: calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-            accepted: false,
-            converged: false,
-            stats: {
-                tau: 0,
-                residual: Number.NaN,
-                gradientL2Norm: Number.NaN,
-                projectionIterations: null,
-                reason: 'singular_system',
-            },
-        };
-    }
+            let gTilde: Vec3[];
+            let residual: number;
+            let frozen: FrozenSaddleOperator | undefined;
+            try {
+                // The frozen-capable solve IS the default solve (same numbers,
+                // one factorization — gradient.ts); the returned operator is
+                // simply ignored unless projectionMode === 'frozen'.
+                // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+                const solved = solveConstrainedGradientSetFrozen(
+                    vertices,
+                    edges,
+                    disjointPairs,
+                    alpha,
+                    beta,
+                    epsilon,
+                    dE,
+                    set,
+                );
+                gTilde = solved.gTilde;
+                residual = solved.residual;
+                frozen = opts.projectionMode === 'frozen' ? solved.frozen : undefined;
+            } catch {
+                // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
+                // Fold into the spec §C step 10 contract: reject, echo the input, report —
+                // the frame loop auto-pauses on accepted:false instead of crashing.
+                // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
+                return {
+                    vertices,
+                    // E₀ reuse (Task 4): the echoed vertices ARE the input γ₀, so a
+                    // provided energyBefore already equals the objective at γ₀ by its
+                    // invariant — reuse it instead of recomputing.
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+                    energy: opts.energyBefore ?? echoEnergy(),
+                    accepted: false,
+                    converged: false,
+                    stats: {
+                        tau: 0,
+                        residual: Number.NaN,
+                        gradientL2Norm: Number.NaN,
+                        projectionIterations: null,
+                        reason: 'singular_system',
+                    },
+                };
+            }
 
-    const gradientL2Norm = l2CurveNorm(gTilde, vertices, edges);
-    if (gradientL2Norm < SOBOLEV_CONVERGENCE_TOL) {
-        return {
-            vertices,
-            energy: calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-            accepted: false,
-            converged: true,
-            stats: { tau: 0, residual, gradientL2Norm, projectionIterations: 0 },
-        };
-    }
+            const gradientL2Norm = l2CurveNorm(gTilde, vertices, edges);
+            if (gradientL2Norm < SOBOLEV_CONVERGENCE_TOL) {
+                return {
+                    vertices,
+                    // E₀ reuse (Task 4): converged echoes γ₀ unchanged, so a provided
+                    // energyBefore already equals the objective at γ₀ — reuse it.
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+                    energy: opts.energyBefore ?? echoEnergy(),
+                    accepted: false,
+                    converged: true,
+                    stats: { tau: 0, residual, gradientL2Norm, projectionIterations: 0 },
+                };
+            }
 
-    const result = lineSearchStepSet(
-        vertices,
-        edges,
-        disjointPairs,
-        alpha,
-        beta,
-        epsilon,
-        dE,
-        gTilde,
-        set,
-    );
-    // On failure lineSearchStepSet already echoes the input vertices unchanged and
-    // reports energyAfter = energyBefore — spec §C step 10 semantics pass through.
-    return {
-        vertices: result.vertices,
-        energy: result.energyAfter,
-        accepted: result.accepted,
-        converged: false,
-        stats: {
-            tau: result.tau,
-            residual,
-            gradientL2Norm,
-            projectionIterations: result.projectionIterations,
-            ...(result.reason !== undefined ? { reason: result.reason } : {}),
+            const result = timed('lineSearch', () =>
+                lineSearchStepSet(
+                    vertices,
+                    edges,
+                    disjointPairs,
+                    alpha,
+                    beta,
+                    epsilon,
+                    dE,
+                    gTilde,
+                    set,
+                    // E₀ reuse (Task 4): forward the precomputed E₀ so the line
+                    // search skips its own objective(γ₀); undefined → recompute.
+                    // Frozen operator (Task 6) and penalties (5C): forwarded only
+                    // when active — the spreads keep the default-path options
+                    // object IDENTICAL to before (bit-identity guards in
+                    // frozenProjection.test.ts and penalties.test.ts).
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 4, 6)
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+                    {
+                        energyBefore: opts.energyBefore,
+                        ...(frozen ? { projection: { frozen } } : {}),
+                        ...(pen ? { penalties: pen } : {}),
+                    },
+                ),
+            );
+            // On failure lineSearchStepSet already echoes the input vertices unchanged and
+            // reports energyAfter = energyBefore — spec §C step 10 semantics pass through.
+            return {
+                vertices: result.vertices,
+                energy: result.energyAfter,
+                accepted: result.accepted,
+                converged: false,
+                stats: {
+                    tau: result.tau,
+                    residual,
+                    gradientL2Norm,
+                    projectionIterations: result.projectionIterations,
+                    ...(result.reason !== undefined ? { reason: result.reason } : {}),
+                },
+            };
         },
-    };
+    );
+    if (collect) {
+        const timings = timingsEnd();
+        if (timings) return { ...outcome, timings };
+    }
+    return outcome;
 }
 
 /**

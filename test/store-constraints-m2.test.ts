@@ -5,6 +5,7 @@ import {
     edgeLengths,
     edgeLengthsBlock,
     totalLength,
+    totalLengthBlock,
 } from '../src/core/sobolev/constraintSet';
 import { barycenterTarget } from '../src/core/sobolev/constraints';
 import { flatten } from '../src/core/sobolev/layout';
@@ -135,4 +136,53 @@ test('dispatchDescentStep: lengthMode builds the ConstraintSet — perEdge match
     const legacyRef = sobolevStep(vertices, edges, disjointPairs, x0, opts);
     expect(legacy.energy).toBe(legacyRef.energy);
     expect(flatten(legacy.vertices)).toEqual(flatten(legacyRef.vertices));
+});
+
+// Solver-perf Task 6: projectionMode passthrough — dispatch('frozen') must
+// match the explicit sobolevStepSet frozen call, dispatch with the field
+// ABSENT must stay bit-identical to explicit 'reassemble' (the default is
+// strictly opt-in; store default 'frozen' only enters via Viewer passthrough).
+// @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+test('dispatchDescentStep: projectionMode passthrough — frozen matches explicit set call, absent ≡ reassemble', () => {
+    useSimStore.getState().setPreset('crossing');
+    const st = useSimStore.getState();
+    const vertices = st.graph.vertices;
+    const edges = st.graph.edges;
+    const disjointPairs = st.disjointPairs;
+    const x0 = barycenterTarget(vertices, edges);
+    const L0 = totalLength(vertices, edges);
+    const base = {
+        descentMode: 'sobolev' as const,
+        vertices,
+        edges,
+        disjointPairs,
+        mode: 'analytical' as const,
+        stepSize: 0.001,
+        x0,
+        sobolevL0: L0,
+        sobolevEll0: edgeLengths(vertices, edges),
+        barycenterConstraint: true,
+        lengthMode: 'total' as const,
+    };
+    const set = [barycenterBlock(x0), totalLengthBlock(L0)];
+
+    const frozenDispatch = dispatchDescentStep({ ...base, projectionMode: 'frozen' });
+    const frozenRef = sobolevStepSet(vertices, edges, disjointPairs, set, {
+        mode: 'analytical',
+        projectionMode: 'frozen',
+    });
+    expect(frozenDispatch.energy).toBe(frozenRef.energy);
+    expect(flatten(frozenDispatch.vertices)).toEqual(flatten(frozenRef.vertices));
+
+    const absent = dispatchDescentStep(base);
+    const reassembleDispatch = dispatchDescentStep({ ...base, projectionMode: 'reassemble' });
+    expect(reassembleDispatch.energy).toBe(absent.energy);
+    expect(flatten(reassembleDispatch.vertices)).toEqual(flatten(absent.vertices));
+
+    // The store defaults to 'frozen' (reference-impl scheme) with a
+    // no-side-effect setter.
+    expect(useSimStore.getState().projectionMode).toBe('frozen');
+    useSimStore.getState().setProjectionMode('reassemble');
+    expect(useSimStore.getState().projectionMode).toBe('reassemble');
+    useSimStore.getState().setProjectionMode('frozen');
 });

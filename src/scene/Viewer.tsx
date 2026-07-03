@@ -17,6 +17,7 @@ import * as THREE from 'three/webgpu';
 import { dispatchDescentStep, useSimStore } from '../store';
 import { Curve } from './Curve';
 import { GradientArrows } from './GradientArrows';
+import { PinControls } from './PinControls';
 
 declare module '@react-three/fiber' {
     // Task 10: LineSegments2/LineSegmentsGeometry live in three/addons, so `ThreeToJSXElements<typeof
@@ -50,11 +51,34 @@ function Simulation() {
     const statAcc = useRef(0);
     const camAcc = useRef(0);
     const iters = useRef(0);
+    // E₀ reuse across steps (Task 4): the previous ACCEPTED step's returned
+    // energy, which is exactly calculateEnergy(the vertices that become this
+    // step's input), so reusing it as the next step's Armijo baseline is
+    // bit-identical within a continuous run. Nulled at every !running boundary
+    // below (run start, user pause, auto-pause, preset rebuild — the store
+    // re-anchors targets at those same boundaries), making a stale E₀ — which
+    // would corrupt the Armijo gate — structurally impossible.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+    const lastEnergy = useRef<number | null>(null);
+    // The store's penaltyEpoch as of the last frame. A MID-RUN penalty-config
+    // change (slider/X move) bumps the store nonce but crosses no !running
+    // boundary, so the boundary-null below never fires — the cached E₀ would
+    // stay under the OLD objective and corrupt the Armijo gate (silent wrong
+    // step). When the epoch changes we drop the cache, forcing a fresh E₀ under
+    // the NEW config. @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+    const lastPenaltyEpoch = useRef(0);
 
     useFrame((state, delta) => {
         const st = useSimStore.getState();
 
         if (st.running) {
+            // Penalty-config change since last frame ⇒ invalidate the reused E₀
+            // (see the lastPenaltyEpoch anchor). Constraint-target animation does
+            // NOT bump the epoch (targets aren't in the objective, plan §2.4).
+            if (st.penaltyEpoch !== lastPenaltyEpoch.current) {
+                lastPenaltyEpoch.current = st.penaltyEpoch;
+                lastEnergy.current = null;
+            }
             // ONE descent step per frame at most — a sobolev step is dense assembly +
             // O(|V|³) saddle solves (several per line-search trial), sized for the
             // stage-1 budget of |V| ≤ ~300; stacking multiple per frame would stall
@@ -77,6 +101,27 @@ function Simulation() {
                 barycenterConstraint: st.barycenterConstraint,
                 lengthMode: st.lengthMode,
                 sobolevEll0: st.sobolevEll0,
+                // Interactive pins → pointBlocks (briefing §5B). Frozen targets,
+                // READ-ONLY here — the frame loop never mutates them (same
+                // contract as sobolevEll0 above); re-anchoring/drag happen in the
+                // store / PinControls. @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md
+                pins: st.pins,
+                // Projection strategy A/B (solver-perf Task 6): store default
+                // 'frozen' (reference-impl reuse), 'reassemble' selectable.
+                projectionMode: st.projectionMode,
+                // Soft-constraint penalties (5C). Default all-off ⇒ the core no-ops
+                // via penaltiesActive, bit-identical to the penalty-free build; a
+                // config change bumps penaltyEpoch (handled above).
+                // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+                penalties: st.penalties,
+                // Always collect per-phase timings for the Stats.tsx readout; the
+                // raw path ignores this and the collector is inert when off.
+                // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
+                collectTimings: true,
+                // Reuse the previous accepted step's E₀ (null on the first frame
+                // of any run → fresh recompute). @see the lastEnergy ref anchor
+                // above / plan Task 4.
+                energyBefore: lastEnergy.current ?? undefined,
             });
             if (result.accepted) {
                 // Copy-then-discard: both steppers are pure by design and return a fresh
@@ -90,6 +135,19 @@ function Simulation() {
                     l[1] = v[1];
                     l[2] = v[2];
                 }
+                // Cache E₀ for the next step: result.energy is calculateEnergy at
+                // exactly the vertices just copied into `live` (this step's output =
+                // next step's input), so next frame's reuse is bit-identical.
+                // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+                lastEnergy.current = result.energy;
+                // Target-length animation (paper tex line 760; plan §4 Task 5):
+                // advance the frozen length schedule ONLY on ACCEPTED steps and
+                // ONLY when growth is enabled — rate 1.0 leaves the store untouched
+                // so default runs are bit-identical. The scaled target enters the
+                // NEXT step's projection. Does NOT invalidate the E₀ cache (targets
+                // aren't in the objective, plan §2.4).
+                // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §4 Task 5
+                if (st.lengthGrowthRate !== 1) st.advanceLengthSchedule();
                 iters.current += 1;
                 statAcc.current += delta;
                 if (statAcc.current > 0.1) {
@@ -98,6 +156,7 @@ function Simulation() {
                         step: iters.current,
                         energy: result.energy,
                         sobolevStats: result.stats,
+                        sobolevTimings: result.timings,
                     });
                 }
             } else {
@@ -111,12 +170,19 @@ function Simulation() {
                     step: iters.current,
                     sobolevStats: result.stats,
                     sobolevConverged: result.converged,
+                    sobolevTimings: result.timings,
                 });
                 st.setRunning(false);
             }
         } else {
             // keep the iteration counter in sync with a rebuilt/committed state
             iters.current = st.step;
+            // Any !running boundary (run start after pause, user pause, auto-pause,
+            // preset rebuild, vertex commit) invalidates the cached E₀: the next
+            // run may start from re-anchored targets / different vertices. Null
+            // forces a fresh E₀ on the run's first step, so a stale value can never
+            // reach the Armijo gate. @see the lastEnergy ref anchor / plan Task 4.
+            lastEnergy.current = null;
         }
 
         camAcc.current += delta;
@@ -175,13 +241,19 @@ export function Viewer() {
         >
             <ambientLight intensity={0.8} />
             <directionalLight position={[5, 5, 5]} intensity={0.6} />
-            <OrbitControls ref={controls} minPolarAngle={0} maxPolarAngle={Math.PI} />
+            {/* makeDefault registers this instance as R3F state.controls so
+                PinControls can toggle `.enabled` to suspend orbiting during a
+                vertex drag (Decision D7). @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md */}
+            <OrbitControls makeDefault ref={controls} minPolarAngle={0} maxPolarAngle={Math.PI} />
             {/* Distinct key PREFIXES: both siblings previously shared the bare
                 graphVersion key, and duplicate keys among siblings are undefined
                 reconciler behavior in React ("children may be duplicated and/or
                 omitted") — stale meshes could linger across preset regenerations. */}
             <Curve key={`curve-${graphVersion}`} />
             <GradientArrows key={`arrows-${graphVersion}`} />
+            {/* Pin picking/drag overlay — keyed on graphVersion for the same
+                remount-on-topology-change contract as Curve/GradientArrows. */}
+            <PinControls key={`pins-${graphVersion}`} />
             <Simulation />
         </Canvas>
     );

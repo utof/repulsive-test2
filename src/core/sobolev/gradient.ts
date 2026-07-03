@@ -1,18 +1,21 @@
 /**
  * The constrained fractional Sobolev gradient g̃ (Repulsive Curves,
  * Yu/Schumacher/Crane 2021): composition of the verified Stage-1 pieces —
- * inner-product assembly (`./innerProduct`), block-diagonal expansion
- * (`./layout`), stacked constraint Jacobians (`./constraintSet`), and the
- * saddle solve (`./linsolve`) — into the one call the descent loop needs.
+ * inner-product assembly (`./innerProduct`, flat typed-array core), stacked
+ * constraint Jacobians (`./constraintSet`), and the saddle solve
+ * (`./linsolve`'s solveSaddleFromA, which applies the `./layout`
+ * block-diagonal expansion implicitly instead of materializing it) — into the
+ * one call the descent loop needs.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system")
  * @see oracle/tpe_stage1_oracle.py (solve_constrained_gradient)
  * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set)
  */
 import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterBlock, type ConstraintSet, evaluateConstraintSet } from './constraintSet';
-import { assembleA } from './innerProduct';
-import { expandBlockDiag, flatten, unflatten } from './layout';
-import { solveSaddle } from './linsolve';
+import { assembleAFlat } from './innerProduct';
+import { flatten, unflatten } from './layout';
+import { type FrozenSaddleOperator, solveSaddleFromA } from './linsolve';
+import { timed } from './phaseTimings';
 
 /**
  * Solves the constrained Sobolev-gradient saddle system
@@ -46,15 +49,62 @@ export function solveConstrainedGradientSet(
     dE: Vec3[],
     set: ConstraintSet,
 ): { gTilde: Vec3[]; lambda: number[]; residual: number } {
-    const A = assembleA(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    const A3 = expandBlockDiag(A);
+    // Same solve as the frozen variant — the operator is simply dropped, so
+    // the default path stays numerically bit-identical (golden-gated).
+    const { gTilde, lambda, residual } = solveConstrainedGradientSetFrozen(
+        vertices,
+        edges,
+        disjointPairs,
+        alpha,
+        beta,
+        epsilon,
+        dE,
+        set,
+    );
+    return { gTilde, lambda, residual };
+}
+
+/**
+ * {@link solveConstrainedGradientSet} that ALSO returns the frozen saddle
+ * operator K(γ₀) it factored (solver-perf Task 6): assembled at the step base
+ * point γ₀ = `vertices`, its one LU is consumed by this gradient solve and is
+ * meant to be reused for every projection iterate of every τ-trial of the SAME
+ * step — the authors' reference-implementation scheme (ythea/repulsive-curves
+ * src/tpe_flow_sc.cpp; paper line 734). NEVER reuse the operator across steps
+ * or for a different constraint set: it is γ₀- and set-specific.
+ * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set_frozen)
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+ */
+export function solveConstrainedGradientSetFrozen(
+    vertices: Vec3[],
+    edges: Edge[],
+    disjointPairs: number[][],
+    alpha: number,
+    beta: number,
+    epsilon: number,
+    dE: Vec3[],
+    set: ConstraintSet,
+): { gTilde: Vec3[]; lambda: number[]; residual: number; frozen: FrozenSaddleOperator } {
+    // Typed-array fast path (solver-perf Task 5): flat scalar A straight into
+    // solveSaddleFromA, which writes Ā's diagonal blocks itself — the 'expand'
+    // phase (expandBlockDiag) intentionally no longer fires here. 'saddle'
+    // wraps the whole solve, same key as before; 'factor' fires inside it.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 1, 5)
+    const A = assembleAFlat(vertices, edges, disjointPairs, alpha, beta, epsilon);
     // Only the Jacobian C enters the gradient solve. Φ itself does NOT: the
-    // saddle RHS bottom block is 0 (solveSaddle's default), unlike the
+    // saddle RHS bottom block is 0 (solveSaddleFromA's default), unlike the
     // constraint-projection solve which passes −Φ there.
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
     const { C } = evaluateConstraintSet(set, vertices, edges);
-    const { x, lambda, residual } = solveSaddle(A3, C, flatten(dE));
-    return { gTilde: unflatten(x), lambda, residual };
+    const { x, lambda, residual, fac } = timed('saddle', () =>
+        solveSaddleFromA(A, vertices.length, C, flatten(dE)),
+    );
+    return {
+        gTilde: unflatten(x),
+        lambda,
+        residual,
+        frozen: { a: A, n: vertices.length, C, fac },
+    };
 }
 
 /**

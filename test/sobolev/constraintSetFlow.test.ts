@@ -226,9 +226,12 @@ test('back-compat: sobolevStep(x0) ≡ sobolevStepSet([barycenterBlock(x0)]) bit
 
 // Flow property (spec §4.4.3, oracle-independent): ≥5 sobolev steps on
 // crossing with barycenter + total length — every step accepted, energy
-// strictly decreases, and length drift |L − L⁰|/L⁰ ≤ 1e-8 after EVERY step
-// (projection tolerance, not accumulated drift).
-test('flow: 5 steps on crossing with barycenter+length — accepted, energy ↓, |L−L⁰|/L⁰ ≤ 1e-8 each step', () => {
+// strictly decreases, and after EVERY step the length drift satisfies the
+// projection stopping rule |L − L⁰| ≤ 1e-4·max(1, L). The bound MIRRORS the
+// rule the default projection enforces (value 1e-4 = reference-impl
+// backproj_threshold — see oracle/README.md "Projection tolerance
+// provenance"); it is per-step tolerance, not accumulated drift.
+test('flow: 5 steps on crossing with barycenter+length — accepted, energy ↓, |L−L⁰| within stopping rule each step', () => {
     const { vertices, edges, alpha, beta, epsilon } = loadFixture('crossing');
     const disjointPairs = calculateDisjointPairs(edges);
     // Frozen targets: computed ONCE from the initial state (x₀/L⁰ lifecycle,
@@ -249,12 +252,14 @@ test('flow: 5 steps on crossing with barycenter+length — accepted, energy ↓,
         current = r.vertices;
         previousEnergy = r.energy;
 
-        const drift = Math.abs(totalLength(current, edges) - L0) / L0;
+        const L1 = totalLength(current, edges);
+        const driftBound = 1e-4 * Math.max(1, L1);
         console.log(
             `[flowSet] step ${step + 1}: τ = ${r.stats.tau}, E = ${r.energy.toExponential(6)}, ` +
-                `‖g̃‖ = ${r.stats.gradientL2Norm.toExponential(3)}, |L−L⁰|/L⁰ = ${drift.toExponential(3)}`,
+                `‖g̃‖ = ${r.stats.gradientL2Norm.toExponential(3)}, |L−L⁰| = ${Math.abs(L1 - L0).toExponential(3)} ` +
+                `(bound ${driftBound.toExponential(3)})`,
         );
-        expect(drift).toBeLessThanOrEqual(1e-8);
+        expect(Math.abs(L1 - L0)).toBeLessThanOrEqual(driftBound);
     }
 });
 
