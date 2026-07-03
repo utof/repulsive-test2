@@ -60,11 +60,25 @@ function Simulation() {
     // would corrupt the Armijo gate — structurally impossible.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
     const lastEnergy = useRef<number | null>(null);
+    // The store's penaltyEpoch as of the last frame. A MID-RUN penalty-config
+    // change (slider/X move) bumps the store nonce but crosses no !running
+    // boundary, so the boundary-null below never fires — the cached E₀ would
+    // stay under the OLD objective and corrupt the Armijo gate (silent wrong
+    // step). When the epoch changes we drop the cache, forcing a fresh E₀ under
+    // the NEW config. @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+    const lastPenaltyEpoch = useRef(0);
 
     useFrame((state, delta) => {
         const st = useSimStore.getState();
 
         if (st.running) {
+            // Penalty-config change since last frame ⇒ invalidate the reused E₀
+            // (see the lastPenaltyEpoch anchor). Constraint-target animation does
+            // NOT bump the epoch (targets aren't in the objective, plan §2.4).
+            if (st.penaltyEpoch !== lastPenaltyEpoch.current) {
+                lastPenaltyEpoch.current = st.penaltyEpoch;
+                lastEnergy.current = null;
+            }
             // ONE descent step per frame at most — a sobolev step is dense assembly +
             // O(|V|³) saddle solves (several per line-search trial), sized for the
             // stage-1 budget of |V| ≤ ~300; stacking multiple per frame would stall
@@ -95,6 +109,11 @@ function Simulation() {
                 // Projection strategy A/B (solver-perf Task 6): store default
                 // 'frozen' (reference-impl reuse), 'reassemble' selectable.
                 projectionMode: st.projectionMode,
+                // Soft-constraint penalties (5C). Default all-off ⇒ the core no-ops
+                // via penaltiesActive, bit-identical to the penalty-free build; a
+                // config change bumps penaltyEpoch (handled above).
+                // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+                penalties: st.penalties,
                 // Always collect per-phase timings for the Stats.tsx readout; the
                 // raw path ignores this and the collector is inert when off.
                 // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
@@ -121,6 +140,14 @@ function Simulation() {
                 // next step's input), so next frame's reuse is bit-identical.
                 // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
                 lastEnergy.current = result.energy;
+                // Target-length animation (paper tex line 760; plan §4 Task 5):
+                // advance the frozen length schedule ONLY on ACCEPTED steps and
+                // ONLY when growth is enabled — rate 1.0 leaves the store untouched
+                // so default runs are bit-identical. The scaled target enters the
+                // NEXT step's projection. Does NOT invalidate the E₀ cache (targets
+                // aren't in the objective, plan §2.4).
+                // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §4 Task 5
+                if (st.lengthGrowthRate !== 1) st.advanceLengthSchedule();
                 iters.current += 1;
                 statAcc.current += delta;
                 if (statAcc.current > 0.1) {

@@ -45,8 +45,22 @@ export function ControlPanel() {
     const pins = useSimStore((s) => s.pins);
     const setPinEnabled = useSimStore((s) => s.setPinEnabled);
     const removePin = useSimStore((s) => s.removePin);
+    // Soft-constraint penalty catalog (5C) + target-length animation (plan §4
+    // Task 5). Weight sliders (0 = off), an X-vector input for the field penalty,
+    // and the growth-rate control.
+    const penalties = useSimStore((s) => s.penalties);
+    const setPenaltyTotalLength = useSimStore((s) => s.setPenaltyTotalLength);
+    const setPenaltyLengthDiff = useSimStore((s) => s.setPenaltyLengthDiff);
+    const setPenaltyFieldWeight = useSimStore((s) => s.setPenaltyFieldWeight);
+    const setPenaltyFieldX = useSimStore((s) => s.setPenaltyFieldX);
+    const lengthGrowthRate = useSimStore((s) => s.lengthGrowthRate);
+    const setLengthGrowthRate = useSimStore((s) => s.setLengthGrowthRate);
 
     const selectedTest = testConfigs.find((t) => t.id === selectedTestId) ?? testConfigs[0];
+    // Field-penalty X vector (store default [1,0,0]); read defensively since
+    // PenaltyConfig types `field` optional (the store keeps it defined).
+    const fieldWeight = penalties.field?.weight ?? 0;
+    const fieldX = penalties.field?.X ?? [1, 0, 0];
 
     return (
         <>
@@ -304,6 +318,103 @@ export function ControlPanel() {
                         </span>
                     ))
                 )}
+            </div>
+
+            {/* Soft-constraint penalties (5C) + target-length animation (plan §4
+                Task 5). These enter the sobolev OBJECTIVE (energy + differential),
+                never the raw L² path — so, like the constraint selects, the inputs
+                disable and the block dims in raw mode. Weight 0 = off; the field X
+                is a constant vector (normalized in the core). "Grow L" is a per-
+                accepted-step multiplicative factor for the frozen length targets
+                (1.0 = off, clamped [0.9, 1.1]).
+                @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §4 Task 5 */}
+            <div
+                style={{
+                    marginBottom: 15,
+                    display: 'flex',
+                    gap: 15,
+                    flexWrap: 'wrap',
+                    alignItems: 'center',
+                    opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                }}
+            >
+                <span>Penalties:</span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Length w:</span>
+                    <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={penalties.totalLength ?? 0}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setPenaltyTotalLength(parseFloat(e.target.value) || 0)}
+                        style={{ width: 70, padding: 4, fontSize: 14 }}
+                    />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Diff w:</span>
+                    <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={penalties.lengthDiff ?? 0}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setPenaltyLengthDiff(parseFloat(e.target.value) || 0)}
+                        style={{ width: 70, padding: 4, fontSize: 14 }}
+                    />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Field w:</span>
+                    <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={fieldWeight}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setPenaltyFieldWeight(parseFloat(e.target.value) || 0)}
+                        style={{ width: 70, padding: 4, fontSize: 14 }}
+                    />
+                </label>
+                {/* Not a <label>: this wraps THREE independent axis inputs, so a
+                    single label/control association would be wrong (a11y). */}
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Field X:</span>
+                    {[0, 1, 2].map((axis) => (
+                        <input
+                            key={axis}
+                            type="number"
+                            step="0.1"
+                            value={fieldX[axis]}
+                            disabled={descentMode !== 'sobolev'}
+                            onChange={(e) => {
+                                const next: [number, number, number] = [
+                                    fieldX[0],
+                                    fieldX[1],
+                                    fieldX[2],
+                                ];
+                                next[axis] = parseFloat(e.target.value) || 0;
+                                setPenaltyFieldX(next);
+                            }}
+                            style={{ width: 50, padding: 4, fontSize: 14 }}
+                        />
+                    ))}
+                </span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Grow L:</span>
+                    <input
+                        type="range"
+                        min="0.9"
+                        max="1.1"
+                        step="0.005"
+                        value={lengthGrowthRate}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setLengthGrowthRate(parseFloat(e.target.value))}
+                        style={{ width: 90 }}
+                    />
+                    <span style={{ fontFamily: 'monospace', width: 44 }}>
+                        {lengthGrowthRate.toFixed(3)}
+                    </span>
+                </label>
             </div>
         </>
     );

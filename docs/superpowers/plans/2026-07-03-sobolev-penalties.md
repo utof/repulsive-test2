@@ -175,3 +175,18 @@ E_total(γ) = E_tpe(γ) + Σ_k w_k·Ê_k(γ), dE_total = dE_tpe + Σ_k w_k·dÊ_
   τ and projection-iteration counts exact.
 - Bit-identity with penalties disabled (explicit test).
 - Saddle residual self-certification (≤1e-10) untouched on every solve.
+
+## §6 Task 5 decision log (store/UI + target-length animation)
+
+Micro-decisions made while implementing §4 Task 5 (the paper gives no values;
+these are OUR choices, recorded per the §3 ledger convention):
+
+| choice | value | why |
+|---|---|---|
+| store penalty shape | one `penalties: PenaltyConfig` object; `field` always present as `{weight:0, X:[1,0,0]}` | threads verbatim into dispatch; the X input always has a value to bind even while the field weight is 0 (inactive — `penaltiesActive` false) |
+| penalty setters | granular per-knob (`setPenaltyTotalLength/LengthDiff/FieldWeight/FieldX`) | one input ↔ one setter; each bumps `penaltyEpoch` + clears `sobolevConverged`, keeps `sobolevStats` (same rule as the constraint toggles) |
+| E₀-cache invalidation | store nonce `penaltyEpoch`, bumped by every penalty setter; Viewer's frame loop drops `lastEnergy.current` when it changes | the E₀ cache is a `useRef` inside `Simulation` (solver-perf Task 4), unreachable from the store — a nonce is the cross-component signal (mirrors `viewResetNonce`); a mid-run slider move crosses no `!running` boundary, so without this the stale E₀ corrupts Armijo (plan §2.4). Store-observable ⇒ unit-testable |
+| target-length animation | `lengthGrowthRate` (default 1.0) + `advanceLengthSchedule()`; frame loop calls it ONLY on accepted steps AND only when rate ≠ 1 | rate 1.0 ⇒ zero store writes ⇒ default runs bit-identical. The action scales the STORED target (`sobolevL0`/every `sobolevEll0`) by rate — the schedule, never `totalLength(live)` — the documented exception to the frozen-targets anchor (tex line 760). Does NOT bump `penaltyEpoch` (constraint targets ∉ objective, plan §2.4) |
+| growth-rate clamp | `[0.9, 1.1]` | a per-accepted-step factor compounds every frame; a ±10% band keeps the schedule gentle and strictly positive (a zero/negative rate would collapse/sign-flip the frozen targets) |
+| X input | three numeric axis fields (raw vector; the core normalizes once, ‖X‖<1e-14 ⇒ inactive) | simplest faithful control; no preset needed |
+| penalties on rebuild | NOT cleared on preset/regenerate (unlike pins) | weights + a constant field X are graph-independent objective knobs; only pins carry graph-specific vertex indices |

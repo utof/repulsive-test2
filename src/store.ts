@@ -18,6 +18,7 @@ import {
     totalLengthBlock,
 } from './core/sobolev/constraintSet';
 import { barycenterTarget } from './core/sobolev/constraints';
+import type { PenaltyConfig } from './core/sobolev/penalties';
 import type { SobolevStepTimings } from './core/sobolev/phaseTimings';
 import { calculateDisjointPairs, calculateEnergy } from './core/tangentPointEnergy';
 import {
@@ -31,6 +32,9 @@ import {
 // Re-exported so UI components can import all sim-facing types from the store
 // (same pattern as Mode/DescentMode/LengthMode).
 export type { ProjectionMode } from './core/optimizer';
+// Penalty catalog config (5C) re-exported for the ControlPanel — same pattern
+// as ProjectionMode. @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md
+export type { PenaltyConfig } from './core/sobolev/penalties';
 
 const STORAGE_KEY = 'repulsive-test-config';
 
@@ -207,6 +211,13 @@ export function dispatchDescentStep(args: {
     // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decision D6)
     // @see src/core/sobolev/constraintSet.ts (pointBlock)
     pins?: PinConstraint[];
+    // Soft-constraint penalties (5C): threaded VERBATIM into the sobolev step's
+    // opts.penalties. Absent or all-zero ⇒ the core gates on `penaltiesActive`
+    // and every code path stays bit-identical to the penalty-free build
+    // (plan §2.4); no dispatch-side gating needed. Penalties enter the OBJECTIVE
+    // only (energy + dE), never the constraint set — so `set` is untouched.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+    penalties?: PenaltyConfig;
 }): DescentStepOutcome {
     if (args.descentMode === 'sobolev') {
         if (
@@ -271,6 +282,10 @@ export function dispatchDescentStep(args: {
             energyBefore: args.energyBefore,
             // Projection strategy (Task 6): passthrough; undefined → 'reassemble'.
             projectionMode: args.projectionMode,
+            // Penalties (5C): passthrough; undefined/all-zero → core no-ops via
+            // penaltiesActive, bit-identical (plan §2.4).
+            // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+            penalties: args.penalties,
         });
         return {
             vertices: r.vertices,
@@ -351,6 +366,31 @@ export interface SimStore {
     // re-anchored to live on play/commit, and NEVER mutated by the frame loop.
     // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decisions D2, D5)
     pins: PinConstraint[];
+    // Soft-constraint penalty catalog (5C) for the sobolev OBJECTIVE: totalLength
+    // + lengthDiff weights and a field {weight, X}. Default ALL OFF (every weight
+    // 0) ⇒ `penaltiesActive` is false and the threaded step is bit-identical to
+    // the penalty-free build (plan §2.4). `field.X` keeps a default unit axis so
+    // the X input always binds a value even while the field weight is 0
+    // (inactive). Changing ANY weight or X bumps `penaltyEpoch` below.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4, §4 Task 5
+    penalties: PenaltyConfig;
+    // Target-length animation rate (paper SelfAvoiding.tex line 760): a per-
+    // ACCEPTED-step multiplicative factor for the FROZEN length targets. 1.0 =
+    // OFF. The frame loop calls `advanceLengthSchedule` after each accepted step
+    // when this ≠ 1; the targets evolve FROM THE SCHEDULE (stored target × rate),
+    // never re-read from the live geometry — the deliberate, documented exception
+    // to the frozen-targets anchor above. Clamped to [0.9, 1.1] by its setter.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §4 Task 5
+    lengthGrowthRate: number;
+    // E₀-reuse invalidation nonce (plan §2.4). The frame loop chains the previous
+    // accepted step's returned `energy` as the next step's energyBefore, valid
+    // ONLY under the SAME penalty config. Every penalty-config setter bumps this;
+    // the frame loop (Viewer) drops its cached E₀ whenever it changes, forcing a
+    // fresh E₀ recompute — without it a mid-run slider move corrupts the Armijo
+    // gate (silent wrong-step bug). Constraint-target animation does NOT bump it
+    // (targets don't enter the objective — plan §2.4). Same trigger-nonce pattern
+    // as viewResetNonce. @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
+    penaltyEpoch: number;
     // Last sobolev step's diagnostics (null before any sobolev step and in raw
     // mode); `sobolevConverged` mirrors spec §C step 5's termination outcome.
     sobolevStats: SobolevStepStats | null;
@@ -395,6 +435,19 @@ export interface SimStore {
     removePin(vertexIndex: number): void;
     setPinEnabled(vertexIndex: number, enabled: boolean): void;
     setPinTarget(vertexIndex: number, target: Vec3): void;
+    // Penalty-config setters (5C). Each replaces one knob and bumps penaltyEpoch
+    // (E₀ invalidation) + clears sobolevConverged (per-config verdict), keeping
+    // sobolevStats (the last step actually taken). @see plan §2.4, §4 Task 5
+    setPenaltyTotalLength(weight: number): void;
+    setPenaltyLengthDiff(weight: number): void;
+    setPenaltyFieldWeight(weight: number): void;
+    setPenaltyFieldX(X: Vec3): void;
+    // Target-length animation (paper tex line 760). setLengthGrowthRate clamps to
+    // [0.9, 1.1]; advanceLengthSchedule scales the frozen length targets by the
+    // rate FROM THE SCHEDULE and is called by the frame loop on ACCEPTED steps.
+    // @see plan §4 Task 5
+    setLengthGrowthRate(rate: number): void;
+    advanceLengthSchedule(): void;
     setShowArrows(b: boolean): void;
     setRunning(b: boolean): void;
     setZoom(z: number): void;
@@ -489,6 +542,13 @@ export const useSimStore = create<SimStore>()((set, get) => {
         lengthConstraint: true,
         projectionMode: 'frozen',
         pins: [],
+        // Penalties default ALL OFF (every weight 0 ⇒ penaltiesActive false ⇒
+        // bit-identical threading, plan §2.4). field.X is a placeholder unit axis
+        // for the X input while the field weight is 0 (inactive).
+        penalties: { totalLength: 0, lengthDiff: 0, field: { weight: 0, X: [1, 0, 0] } },
+        // Target-length animation OFF by default (rate 1.0 = no schedule advance).
+        lengthGrowthRate: 1,
+        penaltyEpoch: 0,
         sobolevStats: null,
         sobolevConverged: false,
         sobolevTimings: null,
@@ -578,6 +638,75 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 ),
                 sobolevConverged: false,
             })),
+        // Penalty-config setters (5C). Each REPLACES one knob of the config, then
+        // invalidates the E₀ cache (bump penaltyEpoch — the frame loop chains the
+        // previous step's energy as energyBefore, valid ONLY under the SAME
+        // penalty config, plan §2.4) and the per-config converged verdict
+        // (sobolevStats stay, like the constraint toggles). field.X falls back to
+        // the default axis defensively — the store keeps field defined but
+        // PenaltyConfig types it optional.
+        // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4, §4 Task 5
+        setPenaltyTotalLength: (weight) =>
+            set((s) => ({
+                penalties: { ...s.penalties, totalLength: weight },
+                penaltyEpoch: s.penaltyEpoch + 1,
+                sobolevConverged: false,
+            })),
+        setPenaltyLengthDiff: (weight) =>
+            set((s) => ({
+                penalties: { ...s.penalties, lengthDiff: weight },
+                penaltyEpoch: s.penaltyEpoch + 1,
+                sobolevConverged: false,
+            })),
+        setPenaltyFieldWeight: (weight) =>
+            set((s) => ({
+                penalties: {
+                    ...s.penalties,
+                    field: { weight, X: s.penalties.field?.X ?? [1, 0, 0] },
+                },
+                penaltyEpoch: s.penaltyEpoch + 1,
+                sobolevConverged: false,
+            })),
+        setPenaltyFieldX: (X) =>
+            set((s) => ({
+                penalties: {
+                    ...s.penalties,
+                    field: { weight: s.penalties.field?.weight ?? 0, X: [X[0], X[1], X[2]] },
+                },
+                penaltyEpoch: s.penaltyEpoch + 1,
+                sobolevConverged: false,
+            })),
+        // Target-length animation rate (paper SelfAvoiding.tex line 760). Clamp to
+        // [0.9, 1.1] (my "sensible clamps" choice, plan §4 Task 5): a per-accepted-
+        // step factor compounds every frame, so a ±10% band keeps the schedule
+        // gentle and, critically, strictly positive — a zero/negative rate would
+        // collapse or sign-flip the frozen length targets. NOT a penalty-config
+        // change: the rate scales constraint targets, not the objective, so it does
+        // NOT bump penaltyEpoch nor clear sobolevConverged (plan §2.4).
+        // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §4 Task 5
+        setLengthGrowthRate: (rate) =>
+            set({ lengthGrowthRate: Math.min(1.1, Math.max(0.9, rate)) }),
+        // Advance the frozen length schedule by one step (target-length animation,
+        // paper tex line 760; plan §4 Task 5). Called by the frame loop AFTER each
+        // ACCEPTED sobolev step: scale L⁰ (total mode) / every ℓ⁰_I (per-edge mode)
+        // by lengthGrowthRate. The targets evolve FROM THE SCHEDULE — the previous
+        // STORED target × rate — NEVER re-read from the live geometry: the
+        // deliberate, documented exception to the frozen-targets anchor above,
+        // sanctioned by tex line 760 ("we progressively increase or decrease the
+        // target length values; the next constraint projection step then enforces
+        // the new length"). rate 1.0 / lengthMode 'none' ⇒ no-op. Does NOT touch
+        // the E₀ cache: constraint targets don't enter the objective (plan §2.4).
+        // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §4 Task 5
+        // @see local_files/repulsive_orig_paper/SelfAvoiding.tex (line 760)
+        advanceLengthSchedule: () =>
+            set((s) => {
+                const r = s.lengthGrowthRate;
+                if (r === 1) return {}; // off — no schedule advance (rate 1.0 no-op)
+                if (s.lengthMode === 'total') return { sobolevL0: s.sobolevL0 * r };
+                if (s.lengthMode === 'perEdge')
+                    return { sobolevEll0: s.sobolevEll0.map((l) => l * r) };
+                return {}; // 'none' — no length target to animate
+            }),
         setShowArrows: (b) => set({ showArrows: b }),
         setRunning: (b) => {
             if (b) {
