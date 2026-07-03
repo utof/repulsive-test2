@@ -1,5 +1,5 @@
 import { testConfigs } from '../core/testConfigs';
-import { type Mode, useSimStore } from '../store';
+import { type DescentMode, type LengthMode, type Mode, useSimStore } from '../store';
 
 const btn = (bg: string) => ({
     padding: '10px 20px',
@@ -16,13 +16,21 @@ export function ControlPanel() {
     const testParams = useSimStore((s) => s.testParams);
     const running = useSimStore((s) => s.running);
     const mode = useSimStore((s) => s.mode);
+    const descentMode = useSimStore((s) => s.descentMode);
     const stepSize = useSimStore((s) => s.stepSize);
     const setPreset = useSimStore((s) => s.setPreset);
     const setParam = useSimStore((s) => s.setParam);
     const regenerate = useSimStore((s) => s.regenerate);
     const reset = useSimStore((s) => s.reset);
     const setMode = useSimStore((s) => s.setMode);
+    const setDescentMode = useSimStore((s) => s.setDescentMode);
     const setStepSize = useSimStore((s) => s.setStepSize);
+    const barycenterConstraint = useSimStore((s) => s.barycenterConstraint);
+    const lengthMode = useSimStore((s) => s.lengthMode);
+    const setBarycenterConstraint = useSimStore((s) => s.setBarycenterConstraint);
+    const setLengthMode = useSimStore((s) => s.setLengthMode);
+    const showArrows = useSimStore((s) => s.showArrows);
+    const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
 
     const selectedTest = testConfigs.find((t) => t.id === selectedTestId) ?? testConfigs[0];
@@ -98,6 +106,66 @@ export function ControlPanel() {
                 <button type="button" onClick={reset} style={btn('#666')}>
                     Reset
                 </button>
+                {/* A/B toggle between the untouched raw descent and the constrained Sobolev
+                    flow — the point is comparing raw τ≈1e-5 vs Sobolev τ≈1 side by side.
+                    @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Descent:</span>
+                    <select
+                        value={descentMode}
+                        onChange={(e) => setDescentMode(e.target.value as DescentMode)}
+                        style={{ padding: 8, fontSize: 14 }}
+                    >
+                        <option value="raw">Raw L²</option>
+                        <option value="sobolev">Sobolev</option>
+                    </select>
+                </label>
+                {/* Per-constraint-block toggles for the sobolev ConstraintSet (one
+                    checkbox per block). Sobolev-only: disabled (not hidden) in raw
+                    mode — the raw path takes no constraints and stays byte-identical.
+                    @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §4.3, §9a */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={barycenterConstraint}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setBarycenterConstraint(e.target.checked)}
+                    />
+                    <span>Barycenter</span>
+                </label>
+                {/* 3-way Length select (M2, spec §5.3) replacing the M1 "Fix length"
+                    checkbox: none | total | per-edge. The §3.4 totalLength/edgeLengths
+                    mutual exclusion is enforced BY CONSTRUCTION — one select, one
+                    value. Sobolev-only: disabled (not hidden) in raw mode, same as
+                    the Barycenter checkbox.
+                    @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §5.3, §3.4 */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                    }}
+                >
+                    <span>Length:</span>
+                    <select
+                        value={lengthMode}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setLengthMode(e.target.value as LengthMode)}
+                        style={{ padding: 8, fontSize: 14 }}
+                    >
+                        <option value="none">None</option>
+                        <option value="total">Total</option>
+                        <option value="perEdge">Per-edge</option>
+                    </select>
+                </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span>Mode:</span>
                     <select
@@ -123,6 +191,16 @@ export function ControlPanel() {
                     <span style={{ fontFamily: 'monospace', width: 60 }}>
                         {stepSize.toExponential(0)}
                     </span>
+                </label>
+                {/* Descent-direction arrows toggle — visible in BOTH paused and running
+                    states (see GradientArrows), not just on pause. */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <input
+                        type="checkbox"
+                        checked={showArrows}
+                        onChange={(e) => setShowArrows(e.target.checked)}
+                    />
+                    <span>Arrows</span>
                 </label>
             </div>
         </>
