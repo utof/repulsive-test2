@@ -7,31 +7,44 @@
  * `uᵀBv = Σ_{I,J disjoint} w_IJ ⟨D_I u − D_J u, D_I v − D_J v⟩`. It is one of
  * the two summands of A = B + B⁰ ({@link assembleBLow} assembles the low-order
  * term B⁰; {@link assembleA} sums the two).
+ *
+ * Storage layout (solver-perf Task 5): the REAL bodies are the `*Flat`
+ * functions accumulating into a flat row-major n×n `Float64Array`
+ * (`B[i*n + j]`); the `number[][]` exports are thin allocation wrappers kept as
+ * the reference/golden surface. ONLY the accumulation matrix went flat —
+ * vertices stay `Vec3[]` (vertex-layout flattening was measured as a dead end
+ * on the inlined kernels, briefing §2.1). Kernel arithmetic, ε placement, and
+ * accumulation order are verbatim from the pre-flat nested bodies, so flat and
+ * nested results are bit-identical.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("High-order matrix (B)")
  * @see oracle/tpe_stage1_oracle.py (assemble_inner_product — the B-only slice of it)
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
  */
 import type { Edge, Vec3 } from '../testConfigs';
 import { timed } from './phaseTimings';
 
 /**
- * Assembles the |V|×|V| high-order matrix B.
+ * Assembles the |V|×|V| high-order matrix B into a flat row-major
+ * `Float64Array` (`B[i*n + j]`) — the hot-path form consumed by
+ * `solveSaddleFromA` (see `./linsolve`).
  *
  * `disjointPairs` must be the ORDERED per-edge disjoint-partner lists from
  * {@link import('../tangentPointEnergy').calculateDisjointPairs} — both (I,J)
  * and (J,I) are visited, with NO extra 1/2: the app energy's ÷2 belongs to
  * E/dE only, the metric B is not halved.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("Ordered-pair convention")
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
  */
-export function assembleBHigh(
+export function assembleBHighFlat(
     vertices: Vec3[],
     edges: Edge[],
     disjointPairs: number[][],
     alpha: number,
     beta: number,
     epsilon: number,
-): number[][] {
+): Float64Array {
     const n = vertices.length;
-    const B: number[][] = Array.from({ length: n }, () => new Array<number>(n).fill(0));
+    const B = new Float64Array(n * n); // zero-initialized, like the nested fill(0)
 
     // sigma = (beta-1)/alpha - 1; distance exponent 2*sigma+1 (= 7/3 at alpha=3, beta=6).
     // Computed from alpha/beta at runtime rather than hardcoded, per spec.
@@ -103,10 +116,10 @@ export function assembleBHigh(
                     const ja = idxJ[a];
                     const jb = idxJ[b];
 
-                    B[ia][ib] += (sign * w) / (ellI * ellI);
-                    B[ia][jb] -= (sign * w * dotT) / (ellI * ellJ);
-                    B[ja][jb] += (sign * w) / (ellJ * ellJ);
-                    B[ja][ib] -= (sign * w * dotT) / (ellI * ellJ);
+                    B[ia * n + ib] += (sign * w) / (ellI * ellI);
+                    B[ia * n + jb] -= (sign * w * dotT) / (ellI * ellJ);
+                    B[ja * n + jb] += (sign * w) / (ellJ * ellJ);
+                    B[ja * n + ib] -= (sign * w * dotT) / (ellI * ellJ);
                 }
             }
         }
@@ -117,9 +130,9 @@ export function assembleBHigh(
     // @see oracle/tpe_stage1_oracle.py ~line 238 ("Remove roundoff-level asymmetry from accumulation order")
     for (let i = 0; i < n; i++) {
         for (let j = i + 1; j < n; j++) {
-            const avg = 0.5 * (B[i][j] + B[j][i]);
-            B[i][j] = avg;
-            B[j][i] = avg;
+            const avg = 0.5 * (B[i * n + j] + B[j * n + i]);
+            B[i * n + j] = avg;
+            B[j * n + i] = avg;
         }
     }
 
@@ -127,15 +140,16 @@ export function assembleBHigh(
 }
 
 /**
- * Assembles the |V|×|V| low-order matrix B⁰ (Repulsive Curves, Yu/Schumacher/Crane 2021).
+ * Assembles the |V|×|V| high-order matrix B as `number[][]`.
  *
- * B⁰ is the other summand of A = B + B⁰ ({@link assembleBHigh} assembles B and documents the
- * shared ε/ordered-pair conventions used here too). For edge averages `u_I = (u_{i1}+u_{i2})/2`,
- * `uᵀB⁰v = Σ_{I,J disjoint} w⁰_IJ (u_I − u_J)(v_I − v_J)`.
- * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("Low-order matrix (B⁰)")
- * @see oracle/tpe_stage1_oracle.py (assemble_inner_product — the B0 slice, and tangent_point_kernel)
+ * Reference/golden surface: thin allocation wrapper over
+ * {@link assembleBHighFlat} (which holds the real body and all convention
+ * anchors) — numerically bit-identical, only the storage layout differs.
+ * Untimed, like before the flat split: 'bHigh' fires only at assembleAFlat's
+ * internal call site.
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
  */
-export function assembleBLow(
+export function assembleBHigh(
     vertices: Vec3[],
     edges: Edge[],
     disjointPairs: number[][],
@@ -143,20 +157,46 @@ export function assembleBLow(
     beta: number,
     epsilon: number,
 ): number[][] {
-    const n = vertices.length;
-    const B0: number[][] = Array.from({ length: n }, () => new Array<number>(n).fill(0));
+    return unflattenSquare(
+        assembleBHighFlat(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        vertices.length,
+    );
+}
 
-    // Same sigma / distance-exponent convention as assembleBHigh, computed at runtime from
-    // alpha/beta (not hardcoded), per spec.
+/**
+ * Assembles the |V|×|V| low-order matrix B⁰ into a flat row-major
+ * `Float64Array` (Repulsive Curves, Yu/Schumacher/Crane 2021).
+ *
+ * B⁰ is the other summand of A = B + B⁰ ({@link assembleBHighFlat} assembles B and documents
+ * the shared ε/ordered-pair conventions used here too). For edge averages
+ * `u_I = (u_{i1}+u_{i2})/2`, `uᵀB⁰v = Σ_{I,J disjoint} w⁰_IJ (u_I − u_J)(v_I − v_J)`.
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("Low-order matrix (B⁰)")
+ * @see oracle/tpe_stage1_oracle.py (assemble_inner_product — the B0 slice, and tangent_point_kernel)
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
+ */
+export function assembleBLowFlat(
+    vertices: Vec3[],
+    edges: Edge[],
+    disjointPairs: number[][],
+    alpha: number,
+    beta: number,
+    epsilon: number,
+): Float64Array {
+    const n = vertices.length;
+    const B0 = new Float64Array(n * n); // zero-initialized, like the nested fill(0)
+
+    // Same sigma / distance-exponent convention as assembleBHighFlat, computed at runtime
+    // from alpha/beta (not hardcoded), per spec.
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A
     const s = (beta - 1) / alpha;
     const sigma = s - 1;
     const distExp = 2 * sigma + 1;
 
-    // Per-edge geometry — identical convention to assembleBHigh (ell^eps with eps after the norm;
-    // unregularized unit tangent with the 1e-14 degenerate guard). Recomputed here rather than
-    // shared/cached across assemblers: assembleA calls both assemblers independently rather than
-    // fusing their loops, for reviewability. @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A
+    // Per-edge geometry — identical convention to assembleBHighFlat (ell^eps with eps after
+    // the norm; unregularized unit tangent with the 1e-14 degenerate guard). Recomputed here
+    // rather than shared/cached across assemblers: assembleA calls both assemblers
+    // independently rather than fusing their loops, for reviewability.
+    // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A
     const ell = new Array<number>(edges.length);
     const tangent: Vec3[] = new Array(edges.length);
     for (let I = 0; I < edges.length; I++) {
@@ -167,7 +207,7 @@ export function assembleBLow(
         const r = Math.sqrt(ex * ex + ey * ey + ez * ez);
         ell[I] = r + epsilon; // ε after norm.
         if (r < 1e-14) {
-            tangent[I] = [0, 0, 0]; // degenerate direction guard, matches assembleBHigh.
+            tangent[I] = [0, 0, 0]; // degenerate direction guard, matches assembleBHighFlat.
         } else {
             const inv = 1 / r;
             tangent[I] = [ex * inv, ey * inv, ez * inv];
@@ -214,7 +254,7 @@ export function assembleBLow(
 
             // Increment table: q is constant across all four (a,b) — unlike B's table, there is NO
             // (-1)^(a+b) sign here. Ordered disjoint pairs (both (I,J) and (J,I) visited via
-            // disjointPairs) with no extra 1/2, same convention as assembleBHigh.
+            // disjointPairs) with no extra 1/2, same convention as assembleBHighFlat.
             // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("The index increments are...")
             for (let a = 0; a < 2; a++) {
                 for (let b = 0; b < 2; b++) {
@@ -222,22 +262,22 @@ export function assembleBLow(
                     const ib = idxI[b];
                     const ja = idxJ[a];
                     const jb = idxJ[b];
-                    B0[ia][ib] += q;
-                    B0[ia][jb] -= q;
-                    B0[ja][ib] -= q;
-                    B0[ja][jb] += q;
+                    B0[ia * n + ib] += q;
+                    B0[ia * n + jb] -= q;
+                    B0[ja * n + ib] -= q;
+                    B0[ja * n + jb] += q;
                 }
             }
         }
     }
 
-    // Final explicit symmetrization — same rationale as assembleBHigh.
+    // Final explicit symmetrization — same rationale as assembleBHighFlat.
     // @see oracle/tpe_stage1_oracle.py ~line 239 ("Remove roundoff-level asymmetry from accumulation order")
     for (let i = 0; i < n; i++) {
         for (let j = i + 1; j < n; j++) {
-            const avg = 0.5 * (B0[i][j] + B0[j][i]);
-            B0[i][j] = avg;
-            B0[j][i] = avg;
+            const avg = 0.5 * (B0[i * n + j] + B0[j * n + i]);
+            B0[i * n + j] = avg;
+            B0[j * n + i] = avg;
         }
     }
 
@@ -245,13 +285,81 @@ export function assembleBLow(
 }
 
 /**
- * Assembles A = B + B⁰, the |V|×|V| scalar Sobolev inner-product matrix (before the 3|V|×3|V|
- * block-diagonal expansion — see `expandBlockDiag` in `./layout`).
+ * Assembles the |V|×|V| low-order matrix B⁰ as `number[][]`.
  *
- * Calls the two assemblers separately rather than fusing their loops: reviewability first,
- * perf later (per milestone-3 spec).
+ * Reference/golden surface: thin allocation wrapper over
+ * {@link assembleBLowFlat} (which holds the real body and all convention
+ * anchors) — numerically bit-identical, only the storage layout differs.
+ * Untimed, like before the flat split: 'bLow' fires only at assembleAFlat's
+ * internal call site.
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
+ */
+export function assembleBLow(
+    vertices: Vec3[],
+    edges: Edge[],
+    disjointPairs: number[][],
+    alpha: number,
+    beta: number,
+    epsilon: number,
+): number[][] {
+    return unflattenSquare(
+        assembleBLowFlat(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        vertices.length,
+    );
+}
+
+/**
+ * Assembles A = B + B⁰ as a flat row-major |V|×|V| `Float64Array` — the
+ * hot-path entry point consumed by `solveSaddleFromA` (see `./linsolve`),
+ * which expands the three coordinate-diagonal blocks implicitly instead of
+ * materializing `expandBlockDiag`.
+ *
+ * Calls the two assemblers separately rather than fusing their loops:
+ * reviewability first, perf later (per milestone-3 spec). Carries the
+ * 'assembleA'/'bHigh'/'bLow' phase-timing wraps — the nested {@link assembleA}
+ * wrapper must NOT re-wrap, or calls would double-count.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("A = B + B0")
  * @see oracle/tpe_stage1_oracle.py (assemble_inner_product — "A = B + B0")
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
+ */
+export function assembleAFlat(
+    vertices: Vec3[],
+    edges: Edge[],
+    disjointPairs: number[][],
+    alpha: number,
+    beta: number,
+    epsilon: number,
+): Float64Array {
+    // Phase-timing wraps (opt-in, default-inert): the whole body is 'assembleA';
+    // the two assembler calls are the 'bHigh'/'bLow' sub-phases that overlap it.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
+    return timed('assembleA', () => {
+        const B = timed('bHigh', () =>
+            assembleBHighFlat(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        );
+        const B0 = timed('bLow', () =>
+            assembleBLowFlat(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        );
+        const n = vertices.length;
+        const A = new Float64Array(n * n);
+        for (let i = 0; i < n * n; i++) {
+            A[i] = B[i] + B0[i];
+        }
+        return A;
+    });
+}
+
+/**
+ * Assembles A = B + B⁰, the |V|×|V| scalar Sobolev inner-product matrix as
+ * `number[][]` (before the 3|V|×3|V| block-diagonal expansion — see
+ * `expandBlockDiag` in `./layout`).
+ *
+ * Reference/golden surface: thin allocation wrapper over {@link assembleAFlat}
+ * — numerically bit-identical, only the storage layout differs. No timed()
+ * wrap here: assembleAFlat already records 'assembleA' internally, and a
+ * second wrap would double-count calls.
+ * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §A ("A = B + B0")
+ * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
  */
 export function assembleA(
     vertices: Vec3[],
@@ -261,23 +369,22 @@ export function assembleA(
     beta: number,
     epsilon: number,
 ): number[][] {
-    // Phase-timing wraps (opt-in, default-inert): the whole body is 'assembleA';
-    // the two assembler calls are the 'bHigh'/'bLow' sub-phases that overlap it.
-    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
-    return timed('assembleA', () => {
-        const B = timed('bHigh', () =>
-            assembleBHigh(vertices, edges, disjointPairs, alpha, beta, epsilon),
-        );
-        const B0 = timed('bLow', () =>
-            assembleBLow(vertices, edges, disjointPairs, alpha, beta, epsilon),
-        );
-        const n = vertices.length;
-        const A: number[][] = Array.from({ length: n }, () => new Array<number>(n));
-        for (let i = 0; i < n; i++) {
-            for (let j = 0; j < n; j++) {
-                A[i][j] = B[i][j] + B0[i][j];
-            }
+    return unflattenSquare(
+        assembleAFlat(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        vertices.length,
+    );
+}
+
+// Flat row-major n×n → number[][] for the reference/golden wrapper surface.
+// Pure copy — values (and their bit patterns) are untouched.
+function unflattenSquare(flat: Float64Array, n: number): number[][] {
+    const out: number[][] = new Array(n);
+    for (let i = 0; i < n; i++) {
+        const row = new Array<number>(n);
+        for (let j = 0; j < n; j++) {
+            row[j] = flat[i * n + j];
         }
-        return A;
-    });
+        out[i] = row;
+    }
+    return out;
 }

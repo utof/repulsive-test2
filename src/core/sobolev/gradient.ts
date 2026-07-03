@@ -1,18 +1,20 @@
 /**
  * The constrained fractional Sobolev gradient g̃ (Repulsive Curves,
  * Yu/Schumacher/Crane 2021): composition of the verified Stage-1 pieces —
- * inner-product assembly (`./innerProduct`), block-diagonal expansion
- * (`./layout`), stacked constraint Jacobians (`./constraintSet`), and the
- * saddle solve (`./linsolve`) — into the one call the descent loop needs.
+ * inner-product assembly (`./innerProduct`, flat typed-array core), stacked
+ * constraint Jacobians (`./constraintSet`), and the saddle solve
+ * (`./linsolve`'s solveSaddleFromA, which applies the `./layout`
+ * block-diagonal expansion implicitly instead of materializing it) — into the
+ * one call the descent loop needs.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system")
  * @see oracle/tpe_stage1_oracle.py (solve_constrained_gradient)
  * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set)
  */
 import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterBlock, type ConstraintSet, evaluateConstraintSet } from './constraintSet';
-import { assembleA } from './innerProduct';
-import { expandBlockDiag, flatten, unflatten } from './layout';
-import { solveSaddle } from './linsolve';
+import { assembleAFlat } from './innerProduct';
+import { flatten, unflatten } from './layout';
+import { solveSaddleFromA } from './linsolve';
 import { timed } from './phaseTimings';
 
 /**
@@ -47,16 +49,20 @@ export function solveConstrainedGradientSet(
     dE: Vec3[],
     set: ConstraintSet,
 ): { gTilde: Vec3[]; lambda: number[]; residual: number } {
-    const A = assembleA(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    // Phase-timing wraps (opt-in, default-inert) — same 'expand'/'saddle' keys
-    // as the projection call site. @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
-    const A3 = timed('expand', () => expandBlockDiag(A));
+    // Typed-array fast path (solver-perf Task 5): flat scalar A straight into
+    // solveSaddleFromA, which writes Ā's diagonal blocks itself — the 'expand'
+    // phase (expandBlockDiag) intentionally no longer fires here. 'saddle'
+    // wraps the whole solve, same key as before; 'factor' fires inside it.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 1, 5)
+    const A = assembleAFlat(vertices, edges, disjointPairs, alpha, beta, epsilon);
     // Only the Jacobian C enters the gradient solve. Φ itself does NOT: the
-    // saddle RHS bottom block is 0 (solveSaddle's default), unlike the
+    // saddle RHS bottom block is 0 (solveSaddleFromA's default), unlike the
     // constraint-projection solve which passes −Φ there.
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
     const { C } = evaluateConstraintSet(set, vertices, edges);
-    const { x, lambda, residual } = timed('saddle', () => solveSaddle(A3, C, flatten(dE)));
+    const { x, lambda, residual } = timed('saddle', () =>
+        solveSaddleFromA(A, vertices.length, C, flatten(dE)),
+    );
     return { gTilde: unflatten(x), lambda, residual };
 }
 

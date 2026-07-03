@@ -19,9 +19,9 @@
 import { calculateEnergy } from '../tangentPointEnergy';
 import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterBlock, type ConstraintSet } from './constraintSet';
-import { assembleA } from './innerProduct';
-import { expandBlockDiag, flatten, unflatten } from './layout';
-import { solveSaddle } from './linsolve';
+import { assembleAFlat } from './innerProduct';
+import { flatten, unflatten } from './layout';
+import { solveSaddleFromA } from './linsolve';
 import { timed } from './phaseTimings';
 
 /**
@@ -207,14 +207,22 @@ export function projectOntoConstraintSet(
         }
         try {
             // Reassemble Ā(current iterate) — see the anchor in the TSDoc above.
-            const A = assembleA(cur, edges, disjointPairs, alpha, beta, epsilon);
-            // Phase-timing wraps (opt-in, default-inert) — same 'expand'/'saddle'
-            // keys as the gradient-solve call site (assembleA is timed in its own
-            // body). @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
-            const A3 = timed('expand', () => expandBlockDiag(A));
+            // Typed-array fast path (solver-perf Task 5): flat scalar A straight
+            // into solveSaddleFromA (Ā's diagonal blocks written implicitly —
+            // the 'expand' phase intentionally no longer fires). 'saddle' wraps
+            // the whole solve, same key as the gradient-solve call site
+            // (assembleAFlat is timed in its own body); 'factor' fires inside.
+            // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 1, 5)
+            const A = assembleAFlat(cur, edges, disjointPairs, alpha, beta, epsilon);
             const negPhi = phi.map((v) => -v);
             const { x } = timed('saddle', () =>
-                solveSaddle(A3, C, new Array<number>(3 * cur.length).fill(0), negPhi),
+                solveSaddleFromA(
+                    A,
+                    cur.length,
+                    C,
+                    new Array<number>(3 * cur.length).fill(0),
+                    negPhi,
+                ),
             );
             const step = unflatten(x);
             for (const s of step) {
