@@ -40,6 +40,11 @@ export function ControlPanel() {
     const showArrows = useSimStore((s) => s.showArrows);
     const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
+    // Interactive point pins (briefing §5B): the list is populated by clicking a
+    // vertex in the 3D view (PinControls); here the user enables/removes each.
+    const pins = useSimStore((s) => s.pins);
+    const setPinEnabled = useSimStore((s) => s.setPinEnabled);
+    const removePin = useSimStore((s) => s.removePin);
 
     const selectedTest = testConfigs.find((t) => t.id === selectedTestId) ?? testConfigs[0];
 
@@ -234,6 +239,71 @@ export function ControlPanel() {
                     />
                     <span>Arrows</span>
                 </label>
+            </div>
+
+            {/* Interactive point-pin list (briefing §5B). Pins are created by
+                clicking a vertex in the 3D view (PinControls); each becomes a
+                point constraint in the sobolev ConstraintSet, so like the
+                constraint toggles the "Pins:" label dims in raw mode (picking
+                still works — the marker shows — but only sobolev descent honors
+                the constraint, Decision D9).
+                @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decision D9) */}
+            <div
+                style={{
+                    marginBottom: 15,
+                    display: 'flex',
+                    gap: 10,
+                    flexWrap: 'wrap',
+                    alignItems: 'center',
+                }}
+            >
+                <span style={{ opacity: descentMode === 'sobolev' ? 1 : 0.4 }}>Pins:</span>
+                {pins.length === 0 ? (
+                    <span style={{ color: '#888', fontStyle: 'italic' }}>
+                        click a vertex in the view to pin it (drag to move)
+                    </span>
+                ) : (
+                    pins.map((pin) => (
+                        <span
+                            key={pin.vertexIndex}
+                            style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                padding: '4px 8px',
+                                border: '1px solid #555',
+                                borderRadius: 5,
+                            }}
+                        >
+                            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={pin.enabled}
+                                    onChange={(e) =>
+                                        setPinEnabled(pin.vertexIndex, e.target.checked)
+                                    }
+                                />
+                                <span>Pin v{pin.vertexIndex}</span>
+                            </label>
+                            <button
+                                type="button"
+                                onClick={() => removePin(pin.vertexIndex)}
+                                title="remove pin"
+                                style={{
+                                    cursor: 'pointer',
+                                    background: 'transparent',
+                                    color: '#ff6666',
+                                    border: 'none',
+                                    fontSize: 18,
+                                    lineHeight: 1,
+                                    padding: 0,
+                                }}
+                            >
+                                ×
+                            </button>
+                        </span>
+                    ))
+                )}
             </div>
         </>
     );

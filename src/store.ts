@@ -13,6 +13,7 @@ import {
     type ConstraintSet,
     edgeLengths,
     edgeLengthsBlock,
+    pointBlock,
     totalLength,
     totalLengthBlock,
 } from './core/sobolev/constraintSet';
@@ -106,6 +107,25 @@ export type DescentMode = 'raw' | 'sobolev';
 export type LengthMode = 'none' | 'total' | 'perEdge';
 
 /**
+ * One interactive point-pin constraint: hold vertex `vertexIndex` at the
+ * FROZEN world-space `target` (fed to `pointBlock`, Φ = γ_i − target). `target`
+ * is in the same coordinates as the `live` buffer. `enabled` is the per-pin UI
+ * toggle. `target` is a FROZEN constraint target with the EXACT sobolevEll0
+ * lifecycle (frozen-targets anchor below): the frame loop READS pins and NEVER
+ * writes them — only user actions (add = snapshot live; drag = ray∩plane; the
+ * play/commit/rebuild re-anchor) mutate a target, because a pin whose target
+ * tracked the current iterate would be vacuous.
+ * @see src/core/sobolev/constraintSet.ts (pointBlock — Φ, identity C, out-of-range NaN backstop)
+ * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §2, §3.5, §5.3
+ * @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decisions D2, D5)
+ */
+export interface PinConstraint {
+    vertexIndex: number;
+    target: Vec3;
+    enabled: boolean;
+}
+
+/**
  * Result of {@link dispatchDescentStep}: the union shape of the two steppers.
  * The raw path always reports `accepted: true, converged: false, stats: null`
  * (it has no line search, no termination test, no saddle solve).
@@ -179,6 +199,14 @@ export function dispatchDescentStep(args: {
     // (store default 'frozen' — the reference-implementation scheme).
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
     projectionMode?: ProjectionMode;
+    // Interactive point pins (pin-drag milestone, briefing §5B). Each ENABLED,
+    // in-range pin appends one `pointBlock(vertexIndex, target)` AFTER the length
+    // block (row order: barycenter, length, pins). Absent/empty → no pointBlocks,
+    // bit-identical to the pre-pin dispatch. Disabled or out-of-range pins are
+    // dropped so a stale pin can never break the frame loop's descent.
+    // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decision D6)
+    // @see src/core/sobolev/constraintSet.ts (pointBlock)
+    pins?: PinConstraint[];
 }): DescentStepOutcome {
     if (args.descentMode === 'sobolev') {
         if (
@@ -219,6 +247,18 @@ export function dispatchDescentStep(args: {
             // Same NaN backstop for a missing frozen ℓ⁰ vector: NaN Φ rows →
             // projection can't converge → 'projection_failed', never a throw.
             set.push(edgeLengthsBlock(args.sobolevEll0 ?? args.edges.map(() => Number.NaN)));
+        }
+        // Interactive pins (briefing §5B): append one pointBlock per ENABLED,
+        // in-range pin AFTER the length block (row order barycenter, length,
+        // pins). Out-of-range/disabled pins are skipped — a stale pin must never
+        // break the frame loop (pointBlock's own NaN backstop would only surface
+        // as projection_failed, but dropping it here keeps the rest of the
+        // descent alive).
+        // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decision D6)
+        for (const pin of args.pins ?? []) {
+            if (pin.enabled && pin.vertexIndex >= 0 && pin.vertexIndex < args.vertices.length) {
+                set.push(pointBlock(pin.vertexIndex, pin.target));
+            }
         }
         // Construction-time rank-rule check (spec §3.4) — validate the set once
         // here, not per-iterate inside sobolevStepSet.
@@ -304,6 +344,13 @@ export interface SimStore {
     // constraint set, so switching it never invalidates sobolevConverged.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
     projectionMode: ProjectionMode;
+    // Interactive point pins (pin-drag milestone, briefing §5B). Each enabled pin
+    // becomes a `pointBlock` in the sobolev ConstraintSet (dispatch, spec §5.3).
+    // Default `[]`. FROZEN targets with the sobolevEll0 lifecycle (frozen-targets
+    // anchor above): cleared on rebuild (indices invalid in a new graph),
+    // re-anchored to live on play/commit, and NEVER mutated by the frame loop.
+    // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decisions D2, D5)
+    pins: PinConstraint[];
     // Last sobolev step's diagnostics (null before any sobolev step and in raw
     // mode); `sobolevConverged` mirrors spec §C step 5's termination outcome.
     sobolevStats: SobolevStepStats | null;
@@ -340,6 +387,14 @@ export interface SimStore {
     setLengthMode(m: LengthMode): void;
     setLengthConstraint(b: boolean): void;
     setProjectionMode(m: ProjectionMode): void;
+    // Pin actions (briefing §5B). addPin snapshots the vertex's CURRENT live
+    // position as the frozen target (idempotent by vertexIndex); setPinTarget is
+    // the drag re-target; removePin/setPinEnabled edit the list.
+    // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decisions D2, D3, D5)
+    addPin(vertexIndex: number): void;
+    removePin(vertexIndex: number): void;
+    setPinEnabled(vertexIndex: number, enabled: boolean): void;
+    setPinTarget(vertexIndex: number, target: Vec3): void;
     setShowArrows(b: boolean): void;
     setRunning(b: boolean): void;
     setZoom(z: number): void;
@@ -383,12 +438,36 @@ export const useSimStore = create<SimStore>()((set, get) => {
             sobolevX0: barycenterTarget(b.graph.vertices, b.graph.edges),
             sobolevL0: totalLength(b.graph.vertices, b.graph.edges),
             sobolevEll0: edgeLengths(b.graph.vertices, b.graph.edges),
+            // Rebuild changes topology → old pin vertex indices are meaningless,
+            // so pins CLEAR (the faithful mirror of the sobolevEll0 "recompute
+            // from the new graph" re-anchor when the old data cannot survive).
+            // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decision D5)
+            pins: [],
             sobolevStats: null,
             sobolevConverged: false,
             sobolevTimings: null,
         }));
         saveConfig(id, nextParams);
     };
+
+    // Re-anchor every in-range pin's FROZEN target to the current live position
+    // (drops any out-of-range pin). Mirrors the sobolevEll0 = edgeLengths(live)
+    // re-anchor at the play/commit boundaries; because drag keeps target == live
+    // this is a no-op except for absorbing ≤ reference-tolerance projection drift
+    // (spec §3.5 "accepted drift across pause cycles"). Fresh Vec3 copies so the
+    // frozen targets never alias the mutable live buffer.
+    // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decision D5)
+    const reanchorPins = (pins: PinConstraint[], live: Vec3[]): PinConstraint[] =>
+        pins
+            .filter((p) => p.vertexIndex >= 0 && p.vertexIndex < live.length)
+            .map((p) => ({
+                ...p,
+                target: [
+                    live[p.vertexIndex][0],
+                    live[p.vertexIndex][1],
+                    live[p.vertexIndex][2],
+                ] as Vec3,
+            }));
 
     return {
         selectedTestId: test.id,
@@ -409,6 +488,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         barycenterConstraint: true,
         lengthConstraint: true,
         projectionMode: 'frozen',
+        pins: [],
         sobolevStats: null,
         sobolevConverged: false,
         sobolevTimings: null,
@@ -455,6 +535,49 @@ export const useSimStore = create<SimStore>()((set, get) => {
         // Solver strategy, not a constraint toggle: leaves targets, stats, and
         // the converged verdict alone (see the projectionMode field anchor).
         setProjectionMode: (m) => set({ projectionMode: m }),
+        // Pin actions (briefing §5B). A pin is a per-vertex point constraint; like
+        // the other constraint toggles, mutating the pin set invalidates ONLY the
+        // converged verdict (sobolevStats describe the last step taken and remain).
+        // The frozen target snapshots the CURRENT live position at add time and is
+        // otherwise mutated only here or by the play/commit/rebuild re-anchor —
+        // never by the frame loop (frozen-targets lifecycle, spec §3.5).
+        // @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md (Decisions D2, D3, D5)
+        addPin: (vertexIndex) =>
+            set((s) => {
+                // Idempotent by vertexIndex: a second grab of an already-pinned
+                // vertex keeps its existing target (drag re-targets via setPinTarget).
+                if (s.pins.some((p) => p.vertexIndex === vertexIndex)) return {};
+                const v = s.live[vertexIndex];
+                if (v === undefined) return {}; // out-of-range guard — never pin a stale index
+                return {
+                    pins: [
+                        ...s.pins,
+                        { vertexIndex, target: [v[0], v[1], v[2]] as Vec3, enabled: true },
+                    ],
+                    sobolevConverged: false,
+                };
+            }),
+        removePin: (vertexIndex) =>
+            set((s) => ({
+                pins: s.pins.filter((p) => p.vertexIndex !== vertexIndex),
+                sobolevConverged: false,
+            })),
+        setPinEnabled: (vertexIndex, enabled) =>
+            set((s) => ({
+                pins: s.pins.map((p) => (p.vertexIndex === vertexIndex ? { ...p, enabled } : p)),
+                sobolevConverged: false,
+            })),
+        // Drag re-target: update only the named pin's frozen target (a fresh Vec3
+        // so it never aliases the caller's array). No-op if the pin was removed.
+        setPinTarget: (vertexIndex, target) =>
+            set((s) => ({
+                pins: s.pins.map((p) =>
+                    p.vertexIndex === vertexIndex
+                        ? { ...p, target: [target[0], target[1], target[2]] as Vec3 }
+                        : p,
+                ),
+                sobolevConverged: false,
+            })),
         setShowArrows: (b) => set({ showArrows: b }),
         setRunning: (b) => {
             if (b) {
@@ -467,6 +590,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     sobolevX0: barycenterTarget(s.live, s.graph.edges),
                     sobolevL0: totalLength(s.live, s.graph.edges),
                     sobolevEll0: edgeLengths(s.live, s.graph.edges),
+                    // Pins are frozen targets on the same lifecycle: re-anchor to
+                    // the current live positions at run start (Decision D5).
+                    pins: reanchorPins(s.pins, s.live),
                     sobolevStats: null,
                     sobolevConverged: false,
                     sobolevTimings: null,
@@ -494,6 +620,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 sobolevX0: barycenterTarget(s.live, s.graph.edges),
                 sobolevL0: totalLength(s.live, s.graph.edges),
                 sobolevEll0: edgeLengths(s.live, s.graph.edges),
+                // Vertex commit re-anchors the frozen pin targets from the
+                // committed positions, same lifecycle as x₀/L⁰/ℓ⁰ (Decision D5).
+                pins: reanchorPins(s.pins, s.live),
             });
         },
         setZoom: (z) => set({ zoom: z }),

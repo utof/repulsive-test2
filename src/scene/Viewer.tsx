@@ -17,6 +17,7 @@ import * as THREE from 'three/webgpu';
 import { dispatchDescentStep, useSimStore } from '../store';
 import { Curve } from './Curve';
 import { GradientArrows } from './GradientArrows';
+import { PinControls } from './PinControls';
 
 declare module '@react-three/fiber' {
     // Task 10: LineSegments2/LineSegmentsGeometry live in three/addons, so `ThreeToJSXElements<typeof
@@ -86,6 +87,11 @@ function Simulation() {
                 barycenterConstraint: st.barycenterConstraint,
                 lengthMode: st.lengthMode,
                 sobolevEll0: st.sobolevEll0,
+                // Interactive pins → pointBlocks (briefing §5B). Frozen targets,
+                // READ-ONLY here — the frame loop never mutates them (same
+                // contract as sobolevEll0 above); re-anchoring/drag happen in the
+                // store / PinControls. @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md
+                pins: st.pins,
                 // Projection strategy A/B (solver-perf Task 6): store default
                 // 'frozen' (reference-impl reuse), 'reassemble' selectable.
                 projectionMode: st.projectionMode,
@@ -208,13 +214,19 @@ export function Viewer() {
         >
             <ambientLight intensity={0.8} />
             <directionalLight position={[5, 5, 5]} intensity={0.6} />
-            <OrbitControls ref={controls} minPolarAngle={0} maxPolarAngle={Math.PI} />
+            {/* makeDefault registers this instance as R3F state.controls so
+                PinControls can toggle `.enabled` to suspend orbiting during a
+                vertex drag (Decision D7). @see docs/superpowers/plans/2026-07-03-pin-drag-ui.md */}
+            <OrbitControls makeDefault ref={controls} minPolarAngle={0} maxPolarAngle={Math.PI} />
             {/* Distinct key PREFIXES: both siblings previously shared the bare
                 graphVersion key, and duplicate keys among siblings are undefined
                 reconciler behavior in React ("children may be duplicated and/or
                 omitted") — stale meshes could linger across preset regenerations. */}
             <Curve key={`curve-${graphVersion}`} />
             <GradientArrows key={`arrows-${graphVersion}`} />
+            {/* Pin picking/drag overlay — keyed on graphVersion for the same
+                remount-on-topology-change contract as Curve/GradientArrows. */}
+            <PinControls key={`pins-${graphVersion}`} />
             <Simulation />
         </Canvas>
     );

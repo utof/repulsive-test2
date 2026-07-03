@@ -115,6 +115,28 @@ with `--amend` (CLAUDE.md one-commit-per-plan rule). Do NOT push. No task commit
   dispatch's raw branch ignores pins entirely (unchanged). Picking/markers still work (they are
   descent-mode-agnostic scene affordances); the ControlPanel pin list notes pins affect sobolev.
 
+- **D10 — abnormal drag termination + hover-accurate end cursor (review findings 1–2).**
+  Review found that `endDrag` on `onPointerUp` alone strands `controls.enabled = false` (and a
+  `grabbing` cursor) on abnormal termination — mid-drag remount via the `pins-${graphVersion}`
+  key, browser `pointercancel`/`lostpointercapture` — and that the unconditional `'grab'` at
+  drag end can show with nothing hovered. Fix, grounded in the INSTALLED
+  `@react-three/fiber@9.6.1` events source (`dist/events-b389eeca.esm.js`): (a) this R3F version
+  NEVER dispatches the object-level `onPointerCancel`/`onLostPointerCapture` props — its canvas
+  handlers for both (`handlePointer` cancelation switch, ~lines 817–842) only call
+  `cancelPointer([])`, which fires **`onPointerOut`** on every hovered object (~787–810); and
+  during a capture the dragged instance is pinned into the hover/intersections set via the
+  captured intersection (~657–662), so it can only go "out" through a cancel. Therefore the
+  abnormal hook is `onPointerOut` while dragging, filtered to `e.instanceId === dragIndex`
+  (outs for OTHER instances the cursor crosses mid-drag are ordinary and must not end the
+  drag); it restores `controls.enabled`/cursor WITHOUT touching capture (already gone on these
+  paths — releasing again can throw). (b) A `useEffect` unmount cleanup unconditionally
+  restores `controls.enabled = true` + default cursor (covers the remount path; nothing else
+  in the app disables the default controls). (c) `endDrag`'s `releasePointerCapture` is wrapped
+  in try/catch (DOM release throws on a dead pointerId). (d) The end-of-drag cursor comes from
+  a fresh raycast of the pick mesh with the release ray (R3F hover bookkeeping is stale-true
+  for the captured instance): `'grab'` if hit, default otherwise — in the normal flow the
+  dragged vertex sits on the release ray, so this lands on `'grab'`.
+
 ## API verification (context7, this session — do not re-derive)
 
 - R3F v9 mesh pointer handlers `onPointerDown/Move/Up/Over/Out`, `ThreeEvent<PointerEvent>`,
@@ -125,6 +147,13 @@ with `--amend` (CLAUDE.md one-commit-per-plan rule). Do NOT push. No task commit
 - drei `<OrbitControls makeDefault />` sets R3F `state.controls`; retrieve via
   `useThree((s) => s.controls)`; toggle `controls.enabled` to gate orbiting during manipulation
   (exactly what TransformControls does). (`/pmndrs/drei`, docs/controls/introduction.mdx.)
+- Verified against the INSTALLED `@react-three/fiber@9.6.1` source (post-review, D10): the
+  object-level `onPointerCancel`/`onLostPointerCapture` props exist in `EventHandlers` but are
+  never dispatched — the canvas-level handlers for those two DOM events only run
+  `cancelPointer([])`, which surfaces as `onPointerOut` on hovered objects; captured
+  intersections are re-appended to every event's hit list, keeping the dragged instance
+  "hovered" for the duration of the capture. (`dist/events-b389eeca.esm.js` — handlePointer
+  cancelation switch, cancelPointer, intersect's capturedMap append.)
 
 ## Ground-truth references (cite these in @see, never "Task N")
 
