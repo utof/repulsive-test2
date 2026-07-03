@@ -77,6 +77,19 @@ export interface SobolevStepOptions {
      * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
      */
     collectTimings?: boolean;
+    /**
+     * Precomputed E₀ = E(γ₀) at the CURRENT input vertices, forwarded to the
+     * line search (and reused on the converged/singular echo paths, which return
+     * these same vertices) instead of recomputing calculateEnergy. MUST be
+     * exactly `calculateEnergy(vertices, edges, disjointPairs, alpha, beta,
+     * epsilon)` — a continuous run gets this for free from the previous accepted
+     * step's returned energy. A stale value corrupts the Armijo gate; the caller
+     * owns the invariant (same contract as the line search's `energyBefore`
+     * option in `./sobolev/lineSearch`). Omitted → E₀ recomputed (unchanged
+     * behavior).
+     * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+     */
+    energyBefore?: number;
 }
 
 /**
@@ -196,9 +209,15 @@ export function sobolevStepSet(
                 // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
                 return {
                     vertices,
-                    energy: timed('energy', () =>
-                        calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-                    ),
+                    // E₀ reuse (Task 4): the echoed vertices ARE the input γ₀, so a
+                    // provided energyBefore already equals calculateEnergy(γ₀) by its
+                    // invariant — reuse it instead of recomputing.
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+                    energy:
+                        opts.energyBefore ??
+                        timed('energy', () =>
+                            calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+                        ),
                     accepted: false,
                     converged: false,
                     stats: {
@@ -215,9 +234,14 @@ export function sobolevStepSet(
             if (gradientL2Norm < SOBOLEV_CONVERGENCE_TOL) {
                 return {
                     vertices,
-                    energy: timed('energy', () =>
-                        calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-                    ),
+                    // E₀ reuse (Task 4): converged echoes γ₀ unchanged, so a provided
+                    // energyBefore already equals calculateEnergy(γ₀) — reuse it.
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+                    energy:
+                        opts.energyBefore ??
+                        timed('energy', () =>
+                            calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+                        ),
                     accepted: false,
                     converged: true,
                     stats: { tau: 0, residual, gradientL2Norm, projectionIterations: 0 },
@@ -235,6 +259,10 @@ export function sobolevStepSet(
                     dE,
                     gTilde,
                     set,
+                    // E₀ reuse (Task 4): forward the precomputed E₀ so the line
+                    // search skips its own calculateEnergy(γ₀); undefined → recompute.
+                    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+                    { energyBefore: opts.energyBefore },
                 ),
             );
             // On failure lineSearchStepSet already echoes the input vertices unchanged and

@@ -50,6 +50,15 @@ function Simulation() {
     const statAcc = useRef(0);
     const camAcc = useRef(0);
     const iters = useRef(0);
+    // E₀ reuse across steps (Task 4): the previous ACCEPTED step's returned
+    // energy, which is exactly calculateEnergy(the vertices that become this
+    // step's input), so reusing it as the next step's Armijo baseline is
+    // bit-identical within a continuous run. Nulled at every !running boundary
+    // below (run start, user pause, auto-pause, preset rebuild — the store
+    // re-anchors targets at those same boundaries), making a stale E₀ — which
+    // would corrupt the Armijo gate — structurally impossible.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+    const lastEnergy = useRef<number | null>(null);
 
     useFrame((state, delta) => {
         const st = useSimStore.getState();
@@ -81,6 +90,10 @@ function Simulation() {
                 // raw path ignores this and the collector is inert when off.
                 // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
                 collectTimings: true,
+                // Reuse the previous accepted step's E₀ (null on the first frame
+                // of any run → fresh recompute). @see the lastEnergy ref anchor
+                // above / plan Task 4.
+                energyBefore: lastEnergy.current ?? undefined,
             });
             if (result.accepted) {
                 // Copy-then-discard: both steppers are pure by design and return a fresh
@@ -94,6 +107,11 @@ function Simulation() {
                     l[1] = v[1];
                     l[2] = v[2];
                 }
+                // Cache E₀ for the next step: result.energy is calculateEnergy at
+                // exactly the vertices just copied into `live` (this step's output =
+                // next step's input), so next frame's reuse is bit-identical.
+                // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+                lastEnergy.current = result.energy;
                 iters.current += 1;
                 statAcc.current += delta;
                 if (statAcc.current > 0.1) {
@@ -123,6 +141,12 @@ function Simulation() {
         } else {
             // keep the iteration counter in sync with a rebuilt/committed state
             iters.current = st.step;
+            // Any !running boundary (run start after pause, user pause, auto-pause,
+            // preset rebuild, vertex commit) invalidates the cached E₀: the next
+            // run may start from re-anchored targets / different vertices. Null
+            // forces a fresh E₀ on the run's first step, so a stale value can never
+            // reach the Armijo gate. @see the lastEnergy ref anchor / plan Task 4.
+            lastEnergy.current = null;
         }
 
         camAcc.current += delta;

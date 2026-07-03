@@ -132,7 +132,14 @@ function runCase(nV: number, constraintMode: ConstraintMode): CaseResult {
     const { vertices, edges } = trefoil(nV);
     const disjointPairs = calculateDisjointPairs(edges);
     const set = buildSet(constraintMode, vertices, edges);
-    const opts = { mode: 'analytical' as const, collectTimings: true };
+    // E₀ reuse (Task 4): every measured repeat starts from the SAME `vertices`,
+    // so calculateEnergy(vertices) is exactly the E₀ a continuous run would carry
+    // over from its previous accepted step (bit-identical by the option's
+    // invariant). Passing it mirrors the frame loop's per-step cost — one fewer
+    // energy eval — instead of re-measuring the pre-reuse path.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+    const energyBefore = calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon);
+    const opts = { mode: 'analytical' as const, collectTimings: true, energyBefore };
 
     // 2 warmup full steps (discarded), then K=5 measured — each from the SAME
     // initial vertices (the step is pure/deterministic → identical work).

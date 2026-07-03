@@ -161,6 +161,13 @@ export function dispatchDescentStep(args: {
     // it and reports `timings: null`.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
     collectTimings?: boolean;
+    // Precomputed E₀ = E(γ₀) at `vertices`, reused as the sobolev step's Armijo
+    // baseline instead of recomputing calculateEnergy. MUST be exactly
+    // calculateEnergy(vertices, …); the frame loop supplies the previous accepted
+    // step's returned energy and nulls it at every !running boundary so staleness
+    // is structurally impossible. Ignored on the raw path.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+    energyBefore?: number;
 }): DescentStepOutcome {
     if (args.descentMode === 'sobolev') {
         if (
@@ -208,6 +215,9 @@ export function dispatchDescentStep(args: {
         const r = sobolevStepSet(args.vertices, args.edges, args.disjointPairs, set, {
             mode: args.mode,
             collectTimings: args.collectTimings,
+            // E₀ reuse (Task 4): passthrough to the step; undefined → recompute.
+            // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+            energyBefore: args.energyBefore,
         });
         return {
             vertices: r.vertices,

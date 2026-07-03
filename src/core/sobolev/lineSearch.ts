@@ -271,6 +271,16 @@ export interface LineSearchOptions {
     shrink?: number;
     tau0?: number;
     tauMin?: number;
+    /**
+     * Precomputed E₀ = E(γ₀) at the CURRENT vertices, reused instead of calling
+     * calculateEnergy here. MUST be exactly `calculateEnergy(vertices, edges,
+     * disjointPairs, alpha, beta, epsilon)` for the same γ₀ — a continuous run
+     * gets this for free from the previous accepted step's returned energy.
+     * A stale value corrupts the Armijo gate `E(γ_proj) ≤ E₀ − c₁·τ·m`, so the
+     * caller owns the invariant; when omitted, E₀ is recomputed (unchanged
+     * behavior). @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
+     */
+    energyBefore?: number;
 }
 
 /** Failure reasons of {@link lineSearchStepSet}, mirroring the oracle's `reason` strings. */
@@ -337,11 +347,17 @@ export function lineSearchStepSet(
     const tau0 = opts?.tau0 ?? 1;
     const tauMin = opts?.tauMin ?? 1e-12;
 
+    // E₀ reuse (Task 4): a provided energyBefore (bit-identical to
+    // calculateEnergy at γ₀ per the option's invariant) short-circuits the
+    // recompute, so the 'energy' timing wrap does NOT fire for E₀ in that case.
     // Phase-timing wrap (opt-in, default-inert): E₀ is one of the 'energy'
-    // call-site evals. @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
-    const e0 = timed('energy', () =>
-        calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
-    );
+    // call-site evals only when recomputed here.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 1, 4)
+    const e0 =
+        opts?.energyBefore ??
+        timed('energy', () =>
+            calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        );
     const gradNorm = l2CurveNorm(gTilde, vertices, edges);
     if (!Number.isFinite(gradNorm) || gradNorm <= 0) {
         return {
