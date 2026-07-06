@@ -1,3 +1,45 @@
+# ⚠️ AUDIT CAVEATS (2026-07-06) — read before porting ANYTHING from this doc
+
+A three-auditor line audit + orchestrator reproduction (2026-07-04, on the
+committed `oracle/tpe_stage2_oracle.py` + `oracle/golden/crossing_stage2_golden.json`)
+found the derived math below largely correct but the **calibration, acceptance
+gates, and golden unreliable**. Do not treat this doc as a port-ready spec until
+the linked issues are closed. Full findings: `local_files/2026-07-04-stage2-audit-findings.md`
+(gitignored; key evidence is inlined in the issues).
+
+**Trustworthy (verified):** dense baseline is bit-equivalent to the audited
+stage-1 oracle; every §7 penalty formula is a true derivative; §3.1–§3.3
+projector/saddle math is correct (and silently fixes two paper typos); §3.4
+coarsening structure matches paper B.3.2; the BCT B/B⁰ reconstruction identity
+is machine-exact on all topologies; BH skeleton (BVH build, disjointness,
+cluster-term math) is line-correct.
+
+**Broken / do not copy (see issues):**
+- utof/repulsive-test2#5 — **BLOCKER:** pure MG diverges on open chains and
+  junction networks (rediscretized coarse operators, spectrally inconsistent at
+  boundaries; two-grid ρ=8.4 with an EXACT coarse solve), and the §3.6 dense
+  cleanup then returns residual ~1e67 **with its success flag set** — it would
+  be written straight into a golden. Closed loops converge but ρ degrades
+  0.25→0.59 from N=60→960. §1.4's "analytic BH differential" is additionally
+  NOT the gradient of the BH energy (freezes cluster stats).
+- utof/repulsive-test2#6 — BH admissibility accepts **zero clusters** at
+  N≤120 under the delivered θ=0.5/leaf_size=8 (undocumented `not is_leaf`
+  guard + shared θ for the tangent test); the BCT θ=0 exactness gate is false
+  at leaf_size=2 (singleton clusters admissible at every θ).
+- utof/repulsive-test2#7 — the committed golden exercises 0 BH clusters,
+  0 real V-cycles, and was generated at an unrecorded leaf_size=2; it is an
+  orphan (nothing regenerates or consumes it) and certifies almost nothing.
+- utof/repulsive-test2#8 — doc/code contradictions: coarse-solve threshold
+  n≤64 (doc §3.5) vs 8 (code, twice); the §6 iteration gates fail on every
+  real fixture measured; the paper's B.3.1 nested-iteration initialization was
+  silently dropped (unrecorded ledger deviation); the prescribed W-cycle
+  escape hatch is unimplemented.
+
+**Economic verdict (measured):** BH alone and MG alone pay ~nothing at
+N≤120; BH+MG+BCT pay only together at N≳300 — and only after #5/#6 are fixed
+(first experiment: Galerkin coarse operators, in the oracle, before any TS port).
+
+---
 I produced a deterministic single-file oracle and a crossing golden:
 
 [Download `tpe_stage2_oracle.py`](sandbox:/mnt/data/tpe_stage2_oracle.py)
