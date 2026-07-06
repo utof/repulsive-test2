@@ -4,6 +4,7 @@ import {
     type LengthMode,
     type Mode,
     type ProjectionMode,
+    type SolverDriver,
     useSimStore,
 } from '../store';
 
@@ -37,6 +38,8 @@ export function ControlPanel() {
     const setLengthMode = useSimStore((s) => s.setLengthMode);
     const projectionMode = useSimStore((s) => s.projectionMode);
     const setProjectionMode = useSimStore((s) => s.setProjectionMode);
+    const solverDriver = useSimStore((s) => s.solverDriver);
+    const setSolverDriver = useSimStore((s) => s.setSolverDriver);
     const showArrows = useSimStore((s) => s.showArrows);
     const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
@@ -215,6 +218,23 @@ export function ControlPanel() {
                     >
                         <option value="frozen">Frozen (reuse)</option>
                         <option value="reassemble">Reassemble</option>
+                    </select>
+                </label>
+                {/* Solver driver A/B (worker-solver §D6): 'worker' (default) runs
+                    the descent step off the main thread so orbit/pin-drag/UI stay
+                    fluid; 'main' is today's synchronous in-frame path. NOT a
+                    constraint/sobolev-only control — it applies to both descent
+                    modes (the SAME pure step runs either way), so it stays enabled
+                    in raw mode. @see docs/superpowers/plans/2026-07-04-worker-solver.md §D6 */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Solver:</span>
+                    <select
+                        value={solverDriver}
+                        onChange={(e) => setSolverDriver(e.target.value as SolverDriver)}
+                        style={{ padding: 8, fontSize: 14 }}
+                    >
+                        <option value="worker">Worker</option>
+                        <option value="main">Main thread</option>
                     </select>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
