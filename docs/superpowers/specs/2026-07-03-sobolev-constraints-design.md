@@ -241,8 +241,18 @@ Commit message starts `feat(sobolev): total-length constraint (constraints M1)`.
 test files; oracle property/golden scripts pass for the new goldens; boot the
 app (`bun run dev`, see the headless recipe in the project memory if no
 display) and confirm: sobolev + fixed length on the crossing preset descends
-with L drift ≤ 1e-8 and — unlike before — ‖g̃‖ now DECREASES over time. Quote
-a few frames in the report.
+with L drift ≤ 1e-8.
+
+> **CORRECTION (2026-07-06, utof/repulsive-test2#2):** the original gate here
+> also demanded "‖g̃‖ now DECREASES over time" on the crossing preset. That
+> expectation is FALSE for this fixture: crossing is two disjoint open
+> segments, so rigid separation preserves total length and barycenter — E → 0
+> with no minimizer and ‖g̃‖ grows without bound while energy decreases
+> monotonically and L stays pinned (measured trajectories in the issue). The
+> decreasing-‖g̃‖ expectation belongs to fixtures with a genuine constrained
+> minimum (e.g. linked-rings, where it holds as originally described). Use
+> energy monotonicity + L drift on crossing; use ‖g̃‖ decrease on
+> linked-rings.
 
 ## 5. Milestone M2 — per-edge length + point constraints
 
