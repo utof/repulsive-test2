@@ -83,6 +83,18 @@ export interface DescentStepOutcome {
     // the UI (Stats.tsx second line) via the store's `sobolevTimings`.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
     timings: SobolevStepTimings | null;
+    // The descent field the step ACTUALLY used, at the step's INPUT vertices,
+    // when `collectField` was requested (§D14 / issue #9): raw mode → the L²
+    // gradient dE; sobolev mode → the g̃ from the FULL ConstraintSet saddle solve
+    // (NOT the legacy barycenter-only field). `null` when NOT collected, and
+    // `null` when the sobolev saddle was singular (no g̃ exists). Populated on
+    // accepted AND rejected/converged outcomes whenever the field was computed —
+    // a rejected line search still solved g̃. Named `descentField` (not `field`)
+    // to avoid collision with the penalties' `field` concept. GradientArrows
+    // renders it directly while running instead of a redundant second-worker
+    // recompute; published store-side as `arrowField`.
+    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+    descentField: Vec3[] | null;
 }
 
 /**
@@ -109,6 +121,12 @@ export interface DispatchDescentStepArgs {
     // it and reports `timings: null`.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
     collectTimings?: boolean;
+    // Opt into {@link DescentStepOutcome.descentField} — the field the step used
+    // at its INPUT vertices (raw dE / sobolev g̃), for the GradientArrows
+    // diagnostic (§D14 / issue #9). Sibling of `collectTimings`; threaded to
+    // `step` / `sobolevStepSet` the same way. Absent ⇒ `descentField: null`, every
+    // code path bit-identical to today. @see plan §D14.
+    collectField?: boolean;
     // Precomputed E₀ = E(γ₀) at `vertices`, reused as the sobolev step's Armijo
     // baseline instead of recomputing calculateEnergy. MUST be exactly
     // calculateEnergy(vertices, …); the frame loop supplies the previous accepted
@@ -185,6 +203,11 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
                 // Pre-M1 back-compat shape: never collects timings (the app never
                 // takes this branch — it always passes the M-set toggles).
                 timings: null,
+                // §D14: the app never reaches this legacy barycenter-only path (it
+                // always passes the M-set toggles), and §D14 deliberately surfaces
+                // the FULL-ConstraintSet g̃, not the legacy field — so descentField
+                // is null here regardless of collectField. @see plan §D14 / issue #9.
+                descentField: null,
             };
         }
         const set: ConstraintSet = [];
@@ -223,6 +246,9 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
         const r = sobolevStepSet(args.vertices, args.edges, args.disjointPairs, set, {
             mode: args.mode,
             collectTimings: args.collectTimings,
+            // §D14: opt into the step's g̃ (full-set) for the arrows diagnostic;
+            // undefined → no field collected. @see plan §D14 / issue #9.
+            collectField: args.collectField,
             // E₀ reuse (Task 4): passthrough to the step; undefined → recompute.
             // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 4)
             energyBefore: args.energyBefore,
@@ -240,11 +266,16 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
             converged: r.converged,
             stats: r.stats,
             timings: r.timings ?? null,
+            // §D14: the full-set g̃ (null when not collected or singular saddle).
+            // @see plan §D14 / issue #9.
+            descentField: r.descentField ?? null,
         };
     }
     const r = step(args.vertices, args.edges, args.disjointPairs, {
         mode: args.mode,
         stepSize: args.stepSize,
+        // §D14: opt into the raw dE for the arrows diagnostic. @see plan §D14.
+        collectField: args.collectField,
     });
     return {
         vertices: r.vertices,
@@ -253,6 +284,8 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
         converged: false,
         stats: null,
         timings: null,
+        // §D14: the raw L² gradient dE (null when not collected). @see plan §D14.
+        descentField: r.field ?? null,
     };
 }
 
@@ -286,14 +319,15 @@ export interface StepArgsSource {
  * the main driver spreads `collectTimings: true` and dispatches inline; the
  * worker driver strips the topology fields (edges/disjointPairs — the worker
  * restores them from its cache, §D4) and posts the rest. Extracting it here is
- * what prevents worker/main parameter drift. `collectTimings` is intentionally
- * NOT set here (hardcoded at each call site, as in the pre-worker frame loop).
- * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D7
+ * what prevents worker/main parameter drift. `collectTimings` and `collectField`
+ * are intentionally NOT set here (hardcoded/derived at each call site, as in the
+ * pre-worker frame loop — §D14 spreads `collectField: st.showArrows` there).
+ * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D7, §D14
  */
 export function buildStepArgs(
     state: StepArgsSource,
     energyBefore: number | undefined,
-): Omit<DispatchDescentStepArgs, 'collectTimings'> {
+): Omit<DispatchDescentStepArgs, 'collectTimings' | 'collectField'> {
     return {
         descentMode: state.descentMode,
         vertices: state.live,

@@ -266,3 +266,71 @@ goal (interaction smoothness regardless of step cost).
 longtasks >60 ms attributable to the field compute (the `gradientAnalytical ←
 GradientArrows` stack disappears from the main-thread CPU profile; it now runs
 on the arrows worker thread).
+
+## §D14 Field reuse (issue #9)
+
+**The redundancy.** After §D13 the arrows compute is off-thread but STILL
+redundant: `dispatchDescentStep` already computes exactly this field inside every
+step (raw `step()`'s `grad`; sobolev `sobolevStepSet`'s `gTilde` from the full
+ConstraintSet saddle solve) and discards it — `DescentStepOutcome` surfaced only
+vertices/energy/flags/stats/timings. The §D13 arrows worker then recomputed the
+same O(E²)–O(n³) field. This is one full redundant compute per arrows refresh (a
+whole worker-thread core at N≥200) and a ≤1-step direction staleness. #9 removes
+it by threading the step's OWN field out and rendering it.
+
+- **D14-a — core plumbing (opt-in).** `dispatchDescentStep` args gain
+  `collectField?: boolean` (sibling of `collectTimings`); `DescentStepOutcome`
+  gains `descentField: Vec3[] | null` (named to avoid the penalties' `field`
+  collision). Semantics: the field the step ACTUALLY used, at the step's INPUT
+  vertices — raw → the L² gradient dE (`step()`'s `grad`, `optimizer.ts`);
+  sobolev → the g̃ from the FULL ConstraintSet saddle solve (`sobolevStepSet`'s
+  `gTilde`, NOT the legacy barycenter-only field). `null` when not collected and
+  when the sobolev saddle was singular (no g̃). Populated on accepted AND
+  rejected/converged outcomes whenever the field was computed (a rejected line
+  search still solved g̃). Threaded exactly like `collectTimings`: `step` /
+  `sobolevStepSet` gain `collectField?` and return the field only when asked, so
+  every not-requested path is bit-identical (no extra allocation). The pre-M1
+  legacy `sobolevStep` branch of dispatch returns `descentField: null` — the app
+  never reaches it and §D14 surfaces the full-set g̃, not the legacy field.
+- **D14-b — worker protocol: no change.** The `step` branch spreads `msg.args`
+  into `dispatchDescentStep` and returns the whole outcome, so
+  `collectField`/`descentField` ride through untouched.
+- **D14-c — drivers publish it.** Both drivers spread `collectField:
+  st.showArrows` at the two `buildStepArgs` call sites (like `collectTimings:
+  true`); `buildStepArgs`' `Omit` also omits `collectField`. `applyStepOutcome`
+  publishes `result.descentField` into a new store field `arrowField: Vec3[] |
+  null` in BOTH setState blocks (the 10 Hz-throttled accepted block and the
+  unthrottled reject/converge block). Store: `arrowField` defaults null, cleared
+  on preset rebuild/reset (old vertex indices meaningless in a new topology),
+  mirroring `sobolevStats`.
+- **D14-d — arrows consume it while running.** `GradientArrows` useFrame: when
+  `st.running`, render `st.arrowField` directly through the cone matrices (zero
+  compute, zero worker round-trip); `arrowField === null` while running (singular
+  saddle, which also auto-pauses) → hide (count 0). The §D13 worker-request /
+  sync-fallback path now runs ONLY while PAUSED (no step to publish a field —
+  paused config changes, fresh remount). Key/throttle kept so matrices aren't
+  rewritten every frame. **Deliberate, documented fidelity upgrade + Why:** while
+  running in sobolev mode with length/pin constraints the arrows now show the
+  step's TRUE full-ConstraintSet g̃ instead of the legacy barycenter-only field —
+  *Why:* that g̃ is the direction the curve actually moves, so the diagnostic now
+  matches the descent; the PAUSED on-demand path intentionally KEEPS today's
+  legacy `computeArrowField` (barycenter-only) semantics because no step is
+  running to publish a truthful field and reproducing the full set on demand would
+  re-introduce the redundancy #9 removes.
+- **D14-e — reviewer nits from the 41514a9 review (folded in here).**
+  1. `applyConeMatrices` bounds its loop by `Math.min(count, field.length)` (the
+     committed reactive instance-buffer size, not fresh `graph.vertices.length`) —
+     restores structural buffer-safety (a `setMatrixAt` past the instanced buffer
+     is a silent OOB).
+  2. A `field` round-trip test with `mode: 'finiteDiff'` (the `gradientFiniteDiff`
+     branch was untested end-to-end).
+  3. Softened the "permanent … forever" fallback comments to "permanent for this
+     topology instance" — the component is keyed on `graphVersion`
+     (`Viewer.tsx:382`) and remounts, resetting the `fallbackToSync` ref.
+
+**Acceptance gates.** `bun test` full suite green (the §T2 whole-outcome
+assertions gain an explicit `descentField: null` on the no-`collectField` path —
+the only sanctioned change to existing tests); new: raw `collectField` ==
+`gradientAnalytical`, sobolev `collectField` == the full-set g̃ AND ≠ raw dE,
+finiteDiff `field` round-trip, `arrowField` default null. `bunx tsc --noEmit`
+clean. Every not-requested step stays bit-identical (no extra allocation).

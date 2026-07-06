@@ -133,6 +133,10 @@ function Simulation() {
                     energy: result.energy,
                     sobolevStats: result.stats,
                     sobolevTimings: result.timings,
+                    // §D14: publish the field this accepted step used so GradientArrows
+                    // renders it directly (issue #9); null when collectField was off or
+                    // the saddle was singular. @see …worker-solver.md §D14
+                    arrowField: result.descentField,
                 });
             }
         } else {
@@ -146,6 +150,10 @@ function Simulation() {
                 sobolevStats: result.stats,
                 sobolevConverged: result.converged,
                 sobolevTimings: result.timings,
+                // §D14: publish the field even on a rejected/converged step (a rejected
+                // line search still solved g̃; singular → null hides the arrows). This
+                // is the unthrottled boundary block. @see …worker-solver.md §D14
+                arrowField: result.descentField,
             });
             st.setRunning(false);
         }
@@ -286,7 +294,10 @@ function Simulation() {
                     const stepReq: SolverWorkerRequest = {
                         type: 'step',
                         graphVersion: st.graphVersion,
-                        args: { ...args, collectTimings: true },
+                        // §D14: collect the step's field ONLY when the arrows are
+                        // visible, so the payload grows only when it's consumed
+                        // (issue #9). @see …worker-solver.md §D14
+                        args: { ...args, collectTimings: true, collectField: st.showArrows },
                     };
                     worker.postMessage(stepReq);
                     inFlight.current = true;
@@ -299,6 +310,8 @@ function Simulation() {
                 const result = dispatchDescentStep({
                     ...buildStepArgs(st, lastEnergy.current ?? undefined),
                     collectTimings: true,
+                    // §D14: collect the field only when arrows are visible (issue #9).
+                    collectField: st.showArrows,
                 });
                 applyStepOutcome(result, delta);
             }

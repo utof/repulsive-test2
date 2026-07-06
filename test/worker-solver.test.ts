@@ -12,7 +12,11 @@ import { DEFAULTS } from '../src/core/optimizer';
 import { edgeLengths, totalLength } from '../src/core/sobolev/constraintSet';
 import { barycenterTarget } from '../src/core/sobolev/constraints';
 import { solveConstrainedGradient } from '../src/core/sobolev/gradient';
-import { calculateDisjointPairs, gradientAnalytical } from '../src/core/tangentPointEnergy';
+import {
+    calculateDisjointPairs,
+    gradientAnalytical,
+    gradientFiniteDiff,
+} from '../src/core/tangentPointEnergy';
 import { testConfigs } from '../src/core/testConfigs';
 
 // Round-trip bit-identity gate (§T2, §6.2): the real solver worker runs the SAME
@@ -124,6 +128,10 @@ test('worker round-trip: raw mode is bit-identical to synchronous dispatchDescen
     if (resp.type !== 'result') return;
     expect(resp.graphVersion).toBe(graphVersion);
     expectBitIdentical(resp.result, expected);
+    // §D14 (issue #9): with collectField NOT requested the outcome is identical to
+    // today EXCEPT the new `descentField` is null (no extra field is collected).
+    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+    expect(resp.result.descentField).toBeNull();
 });
 
 test('worker round-trip: sobolev mode is bit-identical to synchronous dispatchDescentStep', async () => {
@@ -149,6 +157,8 @@ test('worker round-trip: sobolev mode is bit-identical to synchronous dispatchDe
     // numeric output, not a no-op step.
     expect(resp.result.vertices).not.toEqual(f.vertices);
     expectBitIdentical(resp.result, expected);
+    // §D14 (issue #9): collectField not requested ⇒ descentField null (see raw test).
+    expect(resp.result.descentField).toBeNull();
 });
 
 test('worker echoes the request graphVersion untouched (§D5 mismatch-drop contract)', async () => {
@@ -302,4 +312,121 @@ test('worker posts an error when a field request arrives before topology (§D13)
     expect(resp.type).toBe('error');
     if (resp.type !== 'error') return;
     expect(resp.message).toContain('before topology');
+});
+
+// §D14 field reuse (issue #9): a `step` request can opt into `collectField`, and the
+// outcome then carries `descentField` = the field the step ACTUALLY used at its INPUT
+// vertices (raw dE, or the FULL-ConstraintSet g̃ in sobolev mode). This removes the
+// redundant second-worker recompute the §D13 arrows path did. Same bit-identity rigor
+// as the step round-trip. @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+
+test('worker step (collectField, raw): descentField equals the analytical L² gradient', async () => {
+    const f = makeFixture();
+    const graphVersion = 11;
+    const args: DispatchStepArgs = { ...stepArgs('raw', f), collectField: true };
+    // The raw descentField IS the analytical dE at the INPUT vertices (not negated) —
+    // the same array `step()` computes internally and used to discard.
+    const dE = gradientAnalytical(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        DEFAULTS.alpha,
+        DEFAULTS.beta,
+        DEFAULTS.epsilon,
+    );
+
+    const resp = await roundTrip([{ type: 'topology', graphVersion, edges: f.edges }], {
+        type: 'step',
+        graphVersion,
+        args,
+    });
+
+    expect(resp.type).toBe('result');
+    if (resp.type !== 'result') return;
+    expect(resp.result.descentField).not.toBeNull();
+    if (resp.result.descentField === null) return;
+    expectFieldBitIdentical(resp.result.descentField, dE);
+});
+
+test('worker step (collectField, sobolev): descentField equals the full-set g̃ and differs from raw dE', async () => {
+    const f = makeFixture();
+    const graphVersion = 12;
+    const args: DispatchStepArgs = { ...stepArgs('sobolev', f), collectField: true };
+    // Reference g̃: the SAME dispatchDescentStep with collectField, run synchronously
+    // — self-consistency between the worker and main paths, exactly like §T2.
+    const expected = dispatchDescentStep({
+        ...args,
+        edges: f.edges,
+        disjointPairs: f.disjointPairs,
+    }).descentField;
+    // The raw L² dE at the same vertices, to prove sobolev g̃ is NOT it (the §D14
+    // fidelity upgrade: sobolev arrows now show the constrained direction).
+    const dE = gradientAnalytical(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        DEFAULTS.alpha,
+        DEFAULTS.beta,
+        DEFAULTS.epsilon,
+    );
+
+    const resp = await roundTrip([{ type: 'topology', graphVersion, edges: f.edges }], {
+        type: 'step',
+        graphVersion,
+        args,
+    });
+
+    expect(resp.type).toBe('result');
+    if (resp.type !== 'result') return;
+    expect(resp.result.descentField).not.toBeNull();
+    if (resp.result.descentField === null) return;
+    expect(expected).not.toBeNull();
+    if (expected === null) return;
+    expect(resp.result.descentField).not.toEqual(dE);
+    expectFieldBitIdentical(resp.result.descentField, expected);
+});
+
+test('worker field: finiteDiff mode equals computeArrowField AND gradientFiniteDiff (§D14-e2)', async () => {
+    const f = makeFixture();
+    const graphVersion = 13;
+    // The gradientFiniteDiff branch of computeArrowField was untested end-to-end
+    // through the worker (§D14-e2). Prove it round-trips bit-identically too.
+    const args = {
+        vertices: f.vertices,
+        mode: 'finiteDiff' as const,
+        descentMode: 'raw' as const,
+        x0: f.x0,
+    };
+    const expected = computeArrowField(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        'finiteDiff',
+        'raw',
+        f.x0,
+    );
+    const fdGrad = gradientFiniteDiff(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        DEFAULTS.alpha,
+        DEFAULTS.beta,
+        DEFAULTS.epsilon,
+        DEFAULTS.h,
+    );
+
+    const resp = await roundTrip([{ type: 'topology', graphVersion, edges: f.edges }], {
+        type: 'field',
+        graphVersion,
+        args,
+    });
+
+    expect(resp.type).toBe('fieldResult');
+    if (resp.type !== 'fieldResult') return;
+    expect(resp.field).not.toBeNull();
+    if (resp.field === null) return;
+    expect(expected).not.toBeNull();
+    if (expected === null) return;
+    expectFieldBitIdentical(resp.field, expected);
+    expectFieldBitIdentical(resp.field, fdGrad);
 });

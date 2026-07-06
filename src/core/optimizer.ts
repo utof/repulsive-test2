@@ -24,6 +24,15 @@ export interface StepOptions {
     beta?: number;
     epsilon?: number;
     h?: number;
+    /**
+     * Opt into returning `field` = the raw L² gradient dE this step took (the same
+     * array computed internally and otherwise discarded), for the GradientArrows
+     * diagnostic (§D14 / issue #9). Absent ⇒ `field` omitted, every path
+     * bit-identical to today (no extra allocation — `grad` is computed regardless;
+     * this only decides whether the reference rides out on the return object).
+     * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+     */
+    collectField?: boolean;
 }
 
 // One gradient-descent step. Pure: returns NEW arrays, never mutates inputs.
@@ -33,7 +42,7 @@ export function step(
     edges: Edge[],
     disjointPairs: number[][],
     opts: StepOptions,
-): { vertices: Vec3[]; energy: number } {
+): { vertices: Vec3[]; energy: number; field?: Vec3[] } {
     const alpha = opts.alpha ?? DEFAULTS.alpha;
     const beta = opts.beta ?? DEFAULTS.beta;
     const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
@@ -51,6 +60,10 @@ export function step(
     ]);
 
     const energy = calculateEnergy(next, edges, disjointPairs, alpha, beta, epsilon);
+    // §D14: surface the raw dE (at the INPUT vertices) ONLY when asked — absent key
+    // otherwise so the return shape stays bit-identical for every existing caller.
+    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+    if (opts.collectField) return { vertices: next, energy, field: grad };
     return { vertices: next, energy };
 }
 
@@ -92,6 +105,15 @@ export interface SobolevStepOptions {
      * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
      */
     collectTimings?: boolean;
+    /**
+     * Opt into returning `descentField` = the constrained Sobolev gradient g̃ this
+     * step solved for (over the FULL ConstraintSet), for the GradientArrows
+     * diagnostic (§D14 / issue #9). Absent ⇒ `descentField` omitted, every path
+     * bit-identical to today (g̃ is computed regardless; this only decides whether
+     * the reference is exposed). `null` on a singular saddle (no g̃ was produced).
+     * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+     */
+    collectField?: boolean;
     /**
      * Precomputed E₀ at the CURRENT input vertices, forwarded to the line
      * search (and reused on the converged/singular echo paths, which return
@@ -205,6 +227,9 @@ export function sobolevStepSet(
     converged: boolean;
     stats: SobolevStepStats;
     timings?: SobolevStepTimings;
+    // §D14: the g̃ this step solved for (present only when collectField was set;
+    // null when the saddle was singular so no g̃ exists). @see plan §D14 / issue #9
+    descentField?: Vec3[] | null;
 } {
     // Phase-timing collection is opt-in and provably inert when off: timingsBegin
     // arms the module collector, timed('step', …) records the whole step, and the
@@ -214,6 +239,12 @@ export function sobolevStepSet(
     // bit-identical to today (the golden suites are the backstop).
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 1)
     const collect = opts.collectTimings ?? false;
+    // §D14: capture the g̃ the step solves for (raw reference — zero alloc) so it can
+    // ride out on the return like `timings`. Stays null on the singular-saddle path
+    // (no g̃), and is exposed only when collectField was requested (else the return
+    // shape is bit-identical to today). @see plan §D14 / issue #9.
+    const collectField = opts.collectField ?? false;
+    let capturedField: Vec3[] | null = null;
     if (collect) timingsBegin();
     const outcome = timed(
         'step',
@@ -278,6 +309,10 @@ export function sobolevStepSet(
                 gTilde = solved.gTilde;
                 residual = solved.residual;
                 frozen = opts.projectionMode === 'frozen' ? solved.frozen : undefined;
+                // §D14: the saddle solved — g̃ is the field the step used (converged,
+                // rejected, or accepted all carry it). The singular catch below leaves
+                // capturedField null. @see plan §D14 / issue #9.
+                if (collectField) capturedField = gTilde;
             } catch {
                 // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
                 // Fold into the spec §C step 10 contract: reject, echo the input, report —
@@ -359,10 +394,18 @@ export function sobolevStepSet(
             };
         },
     );
+    // §D14: append the captured g̃ (or null on singular) ONLY when requested — same
+    // opt-in append pattern as `timings`. Both absent ⇒ `return outcome` unchanged
+    // (no extra allocation). @see plan §D14 / issue #9.
     if (collect) {
         const timings = timingsEnd();
-        if (timings) return { ...outcome, timings };
+        if (timings) {
+            return collectField
+                ? { ...outcome, timings, descentField: capturedField }
+                : { ...outcome, timings };
+        }
     }
+    if (collectField) return { ...outcome, descentField: capturedField };
     return outcome;
 }
 

@@ -36,11 +36,19 @@ const dirVec = new THREE.Vector3();
  * (dE or g̃); this negates it, mirroring the old inline loop verbatim. Cone
  * bases sit on the live spheres; a ≤1-step direction staleness is acceptable
  * for a ≤5 Hz diagnostic (the field may be one step older than `live`).
- * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13
+ *
+ * `count` is the COMMITTED reactive instance-buffer size (the value the
+ * <instancedMesh> was created with); the loop is bounded by `min(count,
+ * field.length)` (§D14-e) so a field longer than the buffer (a mid-topology-change
+ * mismatch) can never `setMatrixAt` past the instanced buffer (silent OOB).
+ * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13, §D14
  */
 function applyConeMatrices(mesh: THREE.InstancedMesh, field: Vec3[], live: Vec3[], count: number) {
     let n = 0;
-    for (let i = 0; i < count; i++) {
+    // §D14-e: bound by BOTH the buffer size (count) and the data length so neither a
+    // short field nor an over-long one indexes out of range. @see plan §D14.
+    const lim = Math.min(count, field.length);
+    for (let i = 0; i < lim; i++) {
         const g = field[i];
         const gn = norm(g);
         if (gn <= 1e-6) continue; // parity with old index.tsx skip
@@ -94,8 +102,10 @@ export function GradientArrows() {
     // inFlight: single-flight guard — true between a field SEND and its result (like §D1),
     // so at most one field compute is ever outstanding. sentTopologyVersion: the graphVersion
     // whose topology the worker has cached (§D4); -1 forces a resend on a fresh worker.
-    // fallbackToSync: PERMANENT flag — once the worker fails, useFrame computes inline forever.
-    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13
+    // fallbackToSync: once the worker fails, useFrame computes inline for this topology
+    // instance — permanent within the mount, but the component is keyed on graphVersion
+    // (Viewer.tsx:382) and remounts on a topology change, resetting the ref (§D14-e).
+    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13, §D14
     const workerRef = useRef<Worker | null>(null);
     const inFlight = useRef(false);
     const sentTopologyVersion = useRef(-1);
@@ -103,13 +113,14 @@ export function GradientArrows() {
 
     // Arrows-worker lifecycle (§D13-c): construct when showArrows is on, tear down on toggle-off
     // / unmount (the component is keyed on graphVersion in Viewer, so a topology change also
-    // remounts and rebuilds the worker). Auto-fall-back PERMANENTLY to the synchronous inline
-    // compute on construction failure or any worker error (posted or uncaught) — the fallback
-    // reuses the SAME computeArrowField so the two paths cannot drift.
-    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13
+    // remounts and rebuilds the worker — which also resets fallbackToSync, §D14-e). Auto-fall-
+    // back to the synchronous inline compute for THIS topology instance on construction failure
+    // or any worker error (posted or uncaught) — the fallback reuses the SAME computeArrowField
+    // so the two paths cannot drift.
+    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13, §D14
     useEffect(() => {
         if (!showArrows) return;
-        if (fallbackToSync.current) return; // already fell back permanently — never rebuild
+        if (fallbackToSync.current) return; // already fell back for this topology instance (§D14-e)
         let worker: Worker;
         try {
             // §D3: dev-server PATH STRING, NOT new URL(import.meta.url) — Bun.build emits no
@@ -155,8 +166,10 @@ export function GradientArrows() {
                 return;
             }
             // Apply the RECEIVED field against the CURRENT live positions (cone bases track the
-            // live spheres; ≤1-step direction staleness is fine for a ≤5 Hz diagnostic).
-            applyConeMatrices(mesh, resp.field, st.live, st.graph.vertices.length);
+            // live spheres; ≤1-step direction staleness is fine for a ≤5 Hz diagnostic). Bound
+            // by the committed reactive `count` (buffer size), not fresh graph.vertices.length —
+            // §D14-e OOB fix.
+            applyConeMatrices(mesh, resp.field, st.live, count);
         };
         worker.onerror = (event: ErrorEvent) => {
             // A worker that fails to LOAD fires onerror without a ctor throw and can never post
@@ -180,7 +193,11 @@ export function GradientArrows() {
             workerRef.current = null;
             inFlight.current = false;
         };
-    }, [showArrows]);
+        // `count` is the committed instance-buffer size the onmessage handler bounds
+        // against (§D14-e); it is constant within a mount (a vertex-count change bumps
+        // graphVersion, which remounts this component, Viewer.tsx:382), so listing it
+        // never triggers a mid-mount worker rebuild — it only satisfies exhaustive-deps.
+    }, [showArrows, count]);
 
     useFrame((_, delta) => {
         const mesh = meshRef.current;
@@ -207,9 +224,33 @@ export function GradientArrows() {
         // graphVersion-keyed remount contract as Curve.tsx (see its useFrame note).
         const live = st.live;
 
+        // §D14-d (issue #9): WHILE RUNNING the descent step already computed and published
+        // the field it used (store.arrowField — raw dE, or the FULL-ConstraintSet g̃ incl.
+        // length/pins). Render it directly through the cone matrices: zero compute, zero
+        // worker round-trip. The §D13 worker-request / sync-fallback path below is now used
+        // ONLY while PAUSED (no step is running to publish a field — paused key changes,
+        // fresh remount). arrowField === null while running = a singular-saddle step (which
+        // also auto-pauses) → hide, today's null contract.
+        //
+        // Deliberate fidelity change: in sobolev mode with length/pin constraints the running
+        // arrows now show the step's TRUE full-ConstraintSet g̃, whereas the PAUSED on-demand
+        // path below intentionally keeps today's legacy barycenter-only computeArrowField.
+        // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+        if (st.running) {
+            acc.current = 0;
+            lastKey.current = key;
+            if (st.arrowField === null) {
+                mesh.count = 0;
+                mesh.instanceMatrix.needsUpdate = true;
+                return;
+            }
+            applyConeMatrices(mesh, st.arrowField, live, count);
+            return;
+        }
+
         if (fallbackToSync.current) {
-            // §D13-c permanent fallback: today's exact synchronous path, reusing the SAME
-            // helper the worker runs so the two can't drift.
+            // §D13-c fallback for this topology instance: today's exact synchronous PAUSED
+            // path, reusing the SAME helper the worker runs so the two can't drift.
             acc.current = 0;
             lastKey.current = key;
             const field = computeArrowField(
@@ -225,13 +266,16 @@ export function GradientArrows() {
                 mesh.instanceMatrix.needsUpdate = true;
                 return;
             }
-            applyConeMatrices(mesh, field, live, st.graph.vertices.length);
+            // §D14-e: bound by the committed reactive `count`, not fresh graph.vertices.length.
+            applyConeMatrices(mesh, field, live, count);
             return;
         }
 
-        // Worker path (§D13-c): POST a field request instead of computing inline. Single-flight
+        // Worker path (§D13-c) — reached ONLY while PAUSED now (§D14-d handles the running
+        // case above): POST an on-demand field request instead of computing inline. Single-flight
         // (like §D1) — while a request is outstanding we neither re-post nor advance lastKey, so
-        // the next tick re-evaluates once the result clears inFlight (no onmessage loop).
+        // the next tick re-evaluates once the result clears inFlight (no onmessage loop). This
+        // path keeps today's legacy barycenter-only computeArrowField semantics by design (§D14).
         const worker = workerRef.current;
         if (!worker) return; // effect not yet run / torn down this frame
         if (inFlight.current) return;

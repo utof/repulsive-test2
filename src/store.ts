@@ -192,6 +192,14 @@ export interface SimStore {
     // raw mode); cleared alongside sobolevStats. Surfaced as the Stats.tsx second
     // line. @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 3)
     sobolevTimings: SobolevStepTimings | null;
+    // §D14 (issue #9): the descent field the LAST step actually computed (raw dE /
+    // full-set g̃), published by the frame loop (Viewer.applyStepOutcome) when
+    // showArrows is on. GradientArrows renders it directly WHILE RUNNING instead of
+    // a redundant second-worker recompute. `null` = no step has published yet, OR a
+    // singular-saddle step (→ arrows hide). Cleared on preset rebuild/reset (old
+    // vertex indices are meaningless in a new topology), mirroring sobolevStats.
+    // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D14
+    arrowField: Vec3[] | null;
     // Why: descent-direction arrows are a user toggle, visible in BOTH paused and
     // running states (GradientArrows recomputes from the live buffer); this flag
     // only gates rendering, never the descent itself.
@@ -295,6 +303,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
             sobolevStats: null,
             sobolevConverged: false,
             sobolevTimings: null,
+            // §D14: old field's vertex indices are meaningless in the new topology —
+            // clear it (mirrors sobolevStats). @see plan §D14 / issue #9.
+            arrowField: null,
         }));
         saveConfig(id, nextParams);
     };
@@ -350,6 +361,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
         sobolevStats: null,
         sobolevConverged: false,
         sobolevTimings: null,
+        // §D14: no step has published a field yet (issue #9). @see plan §D14.
+        arrowField: null,
         showArrows: true,
         zoom: 1,
         graphVersion: 0,
