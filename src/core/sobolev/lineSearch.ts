@@ -28,7 +28,12 @@ import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterBlock, type ConstraintSet } from './constraintSet';
 import { assembleAFlat } from './innerProduct';
 import { flatten, unflatten } from './layout';
-import { type FrozenSaddleOperator, solveSaddleFromA, solveSaddleFrozen } from './linsolve';
+import {
+    type FactorMode,
+    type FrozenSaddleOperator,
+    solveSaddleFromA,
+    solveSaddleFrozen,
+} from './linsolve';
 import { type PenaltyConfig, penaltiesActive, penaltyEnergy } from './penalties';
 import { timed } from './phaseTimings';
 
@@ -129,6 +134,13 @@ export interface ProjectConstraintSetOptions {
      * @see oracle/tpe_constraints_oracle.py (project_constraint_set — frozen)
      */
     frozen?: FrozenSaddleOperator;
+    /**
+     * Dense factorization for the per-iterate REASSEMBLE solves (LDLᵀ A/B;
+     * absent/'lu' → bit-identical to the pre-option path). The frozen path
+     * ignores this — its factorization kind is baked into `frozen.fac`.
+     * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+     */
+    factorMode?: FactorMode;
 }
 
 /**
@@ -263,6 +275,7 @@ export function projectOntoConstraintSet(
                         C,
                         new Array<number>(3 * cur.length).fill(0),
                         negPhi,
+                        opts?.factorMode,
                     ),
                 ));
             }

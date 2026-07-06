@@ -360,6 +360,344 @@ export function luSolveFactored(fac: LuFactorization, rhs: number[]): number[] {
 }
 
 /**
+ * Factor-selection switch for the typed-array saddle fast path (LDLᵀ A/B).
+ * 'lu': dense LU with partial pivoting ({@link luFactor}) — the default and
+ * the semantics of ALL committed goldens. 'ldlt': symmetric-indefinite
+ * Bunch–Kaufman LDLᵀ ({@link ldltFactor}) — ~half the factor flops on the
+ * same flat buffer; gated by the pre-registered A/B before any default flip.
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+ */
+export type FactorMode = 'lu' | 'ldlt';
+
+/**
+ * A symmetric-indefinite Bunch–Kaufman LDLᵀ factorization, packed LAPACK
+ * `dsytf2`-style in the same flat row-major buffer convention as
+ * {@link LuFactorization}: `m` holds the multiplier columns of the permuted
+ * unit lower-triangular L plus the block-diagonal D (diagonal entries, and
+ * the subdiagonal entry of each 2×2 pivot block); everything strictly above
+ * the diagonal is dead storage. `ipiv` keeps LAPACK's 1-BASED encoding so the
+ * sign test works at index 0: `ipiv[k] = kp+1` → 1×1 pivot, rows/cols k↔kp
+ * interchanged; `ipiv[k] = ipiv[k+1] = −(kp+1)` → 2×2 pivot, rows/cols
+ * (k+1)↔kp interchanged. `kind` discriminates from {@link LuFactorization}
+ * (which predates the union and stays field-compatible with its consumers).
+ * @see https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dsytf2.f (UPLO='L')
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 1)
+ */
+export interface LdltFactorization {
+    kind: 'ldlt';
+    m: Float64Array;
+    ipiv: Int32Array;
+    n: number;
+}
+
+/**
+ * Either dense factorization the saddle fast path can produce/consume —
+ * selected by {@link FactorMode}, dispatched by the `kind` discriminant
+ * (absent on the LU shape).
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+ */
+export type SaddleFactorization = LuFactorization | LdltFactorization;
+
+/**
+ * Factors a flat row-major SYMMETRIC n×n matrix as P·L·D·Lᵀ·Pᵀ by
+ * Bunch–Kaufman partial pivoting (1×1/2×2 pivots) — an unblocked port of
+ * LAPACK `dsytf2` (UPLO='L'), verified against the reference source
+ * (pivot threshold α = (1+√17)/8, the three-way pivot test, the 2×2 update
+ * formulas, and the ipiv encoding are LAPACK's verbatim). Only the LOWER
+ * triangle is read and written; ~n³/6 multiply-adds vs LU's ~n³/3 — that
+ * halving is the whole point of the A/B (plan 2026-07-06).
+ *
+ * LAPACK is column-major; this buffer is row-major, so the trailing updates
+ * are restructured row-wise with the per-column coefficients precomputed into
+ * O(n) scratch — numerically EXACT w.r.t. dsytf2: each trailing element
+ * receives exactly one update expression per elimination step and the
+ * expression (operand order included) is LAPACK's; only the element visit
+ * order changes, which cannot change any element's value.
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 1)
+ *
+ * WARNING: factors IN PLACE on the caller's buffer `k` — consumed, exactly
+ * like {@link luFactor} (same rationale: no per-solve copies on the fast path).
+ *
+ * Same two throw contracts as {@link luFactor} (pinned decision 3 — the
+ * existing singular contract, never a new throw type): any non-finite entry →
+ * Error mentioning "treating as singular" (scanned up front); an exactly-zero
+ * pivot column (max(|A(k,k)|, colmax) = 0) → Error mentioning "singular".
+ * Where LAPACK would set INFO>0 and emit a zero D block (making the
+ * subsequent solve divide by zero), we throw — callers already catch and fold
+ * into 'singular_system' / ok:false (optimizer.ts, lineSearch.ts).
+ * @see https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dsytf2.f
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decisions 1, 3)
+ */
+export function ldltFactor(k: Float64Array, n: number): LdltFactorization {
+    if (k.length !== n * n) {
+        throw new Error(`ldltFactor: buffer length ${k.length} does not match n*n = ${n * n}`);
+    }
+    for (let idx = 0; idx < n * n; idx++) {
+        if (!Number.isFinite(k[idx])) {
+            throw new Error(
+                `ldltFactor: non-finite matrix entry at (${Math.floor(idx / n)},${idx % n}) — treating as singular`,
+            );
+        }
+    }
+
+    // Bunch–Kaufman growth-optimal pivot threshold (dsytf2: ALPHA = (ONE+SQRT(SEVTEN))/EIGHT).
+    const ALPHA = (1 + Math.sqrt(17)) / 8;
+    const ipiv = new Int32Array(n);
+    // Row-major restructure scratch: per-column update coefficients (w1 = the
+    // 1×1 d11·column / 2×2 WK column, w2 = the 2×2 WKP1 column).
+    const w1 = new Float64Array(n);
+    const w2 = new Float64Array(n);
+
+    let col = 0;
+    while (col < n) {
+        const colBase = col * n;
+        const absakk = Math.abs(k[colBase + col]);
+
+        // imax = row of the largest |subdiagonal| entry in column col (first
+        // max wins, matching IDAMAX); colmax = that magnitude.
+        let imax = col;
+        let colmax = 0;
+        for (let r = col + 1; r < n; r++) {
+            const a = Math.abs(k[r * n + col]);
+            if (a > colmax) {
+                colmax = a;
+                imax = r;
+            }
+        }
+
+        // `!(… > 0)` also catches NaN, second line of defense behind the
+        // up-front scan (same guard shape as luFactor). LAPACK sets INFO and
+        // continues; we throw per the pinned breakdown contract.
+        if (!(Math.max(absakk, colmax) > 0)) {
+            throw new Error(
+                `ldltFactor: matrix is singular (pivot column ${col} has max abs entry 0)`,
+            );
+        }
+
+        // Three-way Bunch–Kaufman pivot decision — dsytf2's exact inequality forms.
+        let kstep = 1;
+        let kp = col;
+        if (absakk >= ALPHA * colmax) {
+            kp = col; // 1×1, no interchange
+        } else {
+            // rowmax = largest |off-diagonal| in row/col imax of the trailing
+            // submatrix: row part A(imax, col..imax-1), column part A(imax+1.., imax).
+            let rowmax = 0;
+            const imaxBase = imax * n;
+            for (let j = col; j < imax; j++) {
+                rowmax = Math.max(rowmax, Math.abs(k[imaxBase + j]));
+            }
+            for (let r = imax + 1; r < n; r++) {
+                rowmax = Math.max(rowmax, Math.abs(k[r * n + imax]));
+            }
+            if (absakk >= ALPHA * colmax * (colmax / rowmax)) {
+                kp = col; // 1×1, no interchange
+            } else if (Math.abs(k[imaxBase + imax]) >= ALPHA * rowmax) {
+                kp = imax; // 1×1, interchange col↔imax
+            } else {
+                kp = imax; // 2×2, interchange (col+1)↔imax
+                kstep = 2;
+            }
+        }
+
+        // Symmetric interchange of rows/cols kk↔kp in the TRAILING submatrix
+        // only (columns < col of packed L are NOT re-permuted — dsytf2's
+        // scheme; the solve applies interchanges interleaved to compensate).
+        const kk = col + kstep - 1;
+        if (kp !== kk) {
+            for (let r = kp + 1; r < n; r++) {
+                const t = k[r * n + kk];
+                k[r * n + kk] = k[r * n + kp];
+                k[r * n + kp] = t;
+            }
+            for (let j = kk + 1; j < kp; j++) {
+                const t = k[j * n + kk];
+                k[j * n + kk] = k[kp * n + j];
+                k[kp * n + j] = t;
+            }
+            const td = k[kk * n + kk];
+            k[kk * n + kk] = k[kp * n + kp];
+            k[kp * n + kp] = td;
+            if (kstep === 2) {
+                const t = k[(col + 1) * n + col];
+                k[(col + 1) * n + col] = k[kp * n + col];
+                k[kp * n + col] = t;
+            }
+        }
+
+        if (kstep === 1) {
+            // Rank-1 update of the trailing lower triangle:
+            // A(i,j) -= A(i,k)·(d11·A(j,k)), then scale the column by d11
+            // (dsytf2's DSYR + DSCAL, row-wise visit order).
+            if (col < n - 1) {
+                const d11 = 1 / k[colBase + col];
+                for (let j = col + 1; j < n; j++) w1[j] = d11 * k[j * n + col];
+                for (let i = col + 1; i < n; i++) {
+                    const iBase = i * n;
+                    const aik = k[iBase + col];
+                    for (let j = col + 1; j <= i; j++) {
+                        k[iBase + j] -= aik * w1[j];
+                    }
+                }
+                for (let r = col + 1; r < n; r++) k[r * n + col] *= d11;
+            }
+        } else {
+            // Rank-2 update — dsytf2's 2×2 formulas verbatim. d21 ≠ 0 is
+            // guaranteed: after the interchange |A(col+1,col)| = colmax > 0.
+            if (col < n - 2) {
+                const d21 = k[(col + 1) * n + col];
+                const d11 = k[(col + 1) * n + col + 1] / d21;
+                const d22 = k[colBase + col] / d21;
+                const t = 1 / (d11 * d22 - 1);
+                const d21t = t / d21;
+                for (let j = col + 2; j < n; j++) {
+                    const ajk = k[j * n + col];
+                    const ajk1 = k[j * n + col + 1];
+                    w1[j] = d21t * (d11 * ajk - ajk1); // WK
+                    w2[j] = d21t * (d22 * ajk1 - ajk); // WKP1
+                }
+                for (let i = col + 2; i < n; i++) {
+                    const iBase = i * n;
+                    const aik = k[iBase + col];
+                    const aik1 = k[iBase + col + 1];
+                    for (let j = col + 2; j <= i; j++) {
+                        // Two separate subtractions — dsytf2's exact expression
+                        // A(I,J) = A(I,J) - A(I,K)*WK - A(I,K+1)*WKP1.
+                        k[iBase + j] = k[iBase + j] - aik * w1[j] - aik1 * w2[j];
+                    }
+                }
+                // Store the L multipliers AFTER the full trailing update — the
+                // update above reads the pre-overwrite A(i,col) values, exactly
+                // the values dsytf2's column-ascending order would read.
+                for (let j = col + 2; j < n; j++) {
+                    k[j * n + col] = w1[j];
+                    k[j * n + col + 1] = w2[j];
+                }
+            }
+        }
+
+        if (kstep === 1) {
+            ipiv[col] = kp + 1;
+        } else {
+            ipiv[col] = -(kp + 1);
+            ipiv[col + 1] = -(kp + 1);
+        }
+        col += kstep;
+    }
+
+    return { kind: 'ldlt', m: k, ipiv, n };
+}
+
+/**
+ * Solves against a {@link ldltFactor} result — a single-RHS port of LAPACK
+ * `dsytrs` (UPLO='L'), verified against the reference source: forward sweep
+ * applying the interleaved interchanges + inv(L) + the block-diagonal inverse
+ * (2×2 blocks via dsytrs's exact scaled-determinant formula), then the
+ * backward inv(Lᵀ) sweep with the interchanges re-applied in reverse.
+ * Never mutates the factorization or `rhs`; keeps the non-finite-rhs throw
+ * contract of {@link luSolveFactored} (Error mentioning "treating as
+ * singular").
+ * @see https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dsytrs.f (UPLO='L')
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 1)
+ */
+export function ldltSolveFactored(fac: LdltFactorization, rhs: number[]): number[] {
+    const { m, ipiv, n } = fac;
+    if (rhs.length !== n) {
+        throw new Error(
+            `ldltSolveFactored: rhs length ${rhs.length} does not match matrix size ${n}`,
+        );
+    }
+    for (let i = 0; i < n; i++) {
+        if (!Number.isFinite(rhs[i])) {
+            throw new Error(
+                `ldltSolveFactored: non-finite rhs entry at ${i} — treating as singular`,
+            );
+        }
+    }
+
+    const b = rhs.slice();
+
+    // Solve L·D·y = b (forward, interchanges interleaved — dsytrs 'L' first loop).
+    let i = 0;
+    while (i < n) {
+        if (ipiv[i] > 0) {
+            const kp = ipiv[i] - 1;
+            if (kp !== i) {
+                const t = b[i];
+                b[i] = b[kp];
+                b[kp] = t;
+            }
+            for (let r = i + 1; r < n; r++) b[r] -= m[r * n + i] * b[i];
+            b[i] /= m[i * n + i];
+            i += 1;
+        } else {
+            // 2×2 block at (i, i+1); only row i+1 was interchanged at factor time.
+            const kp = -ipiv[i] - 1;
+            if (kp !== i + 1) {
+                const t = b[i + 1];
+                b[i + 1] = b[kp];
+                b[kp] = t;
+            }
+            for (let r = i + 2; r < n; r++) {
+                b[r] = b[r] - m[r * n + i] * b[i] - m[r * n + i + 1] * b[i + 1];
+            }
+            // dsytrs's 2×2 diagonal-block solve, verbatim (scaled by the
+            // subdiagonal to avoid overflow in the determinant).
+            const akm1k = m[(i + 1) * n + i];
+            const akm1 = m[i * n + i] / akm1k;
+            const ak = m[(i + 1) * n + i + 1] / akm1k;
+            const denom = akm1 * ak - 1;
+            const bkm1 = b[i] / akm1k;
+            const bk = b[i + 1] / akm1k;
+            b[i] = (ak * bkm1 - bk) / denom;
+            b[i + 1] = (akm1 * bk - bkm1) / denom;
+            i += 2;
+        }
+    }
+
+    // Solve Lᵀ·x = y (backward, interchanges re-applied in reverse —
+    // dsytrs 'L' second loop; a 2×2 block is entered at its HIGHER index).
+    i = n - 1;
+    while (i >= 0) {
+        if (ipiv[i] > 0) {
+            let s = b[i];
+            for (let r = i + 1; r < n; r++) s -= m[r * n + i] * b[r];
+            b[i] = s;
+            const kp = ipiv[i] - 1;
+            if (kp !== i) {
+                const t = b[i];
+                b[i] = b[kp];
+                b[kp] = t;
+            }
+            i -= 1;
+        } else {
+            let s = b[i];
+            for (let r = i + 1; r < n; r++) s -= m[r * n + i] * b[r];
+            b[i] = s;
+            let s1 = b[i - 1];
+            for (let r = i + 1; r < n; r++) s1 -= m[r * n + (i - 1)] * b[r];
+            b[i - 1] = s1;
+            const kp = -ipiv[i] - 1;
+            if (kp !== i) {
+                const t = b[i];
+                b[i] = b[kp];
+                b[kp] = t;
+            }
+            i -= 2;
+        }
+    }
+
+    return b;
+}
+
+// Substitution dispatch on the factorization kind ('kind' exists only on the
+// LDLᵀ shape). The 'lu' branch is the verbatim pre-existing call — default
+// path stays bit-identical. @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (decision 4)
+function solveFactored(fac: SaddleFactorization, rhs: number[]): number[] {
+    return 'kind' in fac ? ldltSolveFactored(fac, rhs) : luSolveFactored(fac, rhs);
+}
+
+/**
  * Fast-path saddle solve from the SCALAR |V|×|V| inner-product matrix `a`
  * (flat row-major, from `assembleAFlat` in `./innerProduct`): builds the flat
  * (3n+k)×(3n+k) `K = [[Ā, Cᵀ], [C, 0]]` directly — Ā's three diagonal
@@ -388,6 +726,12 @@ export function luSolveFactored(fac: LuFactorization, rhs: number[]): number[] {
  *
  * Returns `fac` so a caller can reuse the factorization for further solves of
  * the SAME frozen system (frozen-projection reuse, plan Task 6).
+ *
+ * `factorMode` selects the dense factorization (LDLᵀ A/B, plan 2026-07-06):
+ * the default 'lu' path is bit-identical to the pre-option code; 'ldlt' runs
+ * Bunch–Kaufman on the same K buffer and is gated by the SAME structured
+ * residual — the self-certification never depends on the factorization.
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system")
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
  * @see local_files/2026-07-03-next-steps-briefing.md §5A item 2
@@ -398,7 +742,8 @@ export function solveSaddleFromA(
     C: number[][],
     rhsTop: number[],
     rhsBottom?: number[],
-): { x: number[]; lambda: number[]; residual: number; fac: LuFactorization } {
+    factorMode: FactorMode = 'lu',
+): { x: number[]; lambda: number[]; residual: number; fac: SaddleFactorization } {
     if (a.length !== n * n) {
         throw new Error(`solveSaddleFromA: a length ${a.length} does not match n*n = ${n * n}`);
     }
@@ -441,8 +786,10 @@ export function solveSaddleFromA(
     // 'factor' timing sub-phase overlaps the caller's 'saddle' wrap by design
     // (see the phase-key schema note in ./phaseTimings).
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
-    const fac = timed('factor', () => luFactor(K, size));
-    const z = luSolveFactored(fac, rhs);
+    const fac = timed('factor', () =>
+        factorMode === 'ldlt' ? ldltFactor(K, size) : luFactor(K, size),
+    );
+    const z = solveFactored(fac, rhs);
     const residual = structuredSaddleResidual(a, n, C, z, rhs);
 
     return { x: z.slice(0, m), lambda: z.slice(m), residual, fac };
@@ -502,15 +849,17 @@ function structuredSaddleResidual(
  * src/tpe_flow_sc.cpp, ProjectGradient + LSBackproject; paper line 734).
  * `a` (flat scalar |V|×|V| Ā) and `C` are retained UNfactored so every reuse
  * solve can compute the same self-certifying structured residual as
- * solveSaddleFromA — never skipped.
+ * solveSaddleFromA — never skipped. `fac` may be either factorization kind
+ * (LDLᵀ A/B, plan 2026-07-06) — reuse solves dispatch on it.
  * @see oracle/tpe_constraints_oracle.py (Frozen / build_frozen_saddle)
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
  */
 export interface FrozenSaddleOperator {
     a: Float64Array;
     n: number;
     C: number[][];
-    fac: LuFactorization;
+    fac: SaddleFactorization;
 }
 
 /**
@@ -543,7 +892,7 @@ export function solveSaddleFrozen(
         );
     }
     const rhs = [...rhsTop, ...bottom];
-    const z = luSolveFactored(fac, rhs);
+    const z = solveFactored(fac, rhs);
     const residual = structuredSaddleResidual(a, n, C, z, rhs);
     return { x: z.slice(0, m), lambda: z.slice(m), residual };
 }

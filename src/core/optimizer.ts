@@ -1,7 +1,7 @@
 import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
 import { solveConstrainedGradientSetFrozen } from './sobolev/gradient';
 import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
-import type { FrozenSaddleOperator } from './sobolev/linsolve';
+import type { FactorMode, FrozenSaddleOperator } from './sobolev/linsolve';
 import {
     type PenaltyConfig,
     penaltiesActive,
@@ -158,6 +158,18 @@ export interface SobolevStepOptions {
      * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
      */
     projectionMode?: ProjectionMode;
+    /**
+     * Dense factorization for EVERY saddle solve of the step (gradient solve
+     * + all projection iterates, frozen or reassembled — LDLᵀ A/B).
+     * 'lu' (default, and the semantics of ALL committed goldens): dense LU
+     * with partial pivoting — absent/'lu' is bit-identical to the pre-option
+     * build. 'ldlt': Bunch–Kaufman symmetric-indefinite LDLᵀ, ~half the
+     * factor flops; both paths are gated by the same self-certifying
+     * residual, so this is a cost knob, not a semantics knob (which is why
+     * there is no store/UI toggle — unlike projectionMode).
+     * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+     */
+    factorMode?: FactorMode;
 }
 
 /**
@@ -305,6 +317,7 @@ export function sobolevStepSet(
                     epsilon,
                     dE,
                     set,
+                    opts.factorMode,
                 );
                 gTilde = solved.gTilde;
                 residual = solved.residual;
@@ -372,7 +385,21 @@ export function sobolevStepSet(
                     // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
                     {
                         energyBefore: opts.energyBefore,
-                        ...(frozen ? { projection: { frozen } } : {}),
+                        // factorMode rides in `projection` only when non-default
+                        // ('ldlt' reassemble solves need it; a frozen operator
+                        // already carries its factorization kind) — the spread
+                        // guards keep the default-path options object IDENTICAL.
+                        // @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (decision 4)
+                        ...(frozen || opts.factorMode === 'ldlt'
+                            ? {
+                                  projection: {
+                                      ...(frozen ? { frozen } : {}),
+                                      ...(opts.factorMode === 'ldlt'
+                                          ? { factorMode: opts.factorMode }
+                                          : {}),
+                                  },
+                              }
+                            : {}),
                         ...(pen ? { penalties: pen } : {}),
                     },
                 ),

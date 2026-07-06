@@ -14,7 +14,7 @@ import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterBlock, type ConstraintSet, evaluateConstraintSet } from './constraintSet';
 import { assembleAFlat } from './innerProduct';
 import { flatten, unflatten } from './layout';
-import { type FrozenSaddleOperator, solveSaddleFromA } from './linsolve';
+import { type FactorMode, type FrozenSaddleOperator, solveSaddleFromA } from './linsolve';
 import { timed } from './phaseTimings';
 
 /**
@@ -72,6 +72,11 @@ export function solveConstrainedGradientSet(
  * step — the authors' reference-implementation scheme (ythea/repulsive-curves
  * src/tpe_flow_sc.cpp; paper line 734). NEVER reuse the operator across steps
  * or for a different constraint set: it is γ₀- and set-specific.
+ *
+ * `factorMode` selects the dense factorization (LDLᵀ A/B; default/undefined
+ * → 'lu', bit-identical to the pre-option path) and rides into the returned
+ * frozen operator's `fac`, so reuse solves inherit the choice for free.
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
  * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set_frozen)
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
  */
@@ -84,6 +89,7 @@ export function solveConstrainedGradientSetFrozen(
     epsilon: number,
     dE: Vec3[],
     set: ConstraintSet,
+    factorMode?: FactorMode,
 ): { gTilde: Vec3[]; lambda: number[]; residual: number; frozen: FrozenSaddleOperator } {
     // Typed-array fast path (solver-perf Task 5): flat scalar A straight into
     // solveSaddleFromA, which writes Ā's diagonal blocks itself — the 'expand'
@@ -97,7 +103,7 @@ export function solveConstrainedGradientSetFrozen(
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
     const { C } = evaluateConstraintSet(set, vertices, edges);
     const { x, lambda, residual, fac } = timed('saddle', () =>
-        solveSaddleFromA(A, vertices.length, C, flatten(dE)),
+        solveSaddleFromA(A, vertices.length, C, flatten(dE), undefined, factorMode),
     );
     return {
         gTilde: unflatten(x),
