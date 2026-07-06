@@ -192,4 +192,73 @@ runs, and report the spread.
 
 ## A/B results & gate verdict
 
-_To be filled at step 3._
+**VERDICT: gates PASS → default flipped to 'ldlt'** (final commit of the
+milestone; `factorMode: 'lu'` remains the bit-identical opt-out A/B leg).
+
+### Correctness gates
+
+- Unit + property ladder: `test/sobolev/ldlt.test.ts`, 20 tests — packed
+  reconstruction rel ≤1e-12 on 5 seeded systems (incl. two zero-diagonal
+  matrices forcing heavy 2×2 pivoting), solve-vs-luSolve rel ≤1e-9 with
+  direct residual ≤1e-12, crossing saddle systems x/λ rel vs the slow LU
+  reference measured ~2e-16, step outcomes on ALL five committed fixtures:
+  identical verdicts, vertices rel ~1e-16 (gate 1e-9), residuals ~1e-16
+  (gate 1e-10).
+- scipy/LAPACK cross-check (dev-time, `uv run --with numpy --with scipy`,
+  `sytrf(lower=1)`): **ipiv exact match on all 4 seeded cases** (including
+  `[-15,-15,-9,-9,…]`-grade pivot patterns); packed factors bit-identical on
+  3 cases, 9.6e-16 relF on the n=24 heavy case (blocked dsytrf vs unblocked
+  dsytf2 op-order effects).
+- Full suite with the default flipped: **252 pass / 0 fail**, `bunx tsc
+  --noEmit` clean. No golden regenerated, no golden-gated failure.
+- Finding (recorded, not a bug): with an EMPTY constraint set, Ā is
+  numerically singular (constant null space), so LU and LDLᵀ return certified
+  solutions differing by a null component (measured xRel ≈ 0.67, both
+  residuals ≤2e-16). linsolveFlat's k=0 LU-identity test now PINS
+  `factorMode:'lu'` (its claim is op-identity, only valid within one
+  factorization); the LDLᵀ k=0 test asserts the residual, the only
+  well-posed cross-factorization statement there.
+
+### Bench (kill gate: <1.3× factor-phase p50 at N=120 ⇒ kill)
+
+3 isolated runs (run 1 saved: `bench/results/2026-07-06-ldlt-ab.json`,
+baseline `2026-07-03-frozen-reuse.json`, sha da3656d, bun 1.3.11). Factor
+phase p50 ms, LU vs LDLᵀ, per run, with per-case MEDIAN-of-3 ratio:
+
+| case | LU r1/r2/r3 | LDLᵀ r1/r2/r3 | ratio r1/r2/r3 | median |
+|---|---|---|---|---|
+| N60-total | 4.7/5.5/5.7 | 3.2/5.8/3.6 | 1.46/0.95/1.57 | **1.46×** |
+| N60-total-frozen | 2.6/2.5/3.0 | 1.6/1.6/2.0 | 1.60/1.54/1.48 | **1.54×** |
+| N60-perEdge | 11.4/11.9/11.4 | 7.4/7.5/9.6 | 1.56/1.57/1.19 | **1.56×** |
+| N60-perEdge-frozen | 5.6/5.9/6.7 | 3.7/3.6/4.7 | 1.50/1.63/1.42 | **1.50×** |
+| N120-total | 37.3/39.7/44.3 | 24.4/26.6/25.1 | 1.53/1.49/1.76 | **1.53×** |
+| N120-total-frozen | 18.8/19.4/18.9 | 14.8/12.9/13.2 | 1.27/1.50/1.44 | **1.44×** |
+| N120-perEdge | 98.2/95.4/89.4 | 56.4/59.2/56.8 | 1.74/1.61/1.57 | **1.61×** |
+| N120-perEdge-frozen | 51.9/45.2/44.9 | 30.6/29.6/29.4 | 1.70/1.53/1.53 | **1.53×** |
+
+- Every gate case clears 1.3× on the median: N120-total 1.53×, N120-perEdge
+  1.61×, N60-total 1.46× (plus frozen variants 1.44×/1.53×). The briefing's
+  prize estimates (~1.35×@N120-total / ~1.55×@N120-perEdge) are met on the
+  factor phase.
+- Variance: two individual-run dips below 1.3 (0.95 on N60-total r2 — an LDLᵀ
+  spike 3.2→5.8→3.6 ms, classic JIT/thermal noise at the smallest size;
+  1.19 on N60-perEdge r3), both single-run outliers against stable
+  neighbours; per-run spread on LU legs is ≤15% at N=120. This is exactly the
+  documented machine noise; medians are the pre-registered statistic.
+- Full-step medians (run 1, LDLᵀ vs same-run LU): N120-perEdge 127.2→82.6 ms
+  (1.54×), N120-perEdge-frozen 74.1→52.5 (1.41×), N120-total 60.5→48.5
+  (1.25×), N60-total 31.0→12.1 (noise-inflated LU leg — see baseline Δ%).
+  One anomaly: N120-total-frozen full step 36.6→38.0 despite factor 1.27×
+  faster — the difference sits in the non-factor phases (bHigh/bLow noise),
+  not in the swap.
+
+### Numerical-stability observations
+
+- Pivot behavior on the real saddle systems: the crossing gradient system
+  factors with NO interchanges (Ā's diagonal wins every α-test; the
+  constraint block's Schur complement is negative definite → late 1×1
+  negative pivots). 2×2 pivots are exercised deterministically by the
+  zero-diagonal unit fixtures and the [[0,1],[1,0]] exchange test
+  (ipiv = [-2,-2]).
+- No pivot growth anomalies observed: residuals on every committed fixture
+  stayed at 1e-16…1e-14, indistinguishable from LU's.

@@ -74,9 +74,10 @@ export function solveConstrainedGradientSet(
  * or for a different constraint set: it is γ₀- and set-specific.
  *
  * `factorMode` selects the dense factorization (LDLᵀ A/B; default/undefined
- * → 'lu', bit-identical to the pre-option path) and rides into the returned
+ * → solveSaddleFromA's default, 'ldlt' since the 2026-07-06 gate verdict;
+ * 'lu' is bit-identical to the pre-option path) and rides into the returned
  * frozen operator's `fac`, so reuse solves inherit the choice for free.
- * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
  * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set_frozen)
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
  */

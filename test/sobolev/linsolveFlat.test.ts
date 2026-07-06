@@ -152,7 +152,11 @@ test('solveSaddleFromA vs solveSaddle: crossing gradient system — x/λ rel ≤
     );
 
     const slow = solveSaddle(expandBlockDiag(A), C, dEFlat);
-    const fast = solveSaddleFromA(aFlat, n, C, dEFlat);
+    // factorMode 'lu' PINNED: this test's claim is "flat LU fast path ≡ slow
+    // LU reference, same op sequence" — it must keep testing the LU leg after
+    // the 2026-07-06 default flip to 'ldlt'. LDLᵀ-vs-LU lives in ldlt.test.ts.
+    // @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 2)
+    const fast = solveSaddleFromA(aFlat, n, C, dEFlat, undefined, 'lu');
 
     const xRel = euclideanDiff(fast.x, slow.x) / Math.max(1, euclideanNorm(slow.x));
     const lambdaRel =
@@ -184,7 +188,9 @@ test('solveSaddleFromA vs solveSaddle: crossing projection system (rhsBottom = �
     const zeroTop = new Array<number>(3 * n).fill(0);
 
     const slow = solveSaddle(expandBlockDiag(A), C, zeroTop, negPhi);
-    const fast = solveSaddleFromA(aFlat, n, C, zeroTop, negPhi);
+    // factorMode 'lu' PINNED — LU-vs-LU identity test (see the gradient-system
+    // test above). @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (decision 2)
+    const fast = solveSaddleFromA(aFlat, n, C, zeroTop, negPhi, 'lu');
 
     const xRel = euclideanDiff(fast.x, slow.x) / Math.max(1, euclideanNorm(slow.x));
     const lambdaRel =
@@ -209,7 +215,13 @@ test('solveSaddleFromA: k = 0 (empty constraint set) degenerates to Ā·x = rhs 
     );
 
     const slow = solveSaddle(expandBlockDiag(A), [], dEFlat);
-    const fast = solveSaddleFromA(aFlat, n, [], dEFlat);
+    // factorMode 'lu' PINNED — and here it is LOAD-BEARING, not just intent:
+    // unconstrained Ā is numerically singular (constant null space), so only
+    // an op-identical factorization reproduces the same solution; LDLᵀ picks a
+    // different null component (measured xRel ≈ 0.67 with both residuals
+    // ≤ 2e-16 — see ldlt.test.ts's k=0 test).
+    // @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 2)
+    const fast = solveSaddleFromA(aFlat, n, [], dEFlat, undefined, 'lu');
 
     const xRel = euclideanDiff(fast.x, slow.x) / Math.max(1, euclideanNorm(slow.x));
     expect(xRel).toBeLessThanOrEqual(1e-12);

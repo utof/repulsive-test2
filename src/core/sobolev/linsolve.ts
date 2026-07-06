@@ -727,11 +727,14 @@ function solveFactored(fac: SaddleFactorization, rhs: number[]): number[] {
  * Returns `fac` so a caller can reuse the factorization for further solves of
  * the SAME frozen system (frozen-projection reuse, plan Task 6).
  *
- * `factorMode` selects the dense factorization (LDLᵀ A/B, plan 2026-07-06):
- * the default 'lu' path is bit-identical to the pre-option code; 'ldlt' runs
- * Bunch–Kaufman on the same K buffer and is gated by the SAME structured
- * residual — the self-certification never depends on the factorization.
- * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+ * `factorMode` selects the dense factorization (LDLᵀ A/B, plan 2026-07-06).
+ * Default 'ldlt' since the pre-registered gates passed (factor-phase p50
+ * ≥1.44× over LU on every bench case, all golden-gated tests green — plan
+ * "A/B results & gate verdict"); pass 'lu' for the partial-pivoting LU leg,
+ * which is bit-identical to the pre-option code. Both legs are gated by the
+ * SAME structured residual — the self-certification never depends on the
+ * factorization.
+ * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system")
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
  * @see local_files/2026-07-03-next-steps-briefing.md §5A item 2
@@ -742,7 +745,11 @@ export function solveSaddleFromA(
     C: number[][],
     rhsTop: number[],
     rhsBottom?: number[],
-    factorMode: FactorMode = 'lu',
+    // Default flipped 'lu' → 'ldlt' 2026-07-06 after the measured A/B gate
+    // passed. This is THE default switch — optimizer/lineSearch pass their
+    // option through and inherit it when unset.
+    // @see docs/superpowers/plans/2026-07-06-ldlt-factor.md ("A/B results & gate verdict")
+    factorMode: FactorMode = 'ldlt',
 ): { x: number[]; lambda: number[]; residual: number; fac: SaddleFactorization } {
     if (a.length !== n * n) {
         throw new Error(`solveSaddleFromA: a length ${a.length} does not match n*n = ${n * n}`);

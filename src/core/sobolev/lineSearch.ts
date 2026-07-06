@@ -136,9 +136,10 @@ export interface ProjectConstraintSetOptions {
     frozen?: FrozenSaddleOperator;
     /**
      * Dense factorization for the per-iterate REASSEMBLE solves (LDLᵀ A/B;
-     * absent/'lu' → bit-identical to the pre-option path). The frozen path
-     * ignores this — its factorization kind is baked into `frozen.fac`.
-     * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+     * absent → solveSaddleFromA's default, 'ldlt' since the 2026-07-06 gate
+     * verdict; 'lu' is bit-identical to the pre-option path). The frozen
+     * path ignores this — its factorization kind is baked into `frozen.fac`.
+     * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
      */
     factorMode?: FactorMode;
 }

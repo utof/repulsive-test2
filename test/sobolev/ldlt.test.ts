@@ -369,7 +369,7 @@ test("solveSaddleFromA factorMode 'ldlt': k = 0 (empty constraint set) degenerat
 const FIXTURES = ['crossing', 'helix', 'junction-y', 'knot', 'linked-rings'] as const;
 
 for (const name of FIXTURES) {
-    test(`sobolevStepSet factorMode 'ldlt' vs default LU: ${name} — same verdicts, vertices rel ≤ 1e-9, residuals ≤ 1e-10`, () => {
+    test(`sobolevStepSet factorMode 'ldlt' vs 'lu': ${name} — same verdicts, vertices rel ≤ 1e-9, residuals ≤ 1e-10`, () => {
         const { vertices, edges, alpha, beta, epsilon } = loadFixture(name);
         const disjointPairs = calculateDisjointPairs(edges);
         const set: ConstraintSet = [
@@ -378,7 +378,12 @@ for (const name of FIXTURES) {
         ];
         const base = { mode: 'analytical' as const, alpha, beta, epsilon };
 
-        const lu = sobolevStepSet(vertices, edges, disjointPairs, set, base);
+        // Both legs EXPLICIT — the A/B must stay meaningful regardless of
+        // which factorMode is the current default (flipped 2026-07-06).
+        const lu = sobolevStepSet(vertices, edges, disjointPairs, set, {
+            ...base,
+            factorMode: 'lu',
+        });
         const ldlt = sobolevStepSet(vertices, edges, disjointPairs, set, {
             ...base,
             factorMode: 'ldlt',
@@ -414,7 +419,11 @@ test("sobolevStepSet: projectionMode 'frozen' + factorMode 'ldlt' (frozen op car
         projectionMode: 'frozen' as const,
     };
 
-    const lu = sobolevStepSet(vertices, edges, disjointPairs, set, base);
+    // Both legs explicit — default-agnostic A/B (default flipped 2026-07-06).
+    const lu = sobolevStepSet(vertices, edges, disjointPairs, set, {
+        ...base,
+        factorMode: 'lu',
+    });
     const ldlt = sobolevStepSet(vertices, edges, disjointPairs, set, {
         ...base,
         factorMode: 'ldlt',
