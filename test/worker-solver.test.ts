@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { computeArrowField } from '../src/core/arrowField';
 import {
     type DescentMode,
     type DescentStepOutcome,
@@ -7,9 +8,11 @@ import {
     type SolverWorkerRequest,
     type SolverWorkerResponse,
 } from '../src/core/dispatch';
+import { DEFAULTS } from '../src/core/optimizer';
 import { edgeLengths, totalLength } from '../src/core/sobolev/constraintSet';
 import { barycenterTarget } from '../src/core/sobolev/constraints';
-import { calculateDisjointPairs } from '../src/core/tangentPointEnergy';
+import { solveConstrainedGradient } from '../src/core/sobolev/gradient';
+import { calculateDisjointPairs, gradientAnalytical } from '../src/core/tangentPointEnergy';
 import { testConfigs } from '../src/core/testConfigs';
 
 // Round-trip bit-identity gate (§T2, §6.2): the real solver worker runs the SAME
@@ -169,6 +172,133 @@ test('worker posts an error (never a silent crash) when a step arrives before to
     // No topology sent: the try/catch must convert the missing-cache throw into a
     // protocol error message, which the main driver turns into the §D6 fallback.
     const resp = await roundTrip([], { type: 'step', graphVersion: 1, args: stepArgs('raw', f) });
+    expect(resp.type).toBe('error');
+    if (resp.type !== 'error') return;
+    expect(resp.message).toContain('before topology');
+});
+
+// §D13 GradientArrows off-thread: the arrows diagnostic worker runs the SAME
+// pure computeArrowField the synchronous fallback runs, so its field must be
+// EXACTLY equal (bit identity) — same rigor as the step round-trip above.
+// @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13
+
+function fieldArgs(descentMode: DescentMode, f: ReturnType<typeof makeFixture>) {
+    // mode 'analytical' selects the analytical dE (the app default); x0 is the
+    // frozen sobolev barycenter target (ignored on the raw path).
+    return { vertices: f.vertices, mode: 'analytical' as const, descentMode, x0: f.x0 };
+}
+
+function expectFieldBitIdentical(got: number[][], expected: number[][]) {
+    expect(got.length).toBe(expected.length);
+    for (let i = 0; i < expected.length; i++) {
+        for (let k = 0; k < 3; k++) {
+            expect(Object.is(got[i][k], expected[i][k])).toBe(true);
+        }
+    }
+    expect(got).toEqual(expected);
+}
+
+test('worker field: raw mode equals computeArrowField AND gradientAnalytical (semantics preserved)', async () => {
+    const f = makeFixture();
+    const graphVersion = 4;
+    const args = fieldArgs('raw', f);
+    const expected = computeArrowField(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        'analytical',
+        'raw',
+        f.x0,
+    );
+    // Raw field IS the analytical L² gradient — prove the extraction preserved
+    // that exact semantics, not just self-consistency with the helper.
+    const rawGrad = gradientAnalytical(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        DEFAULTS.alpha,
+        DEFAULTS.beta,
+        DEFAULTS.epsilon,
+    );
+
+    const resp = await roundTrip([{ type: 'topology', graphVersion, edges: f.edges }], {
+        type: 'field',
+        graphVersion,
+        args,
+    });
+
+    expect(resp.type).toBe('fieldResult');
+    if (resp.type !== 'fieldResult') return;
+    expect(resp.graphVersion).toBe(graphVersion);
+    expect(resp.field).not.toBeNull();
+    if (resp.field === null) return;
+    expect(expected).not.toBeNull();
+    if (expected === null) return;
+    expectFieldBitIdentical(resp.field, expected);
+    expectFieldBitIdentical(resp.field, rawGrad);
+});
+
+test('worker field: sobolev mode equals solveConstrainedGradient(...).gTilde', async () => {
+    const f = makeFixture();
+    const graphVersion = 8;
+    const args = fieldArgs('sobolev', f);
+    // Independently reconstruct the expected g̃: dE = analytical gradient, then
+    // the constrained saddle solve — proving the sobolev branch is preserved.
+    const dE = gradientAnalytical(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        DEFAULTS.alpha,
+        DEFAULTS.beta,
+        DEFAULTS.epsilon,
+    );
+    const expected = solveConstrainedGradient(
+        f.vertices,
+        f.edges,
+        f.disjointPairs,
+        DEFAULTS.alpha,
+        DEFAULTS.beta,
+        DEFAULTS.epsilon,
+        dE,
+        f.x0,
+    ).gTilde;
+
+    const resp = await roundTrip([{ type: 'topology', graphVersion, edges: f.edges }], {
+        type: 'field',
+        graphVersion,
+        args,
+    });
+
+    expect(resp.type).toBe('fieldResult');
+    if (resp.type !== 'fieldResult') return;
+    expect(resp.graphVersion).toBe(graphVersion);
+    expect(resp.field).not.toBeNull();
+    if (resp.field === null) return;
+    // Sobolev g̃ differs from the raw dE (the whole point of the A/B toggle).
+    expect(resp.field).not.toEqual(dE);
+    expectFieldBitIdentical(resp.field, expected);
+});
+
+test('worker field echoes the request graphVersion untouched (§D13 stale-drop contract)', async () => {
+    const f = makeFixture();
+    // topology carries gv=1; the field request carries a DIFFERENT gv. The worker
+    // computes from its cached topology but must echo the REQUEST's gv verbatim so
+    // GradientArrows can DROP a field whose gv no longer matches the store (§D13-c).
+    const resp = await roundTrip([{ type: 'topology', graphVersion: 1, edges: f.edges }], {
+        type: 'field',
+        graphVersion: 555,
+        args: fieldArgs('sobolev', f),
+    });
+    expect(resp.type).toBe('fieldResult');
+    if (resp.type !== 'fieldResult') return;
+    expect(resp.graphVersion).toBe(555);
+});
+
+test('worker posts an error when a field request arrives before topology (§D13)', async () => {
+    const f = makeFixture();
+    // No topology sent: the missing-cache throw must become a protocol error, which
+    // GradientArrows turns into its permanent synchronous fallback (§D13-c).
+    const resp = await roundTrip([], { type: 'field', graphVersion: 1, args: fieldArgs('raw', f) });
     expect(resp.type).toBe('error');
     if (resp.type !== 'error') return;
     expect(resp.message).toContain('before topology');

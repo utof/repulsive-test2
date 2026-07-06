@@ -167,6 +167,10 @@ function Simulation() {
                 useSimStore.getState().setSolverDriver('main');
                 return;
             }
+            // The step worker only ever posts `result` (arrows `fieldResult` is a
+            // SEPARATE worker instance in GradientArrows, §D13-c); narrow it out so
+            // the union's field variant can't reach the step-application path.
+            if (resp.type !== 'result') return;
             inFlight.current = false;
             const st = useSimStore.getState();
             // §D5: DROP a result whose topology (graphVersion) no longer matches the

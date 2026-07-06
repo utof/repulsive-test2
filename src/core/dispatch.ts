@@ -327,23 +327,45 @@ export function buildStepArgs(
 export type DispatchStepArgs = Omit<DispatchDescentStepArgs, 'edges' | 'disjointPairs'>;
 
 /**
- * Main→worker protocol (§D4/§D12). `topology` is sent once on init and on every
- * graphVersion change (the worker recomputes disjointPairs via the same
+ * Per-`field` worker payload (§D13-b): the dynamic inputs `computeArrowField`
+ * needs beyond the cached topology (edges + disjointPairs come from the worker's
+ * topology cache, §D4, exactly like `step`). `x0` is the frozen sobolev
+ * barycenter target (ignored in raw mode); `descentMode` selects raw dE vs the
+ * sobolev g̃ solve, `mode` selects analytical vs finiteDiff dE.
+ * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13
+ */
+export interface FieldArgs {
+    vertices: Vec3[];
+    mode: Mode;
+    descentMode: DescentMode;
+    x0: Vec3;
+}
+
+/**
+ * Main→worker protocol (§D4/§D12/§D13). `topology` is sent once on init and on
+ * every graphVersion change (the worker recomputes disjointPairs via the same
  * deterministic calculateDisjointPairs); `step` carries only the dynamic
- * per-step args tagged with the graphVersion the main thread will match on §D5.
- * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D4, §D12
+ * per-step args tagged with the graphVersion the main thread will match on §D5;
+ * `field` (§D13-b) requests one GradientArrows descent-field compute, tagged
+ * with graphVersion the same way so a stale field result can be dropped.
+ * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D4, §D12, §D13
  */
 export type SolverWorkerRequest =
     | { type: 'topology'; graphVersion: number; edges: Edge[] }
-    | { type: 'step'; graphVersion: number; args: DispatchStepArgs };
+    | { type: 'step'; graphVersion: number; args: DispatchStepArgs }
+    | { type: 'field'; graphVersion: number; args: FieldArgs };
 
 /**
- * Worker→main protocol (§D5/§D12). `result` echoes the request's graphVersion
- * UNTOUCHED so the main thread can DROP a result whose graphVersion no longer
- * matches the store (a preset rebuild / pause landed mid-flight); `error` is
- * posted on any worker-side throw and triggers the §D6 auto-fallback to 'main'.
- * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D5, §D6, §D12
+ * Worker→main protocol (§D5/§D12/§D13). `result` echoes the request's
+ * graphVersion UNTOUCHED so the main thread can DROP a result whose graphVersion
+ * no longer matches the store (a preset rebuild / pause landed mid-flight);
+ * `fieldResult` echoes it the same way and carries the raw descent field (or
+ * `null` = singular saddle → arrows hide, §D13-b); `error` is posted on any
+ * worker-side throw and triggers the §D6 auto-fallback (step: to 'main' driver;
+ * field: to the synchronous inline compute, §D13-c).
+ * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D5, §D6, §D12, §D13
  */
 export type SolverWorkerResponse =
     | { type: 'result'; graphVersion: number; result: DescentStepOutcome }
+    | { type: 'fieldResult'; graphVersion: number; field: Vec3[] | null }
     | { type: 'error'; message: string };

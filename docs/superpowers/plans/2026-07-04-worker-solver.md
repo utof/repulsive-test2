@@ -216,3 +216,53 @@ Commit: `feat(worker): async worker driver in frame loop + solverDriver toggle`.
 - `SolverDriver` type lives in `src/store.ts`, not `src/core/dispatch.ts` — it is
   a main-thread-only concern (worker vs main driver), and keeping it out of
   `src/core/**` preserves worker-bundle purity (§D2). Reviewer signed off.
+
+## §D13 Arrows field off-thread (2026-07-06 fix)
+
+**Measured breach.** T3 shipped the STEP path off-thread, but headless CDP
+profiling on the `stress` preset (200 vertices, worker driver, defaults)
+measured a 400–733 ms contiguous main-thread longtask once per solver step
+(17–18 longtasks totalling ~8 s per 10 s run; rAF gaps up to 733 ms). CPU
+profile hottest stack: `kernelDerivs ← gradientAnalytical ← (useFrame) ← update
+← loop`. With the Arrows checkbox OFF: 0 longtasks, 0 rAF gaps >60 ms, rAF p95
+16.7 ms. Root cause: `src/scene/GradientArrows.tsx` (default-on via
+`showArrows: true`, src/store.ts) recomputed, ON the main thread,
+`gradientAnalytical` (O(E²)) — plus in sobolev mode a full dense
+`solveConstrainedGradient` saddle solve — every time `st.step` changed
+(~10 Hz), throttled to 5 Hz. This is a blocker-class breach of the milestone
+goal (interaction smoothness regardless of step cost).
+
+**Decisions.**
+- **D13-a — shared pure helper.** New `src/core/arrowField.ts` exporting
+  `computeArrowField(vertices, edges, disjointPairs, mode, descentMode, x0):
+  Vec3[] | null` = the field computation previously inlined in
+  GradientArrows.tsx (raw `gradientAnalytical`/`gradientFiniteDiff` under
+  `DEFAULTS`; sobolev `solveConstrainedGradient(...).gTilde`; `null` on the
+  singular-saddle throw → caller hides arrows). Returns the RAW field, not
+  negated. Imports only from `src/core/**` (worker-bundle purity, §D2).
+  Bit-identical to today's field (gate: field round-trip tests).
+- **D13-b — worker protocol extension.** `SolverWorkerRequest` gains
+  `{ type:'field'; graphVersion; args: FieldArgs }` (`FieldArgs =
+  { vertices; mode; descentMode; x0 }`); `SolverWorkerResponse` gains
+  `{ type:'fieldResult'; graphVersion; field: Vec3[] | null }`. The worker's
+  `field` branch restores edges + disjointPairs from the topology cache (same
+  §D4 contract as `step`), calls `computeArrowField`, and echoes graphVersion
+  untouched; a field before topology throws → the outer catch posts
+  `{type:'error'}`.
+- **D13-c — GradientArrows goes async.** A DEDICATED arrows worker (separate
+  instance from Simulation's step worker so a ~500 ms field compute at N=200
+  runs in parallel with descent steps instead of serializing behind them),
+  constructed in a `showArrows`-gated effect (§D3 path string, null-onmessage
+  teardown). useFrame keeps the key/throttle logic but POSTs a field request
+  (single-flight, §D1-style) instead of computing inline; `fieldResult` applies
+  the received field against the CURRENT `st.live` (≤1-step direction staleness
+  accepted for a ≤5 Hz diagnostic), drops on graphVersion mismatch, and hides
+  arrows on `field === null`. On worker construction failure or any worker error
+  the component falls back PERMANENTLY (ref flag) to the synchronous
+  `computeArrowField` — the same helper, so the paths cannot drift. Independent
+  of the store's `solverDriver` toggle (that governs the STEP path only).
+
+**Acceptance gate.** stress preset, arrows ON, worker driver → 0 main-thread
+longtasks >60 ms attributable to the field compute (the `gradientAnalytical ←
+GradientArrows` stack disappears from the main-thread CPU profile; it now runs
+on the arrows worker thread).

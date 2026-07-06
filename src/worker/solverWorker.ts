@@ -1,3 +1,4 @@
+import { computeArrowField } from '../core/arrowField';
 import {
     dispatchDescentStep,
     type SolverWorkerRequest,
@@ -39,6 +40,33 @@ self.onmessage = (event: MessageEvent<SolverWorkerRequest>) => {
                 edges: msg.edges,
                 disjointPairs: calculateDisjointPairs(msg.edges),
             };
+            return;
+        }
+        if (msg.type === 'field') {
+            // §D13-b: GradientArrows descent-field compute. Same topology-cache
+            // contract as `step` (restore edges + disjointPairs from the cache,
+            // §D4; throw the same missing-cache error so the outer catch posts an
+            // {type:'error'} the main thread turns into its synchronous fallback,
+            // §D13-c). Runs the SAME pure computeArrowField the fallback runs, so
+            // the field is bit-identical (gate: test/worker-solver.test.ts).
+            // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D13
+            if (topology === null) {
+                throw new Error('solverWorker: field received before topology');
+            }
+            const field = computeArrowField(
+                msg.args.vertices,
+                topology.edges,
+                topology.disjointPairs,
+                msg.args.mode,
+                msg.args.descentMode,
+                msg.args.x0,
+            );
+            const fieldResponse: SolverWorkerResponse = {
+                type: 'fieldResult',
+                graphVersion: msg.graphVersion,
+                field,
+            };
+            self.postMessage(fieldResponse);
             return;
         }
         // msg.type === 'step': restore the topology fields from the cache (§D4)
