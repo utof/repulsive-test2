@@ -1,0 +1,936 @@
+{
+  "label": "ldlt-ab",
+  "date": "2026-07-06",
+  "gitShaShort": "da3656d",
+  "bunVersion": "1.3.11",
+  "cases": [
+    {
+      "name": "N60-total",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "total",
+      "projectionMode": "reassemble",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 2.956,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 3.634,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 9.543,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 9.187,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 18.738,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 5.164,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 4.714,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 11.782,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 15.444,
+          "calls": 1
+        },
+        "step": {
+          "ms": 30.995,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 2.182,
+        "gradientAnalytical": 2.935,
+        "assembleA": 2.053,
+        "expandBlockDiag": 0.098,
+        "solveSaddle": 4.35
+      },
+      "fullStepMsMedian": 31.005
+    },
+    {
+      "name": "N60-total-ldlt",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "total",
+      "projectionMode": "reassemble",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 2.925,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 0.681,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 2.021,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 1.919,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 4.068,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 3.857,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 3.228,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 4.27,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 5.072,
+          "calls": 1
+        },
+        "step": {
+          "ms": 12.114,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 0.673,
+        "gradientAnalytical": 2.895,
+        "assembleA": 2.021,
+        "expandBlockDiag": 0.063,
+        "solveSaddle": 3.615
+      },
+      "fullStepMsMedian": 12.119
+    },
+    {
+      "name": "N60-total-frozen",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 3.081,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 0.756,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 1.041,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 1.014,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 2.078,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 3.156,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 2.582,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 0.391,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 1.189,
+          "calls": 1
+        },
+        "step": {
+          "ms": 10.978,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 0.726,
+        "gradientAnalytical": 3.267,
+        "assembleA": 2.091,
+        "expandBlockDiag": 0.111,
+        "solveSaddle": 3.539
+      },
+      "fullStepMsMedian": 10.985
+    },
+    {
+      "name": "N60-total-frozen-ldlt",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 3.034,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 0.687,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 1.001,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 0.987,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 2.022,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 2.323,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 1.611,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 0.373,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 1.099,
+          "calls": 1
+        },
+        "step": {
+          "ms": 8.344,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 0.814,
+        "gradientAnalytical": 2.999,
+        "assembleA": 2.034,
+        "expandBlockDiag": 0.117,
+        "solveSaddle": 3.919
+      },
+      "fullStepMsMedian": 8.349
+    },
+    {
+      "name": "N60-perEdge",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "perEdge",
+      "projectionMode": "reassemble",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 3.002,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 0.711,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 2.101,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 2.136,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 4.238,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 12.372,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 11.444,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 8.635,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 9.358,
+          "calls": 1
+        },
+        "step": {
+          "ms": 21.144,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 0.82,
+        "gradientAnalytical": 5.067,
+        "assembleA": 2.079,
+        "expandBlockDiag": 0.16,
+        "solveSaddle": 7.711
+      },
+      "fullStepMsMedian": 21.151
+    },
+    {
+      "name": "N60-perEdge-ldlt",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "perEdge",
+      "projectionMode": "reassemble",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 2.986,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 0.688,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 2.059,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 1.993,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 4.085,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 8.665,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 7.357,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 6.56,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 7.275,
+          "calls": 1
+        },
+        "step": {
+          "ms": 16.981,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 0.719,
+        "gradientAnalytical": 3.018,
+        "assembleA": 1.759,
+        "expandBlockDiag": 0.102,
+        "solveSaddle": 7.668
+      },
+      "fullStepMsMedian": 16.987
+    },
+    {
+      "name": "N60-perEdge-frozen",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "perEdge",
+      "projectionMode": "frozen",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 2.915,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 0.693,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 0.727,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 0.989,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 1.758,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 6.03,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 5.564,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 0.3,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 1.009,
+          "calls": 1
+        },
+        "step": {
+          "ms": 11.606,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 0.678,
+        "gradientAnalytical": 2.964,
+        "assembleA": 1.711,
+        "expandBlockDiag": 0.064,
+        "solveSaddle": 7.494
+      },
+      "fullStepMsMedian": 11.61
+    },
+    {
+      "name": "N60-perEdge-frozen-ldlt",
+      "nV": 60,
+      "nE": 60,
+      "constraintMode": "perEdge",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 2.901,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 0.691,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 0.75,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 0.98,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 1.758,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 4.515,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 3.719,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 0.444,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 1.193,
+          "calls": 1
+        },
+        "step": {
+          "ms": 10.164,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 0.687,
+        "gradientAnalytical": 3.116,
+        "assembleA": 1.742,
+        "expandBlockDiag": 0.076,
+        "solveSaddle": 7.556
+      },
+      "fullStepMsMedian": 10.169
+    },
+    {
+      "name": "N120-total",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "total",
+      "projectionMode": "reassemble",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 9.532,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 1.527,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 5.832,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 5.22,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 11.124,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 38.203,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 37.285,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 24.823,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 26.379,
+          "calls": 1
+        },
+        "step": {
+          "ms": 60.534,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.66,
+        "gradientAnalytical": 9.08,
+        "assembleA": 5.454,
+        "expandBlockDiag": 0.264,
+        "solveSaddle": 27.2
+      },
+      "fullStepMsMedian": 60.541
+    },
+    {
+      "name": "N120-total-ldlt",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "total",
+      "projectionMode": "reassemble",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 9.562,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 1.504,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 6.099,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 5.524,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 11.724,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 25.817,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 24.357,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 19.132,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 20.613,
+          "calls": 1
+        },
+        "step": {
+          "ms": 48.464,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.56,
+        "gradientAnalytical": 10.119,
+        "assembleA": 5.612,
+        "expandBlockDiag": 0.372,
+        "solveSaddle": 27.009
+      },
+      "fullStepMsMedian": 48.472
+    },
+    {
+      "name": "N120-total-frozen",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 9.233,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 1.542,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 2.938,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 2.619,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 5.573,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 20.103,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 18.775,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 0.484,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 2.058,
+          "calls": 1
+        },
+        "step": {
+          "ms": 36.586,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.47,
+        "gradientAnalytical": 9.38,
+        "assembleA": 6.284,
+        "expandBlockDiag": 0.302,
+        "solveSaddle": 28.669
+      },
+      "fullStepMsMedian": 36.592
+    },
+    {
+      "name": "N120-total-frozen-ldlt",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 11.887,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 2.039,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 3.76,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 3.036,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 6.836,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 17.245,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 14.798,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 1.051,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 3.187,
+          "calls": 1
+        },
+        "step": {
+          "ms": 38,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.925,
+        "gradientAnalytical": 11.531,
+        "assembleA": 7.5,
+        "expandBlockDiag": 0.583,
+        "solveSaddle": 30.361
+      },
+      "fullStepMsMedian": 38.013
+    },
+    {
+      "name": "N120-perEdge",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "perEdge",
+      "projectionMode": "reassemble",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 9.9,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 1.754,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 6.572,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 5.941,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 12.782,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 101.389,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 98.154,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 57.413,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 59.399,
+          "calls": 1
+        },
+        "step": {
+          "ms": 127.145,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.677,
+        "gradientAnalytical": 10.391,
+        "assembleA": 6.549,
+        "expandBlockDiag": 0.303,
+        "solveSaddle": 80.29
+      },
+      "fullStepMsMedian": 127.152
+    },
+    {
+      "name": "N120-perEdge-ldlt",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "perEdge",
+      "projectionMode": "reassemble",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 9.33,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 1.46,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 5.714,
+          "calls": 2
+        },
+        "bLow": {
+          "ms": 5.191,
+          "calls": 2
+        },
+        "assembleA": {
+          "ms": 11.004,
+          "calls": 2
+        },
+        "saddle": {
+          "ms": 60.404,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 56.428,
+          "calls": 2
+        },
+        "projection": {
+          "ms": 36.869,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 38.372,
+          "calls": 1
+        },
+        "step": {
+          "ms": 82.589,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.618,
+        "gradientAnalytical": 9.91,
+        "assembleA": 6.188,
+        "expandBlockDiag": 0.265,
+        "solveSaddle": 67.429
+      },
+      "fullStepMsMedian": 82.598
+    },
+    {
+      "name": "N120-perEdge-frozen",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "perEdge",
+      "projectionMode": "frozen",
+      "factorMode": "lu",
+      "phases": {
+        "dE": {
+          "ms": 10.896,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 1.647,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 3.322,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 3.071,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 6.578,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 54.485,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 51.857,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 1.185,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 2.89,
+          "calls": 1
+        },
+        "step": {
+          "ms": 74.093,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.644,
+        "gradientAnalytical": 10.025,
+        "assembleA": 6.343,
+        "expandBlockDiag": 0.294,
+        "solveSaddle": 64.112
+      },
+      "fullStepMsMedian": 74.101
+    },
+    {
+      "name": "N120-perEdge-frozen-ldlt",
+      "nV": 120,
+      "nE": 120,
+      "constraintMode": "perEdge",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 9.72,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 1.584,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 3.193,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 2.867,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 6.113,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 34.254,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 30.557,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 1.626,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 3.459,
+          "calls": 1
+        },
+        "step": {
+          "ms": 52.53,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 1.883,
+        "gradientAnalytical": 10.382,
+        "assembleA": 6.388,
+        "expandBlockDiag": 0.256,
+        "solveSaddle": 67.23
+      },
+      "fullStepMsMedian": 52.537
+    }
+  ]
+}

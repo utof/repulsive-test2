@@ -33,6 +33,7 @@ import {
 import { barycenterTarget } from '../src/core/sobolev/constraints';
 import { assembleA } from '../src/core/sobolev/innerProduct';
 import { expandBlockDiag, flatten } from '../src/core/sobolev/layout';
+import type { FactorMode } from '../src/core/sobolev/linsolve';
 import { solveSaddle } from '../src/core/sobolev/linsolve';
 import type { SobolevStepTimings } from '../src/core/sobolev/phaseTimings';
 import {
@@ -50,6 +51,7 @@ interface CaseResult {
     nE: number;
     constraintMode: ConstraintMode;
     projectionMode: ProjectionMode;
+    factorMode: FactorMode;
     phases: Record<string, { ms: number; calls: number }>;
     isolated: Record<string, number>;
     fullStepMsMedian: number;
@@ -130,11 +132,15 @@ const PHASE_ORDER = [
 
 // Case names: reassemble keeps the historical `N60-total` shape so Δ% joins
 // against pre-Task-6 baselines still work; frozen cases get a `-frozen`
-// suffix (projectionMode is a case dimension — plan Task 6 step 6.6).
+// suffix (projectionMode is a case dimension — plan Task 6 step 6.6) and
+// LDLᵀ cases a `-ldlt` suffix (factorMode is the A/B dimension of the
+// 2026-07-06 milestone — its kill gate reads the 'factor' phase p50 here).
+// @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (verification ladder c)
 function runCase(
     nV: number,
     constraintMode: ConstraintMode,
     projectionMode: ProjectionMode,
+    factorMode: FactorMode,
 ): CaseResult {
     const { vertices, edges } = trefoil(nV);
     const disjointPairs = calculateDisjointPairs(edges);
@@ -151,6 +157,7 @@ function runCase(
         collectTimings: true,
         energyBefore,
         projectionMode,
+        factorMode,
     };
 
     // 2 warmup full steps (discarded), then K=5 measured — each from the SAME
@@ -206,11 +213,12 @@ function runCase(
     };
 
     return {
-        name: `N${nV}-${constraintMode}${projectionMode === 'frozen' ? '-frozen' : ''}`,
+        name: `N${nV}-${constraintMode}${projectionMode === 'frozen' ? '-frozen' : ''}${factorMode === 'ldlt' ? '-ldlt' : ''}`,
         nV,
         nE: edges.length,
         constraintMode,
         projectionMode,
+        factorMode,
         phases,
         isolated,
         fullStepMsMedian: round3(median(fullMs)),
@@ -234,13 +242,16 @@ if (baselinePath) {
 }
 
 const projModes: ProjectionMode[] = ['reassemble', 'frozen'];
+const factorModes: FactorMode[] = ['lu', 'ldlt'];
 
 const cases: CaseResult[] = [];
 for (const n of sizes) {
     for (const mode of modes) {
         for (const proj of projModes) {
-            process.stderr.write(`running N${n}-${mode}-${proj}…\n`);
-            cases.push(runCase(n, mode, proj));
+            for (const fm of factorModes) {
+                process.stderr.write(`running N${n}-${mode}-${proj}-${fm}…\n`);
+                cases.push(runCase(n, mode, proj, fm));
+            }
         }
     }
 }
@@ -270,12 +281,12 @@ lines.push(`# Sobolev step bench — ${date} · bun ${Bun.version} · ${gitShaSh
 if (baseline) lines.push(`Δ% vs baseline: **${baseline.label}** (${baseline.gitShaShort})`);
 lines.push('');
 lines.push('## Full step (median of 5)');
-lines.push('| case | |V| | |E| | constraint | projection | full step ms |');
-lines.push('|---|---|---|---|---|---|');
+lines.push('| case | |V| | |E| | constraint | projection | factor | full step ms |');
+lines.push('|---|---|---|---|---|---|---|');
 for (const c of cases) {
     const b = baseCase(c.name);
     lines.push(
-        `| ${c.name} | ${c.nV} | ${c.nE} | ${c.constraintMode} | ${c.projectionMode} | ${c.fullStepMsMedian}${pct(c.fullStepMsMedian, b?.fullStepMsMedian)} |`,
+        `| ${c.name} | ${c.nV} | ${c.nE} | ${c.constraintMode} | ${c.projectionMode} | ${c.factorMode} | ${c.fullStepMsMedian}${pct(c.fullStepMsMedian, b?.fullStepMsMedian)} |`,
     );
 }
 lines.push('');

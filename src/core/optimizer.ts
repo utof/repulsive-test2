@@ -1,7 +1,7 @@
 import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
 import { solveConstrainedGradientSetFrozen } from './sobolev/gradient';
 import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
-import type { FrozenSaddleOperator } from './sobolev/linsolve';
+import type { FactorMode, FrozenSaddleOperator } from './sobolev/linsolve';
 import {
     type PenaltyConfig,
     penaltiesActive,
@@ -158,6 +158,20 @@ export interface SobolevStepOptions {
      * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
      */
     projectionMode?: ProjectionMode;
+    /**
+     * Dense factorization for EVERY saddle solve of the step (gradient solve
+     * + all projection iterates, frozen or reassembled — LDLᵀ A/B).
+     * 'ldlt' (default since 2026-07-06, when the pre-registered gates passed
+     * — factor-phase p50 ≥1.44× over LU on every bench case, all
+     * golden-gated tests green): Bunch–Kaufman symmetric-indefinite LDLᵀ,
+     * ~half the factor flops. 'lu': dense LU with partial pivoting — the A/B
+     * leg, bit-identical to the pre-2026-07-06 build. Both paths are gated
+     * by the same self-certifying residual, so this is a cost knob, not a
+     * semantics knob (which is why there is no store/UI toggle — unlike
+     * projectionMode).
+     * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
+     */
+    factorMode?: FactorMode;
 }
 
 /**
@@ -305,6 +319,7 @@ export function sobolevStepSet(
                     epsilon,
                     dE,
                     set,
+                    opts.factorMode,
                 );
                 gTilde = solved.gTilde;
                 residual = solved.residual;
@@ -372,7 +387,22 @@ export function sobolevStepSet(
                     // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
                     {
                         energyBefore: opts.energyBefore,
-                        ...(frozen ? { projection: { frozen } } : {}),
+                        // An EXPLICIT factorMode must reach the reassemble
+                        // projection solves too (a frozen operator already
+                        // carries its kind); when unset, everything inherits
+                        // solveSaddleFromA's default and the options object
+                        // stays IDENTICAL to the pre-option build.
+                        // @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (decision 4)
+                        ...(frozen || opts.factorMode !== undefined
+                            ? {
+                                  projection: {
+                                      ...(frozen ? { frozen } : {}),
+                                      ...(opts.factorMode !== undefined
+                                          ? { factorMode: opts.factorMode }
+                                          : {}),
+                                  },
+                              }
+                            : {}),
                         ...(pen ? { penalties: pen } : {}),
                     },
                 ),
