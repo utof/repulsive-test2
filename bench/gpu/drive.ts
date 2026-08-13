@@ -118,10 +118,24 @@ class CDPClient {
         number,
         { resolve: (v: unknown) => void; reject: (e: unknown) => void }
     >();
+    private closed = false;
     consoleLines: string[] = [];
 
     constructor(url: string) {
         this.ws = new WebSocket(url);
+    }
+
+    /**
+     * Reject every outstanding `send()` promise and mark the client closed so
+     * later `send()` calls fail fast. Without this, a Chrome crash or GPU
+     * device-loss mid-spike (realistic for the long G0t/G1/G3 compute
+     * workloads) leaves an awaited `Runtime.evaluate` pending forever and the
+     * driver hangs. @see https://github.com/utof/repulsive-test2/issues/18 pt.1
+     */
+    private failPending(err: Error): void {
+        this.closed = true;
+        for (const { reject } of this.pending.values()) reject(err);
+        this.pending.clear();
     }
 
     async connect(): Promise<void> {
@@ -147,9 +161,18 @@ class CDPClient {
                 if (!isNoise(line)) this.consoleLines.push(line);
             }
         });
+        // Persistent (post-handshake) close/error listeners, distinct from
+        // the one-shot pair above that only guards the initial handshake.
+        this.ws.addEventListener('close', () =>
+            this.failPending(new Error('CDP WebSocket closed unexpectedly')),
+        );
+        this.ws.addEventListener('error', () => this.failPending(new Error('CDP WebSocket error')));
     }
 
     send(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+        if (this.closed) {
+            return Promise.reject(new Error(`CDP WebSocket already closed, cannot send ${method}`));
+        }
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
             this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
@@ -189,6 +212,19 @@ async function waitForRunSpikeReady(client: CDPClient, timeoutMs = 15_000): Prom
     throw new Error(`window.__runSpike not ready within ${timeoutMs}ms`);
 }
 
+/** Evaluate `window.__runSpike(name)` in the page and parse its JSON result. */
+async function evalSpike(client: CDPClient, name: string): Promise<Record<string, unknown>> {
+    const evalResult = (await client.send('Runtime.evaluate', {
+        expression: `window.__runSpike('${name}')`,
+        awaitPromise: true,
+        returnByValue: true,
+    })) as { exceptionDetails?: unknown; result: { value: string } };
+    if (evalResult.exceptionDetails) {
+        throw new Error(`Spike '${name}' threw: ${JSON.stringify(evalResult.exceptionDetails)}`);
+    }
+    return JSON.parse(evalResult.result.value) as Record<string, unknown>;
+}
+
 /** Launch Chrome with `flags`, run `spikeName` via the harness, tear down. */
 async function runOnce(flags: string[], spikeName: string): Promise<RunOutcome> {
     const profileDir = mkdtempSync(join(tmpdir(), 'gpu-gate-chrome-'));
@@ -216,25 +252,49 @@ async function runOnce(flags: string[], spikeName: string): Promise<RunOutcome> 
         // racing straight into Runtime.evaluate.
         await waitForRunSpikeReady(client);
 
-        const evalResult = (await client.send('Runtime.evaluate', {
-            expression: `window.__runSpike('${spikeName}')`,
-            awaitPromise: true,
-            returnByValue: true,
-        })) as { exceptionDetails?: unknown; result: { value: string } };
-        if (evalResult.exceptionDetails) {
-            throw new Error(
-                `Spike '${spikeName}' threw: ${JSON.stringify(evalResult.exceptionDetails)}\nstderr: ${stderr}`,
-            );
+        // Explicit adapter classification, run for every spike regardless of
+        // its own return shape. Previously `(data.adapter ?? data)` silently
+        // disarmed the software-adapter INVALID guard for any spike that
+        // doesn't embed adapter fields (every spike but adapterInfo itself).
+        // @see https://github.com/utof/repulsive-test2/issues/18 pt.2
+        const adapterData = (await evalSpike(client, 'adapterInfo')) as unknown as AdapterInfo;
+        const classification = classifyAdapter(adapterData);
+
+        if (spikeName === 'adapterInfo') {
+            return {
+                classification,
+                adapter: adapterData,
+                data: adapterData,
+                consoleLines: client.consoleLines,
+            };
         }
-        const data = JSON.parse(evalResult.result.value) as Record<string, unknown>;
-        const adapter = (data.adapter ?? data) as AdapterInfo; // adapterInfo spike returns the fields at top level
-        return {
-            classification: classifyAdapter(adapter),
-            adapter,
-            data,
-            consoleLines: client.consoleLines,
-        };
+
+        try {
+            const data = await evalSpike(client, spikeName);
+            return {
+                classification,
+                adapter: adapterData,
+                data,
+                consoleLines: client.consoleLines,
+            };
+        } catch (e) {
+            // The adapter classification above is already established and
+            // real; a failure evaluating the requested spike is a genuine
+            // FAIL against known-hardware (or known-software), never a
+            // reason to relabel the adapter itself as INVALID/software.
+            // @see https://github.com/utof/repulsive-test2/issues/18 pt.2
+            return {
+                classification,
+                adapter: adapterData,
+                data: null,
+                consoleLines: client.consoleLines,
+                error: `${e instanceof Error ? e.message : String(e)}\nstderr: ${stderr}`,
+            };
+        }
     } catch (e) {
+        // Failure before we could even determine the adapter (target/connect/
+        // ready-poll timeout) — genuinely unknown, treated as 'software' so
+        // it never masquerades as a passing hardware run.
         return {
             classification: 'software',
             adapter: { vendor: '', architecture: '', device: '', description: '' },
@@ -324,12 +384,20 @@ async function main() {
     mkdirSync(RESULTS_DIR, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
     const gate = isAdapterGate ? 'G0a' : spikeName;
-    const status =
-        winning && winning.outcome.classification === 'hardware' && !winning.outcome.error
+    const isHardware = winning?.outcome.classification === 'hardware';
+    const hasError = winning?.outcome.error !== undefined;
+    // Distinguish adapter classification from spike-eval outcome (#18 pt.2):
+    // software adapter is always INVALID; a hardware adapter with a spike
+    // error is a real FAIL, not an INVALID relabeling of the adapter.
+    const status = isAdapterGate
+        ? isHardware && !hasError
             ? 'PASS'
-            : isAdapterGate
-              ? 'FAIL' // STOP-BRANCH: no flag set yielded a hardware adapter
-              : 'INVALID'; // software adapter on a non-G0a gate is INVALID, not FAIL
+            : 'FAIL' // STOP-BRANCH: no flag set yielded a hardware adapter
+        : !winning || !isHardware
+          ? 'INVALID' // software (or undetermined) adapter is INVALID, not FAIL
+          : hasError
+            ? 'FAIL' // hardware adapter, but the spike itself failed
+            : 'PASS';
 
     const result = {
         gate,
