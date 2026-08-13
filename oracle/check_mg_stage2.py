@@ -149,6 +149,27 @@ def main():
         except O.MGDivergenceError:
             check(f"divergence guard raises [{name}]", True)
 
+    # 2b. Nested-iteration init (paper line 1109): default init converges on
+    #     every topology class and never needs materially more cycles than the
+    #     zero init it replaced (SelfAvoiding.tex: "works much better than
+    #     starting with the zero vector"). @issue utof/repulsive-test2#5 item 3
+    for name, (V, E) in cases.items():
+        levels = prepare(V, E, coarse_op="galerkin")
+        rhs = probe_rhs(levels)
+        try:
+            res_n = O.mg_projected_solve(levels, rhs, tol=TOL, init="nested")
+            res_z = O.mg_projected_solve(levels, rhs, tol=TOL, init="zero")
+        except Exception as exc:
+            check(f"nested init converges [{name}]", False, f"raised {type(exc).__name__}: {exc}")
+            continue
+        rn = float(res_n["residual"])
+        ok = np.isfinite(rn) and rn <= 100 * TOL and res_n["iterations"] <= res_z["iterations"] + 2
+        check(
+            f"nested init converges, no slower than zero init [{name}]",
+            ok,
+            f"iters nested={res_n['iterations']} zero={res_z['iterations']} residual={rn:.3e}",
+        )
+
     # 3. Pencil sanity: Galerkin makes the level-1 pencil identically 1.
     for name in ["chain(n=61,open)", "junction-y-sub2(n=50)"]:
         V, E = cases[name]

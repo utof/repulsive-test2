@@ -1057,12 +1057,44 @@ MG_DIVERGENCE_GROWTH = 10.0
 MG_CLEANUP_CERTIFY_FACTOR = 100.0
 
 
+def nested_iteration_init(levels: List[Level], rhs: Array, nu_smooth: int) -> Array:
+    """Paper-prescribed initial guess (SelfAvoiding.tex 'Initialization', line 1109):
+    restrict the fine RHS to the coarsest level, direct-solve there, then prolong
+    the solution level by level toward the finest, smoothing after each
+    refinement. 'In practice this strategy works much better than starting with
+    the zero vector.' The original oracle silently dropped this and started at
+    x=0 (unrecorded ledger deviation). @issue utof/repulsive-test2#5 (item 3)
+
+    Restriction/projection mirror v_cycle's convention: rhs_c = Pi_c P3^T r,
+    and every per-level iterate is kept in that level's constraint tangent space.
+    """
+    rhs_l = [rhs]
+    for li in range(1, len(levels)):
+        P3 = block_prolong(levels[li].P_to_fine)
+        Pic, _ = projector(levels[li].C)
+        rhs_l.append(Pic @ (P3.T @ rhs_l[-1]))
+    x = direct_projected_solve(levels[-1].A3, levels[-1].C, rhs_l[-1])
+    for li in range(len(levels) - 2, -1, -1):
+        P3 = block_prolong(levels[li + 1].P_to_fine)
+        Pi, _ = projector(levels[li].C)
+        x = Pi @ (P3 @ x)
+        x = smooth_projected_cg(levels[li].A3, levels[li].C, x, rhs_l[li], nu_smooth)
+    return x
+
+
 def mg_projected_solve(levels: List[Level], rhs: Array, tol: float = 1e-10, max_cycles: int = 50,
-                       nu_pre: int = 2, nu_post: int = 2) -> Dict[str, object]:
+                       nu_pre: int = 2, nu_post: int = 2, init: str = "nested") -> Dict[str, object]:
     L0 = levels[0]
     A0 = L0.A3; C0 = L0.C
     assert A0 is not None and C0 is not None
-    x = np.zeros_like(rhs)
+    # init="nested" is the paper's initialization (see nested_iteration_init);
+    # "zero" retained for A/B and for measuring the init's contribution.
+    if init == "nested" and len(levels) > 1:
+        x = nested_iteration_init(levels, rhs, nu_smooth=nu_pre)
+    elif init in ("nested", "zero"):
+        x = np.zeros_like(rhs)
+    else:
+        raise ValueError(f"unknown init: {init!r}")
     residuals = []
     best = math.inf
     for it in range(max_cycles + 1):
