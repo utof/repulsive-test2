@@ -143,6 +143,17 @@ r_T^N=\max_{J\in N}|T_J-\bar T_N|.
 
 ### 1.2 θ-admissibility
 
+> **FIXED (2026-08-13, utof/repulsive-test2#6):** the delivered predicate below
+> additionally required `not node.is_leaf` (undocumented — it made BH accept
+> ZERO clusters at N≤120 under θ=0.5/leaf=8) and shared θ between the spatial
+> and tangent tests. The oracle now allows leaf admissibility, uses a decoupled
+> tangent threshold θ_T (default 1.5·θ_x, sweep-optimal 0.5/0.75), and requires
+> clusters ≥2 edges (BH) / block sides summing ≥3 (BCT) so "θ=0 ⇒ exact"
+> genuinely holds — a singleton's radii are 0 but its endpoint-collapse error is
+> not θ-controlled. Regression gate: `oracle/check_bh_stage2.py`. Measured on
+> trefoil N=120 (θ_x=0.5, θ_T=0.75, leaf=4): 12292 approximated edge refs vs
+> 1748 direct pairs, energy rel err 1.4e-2, monotone in θ (2.3e-3 at 0.25/0.5).
+
 The paper’s BH condition is stated as
 
 [
