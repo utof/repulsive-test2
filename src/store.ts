@@ -8,17 +8,24 @@ import type { SobolevStepTimings } from './core/sobolev/phaseTimings';
 import { calculateDisjointPairs, calculateEnergy } from './core/tangentPointEnergy';
 import { type GraphState, type TestConfig, testConfigs, type Vec3 } from './core/testConfigs';
 
+/**
+ * Spec-mandated barrel surface: §D2 requires dispatchDescentStep's arg type to
+ * stay importable from the store even though current consumers import it from
+ * core/dispatch directly. `@public` keeps knip from flagging it.
+ * The §D7/§D12 types (DispatchStepArgs, StepArgsSource) carried no such
+ * mandate and were dropped from the barrel. @issue utof/repulsive-test2#3
+ * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D2
+ * @public
+ */
 export type {
     DescentMode,
     DescentStepOutcome,
     DispatchDescentStepArgs,
-    DispatchStepArgs,
     LengthMode,
     Mode,
     PinConstraint,
     SolverWorkerRequest,
     SolverWorkerResponse,
-    StepArgsSource,
 } from './core/dispatch';
 // §D2 worker-prep: dispatchDescentStep + step-arg assembly + its arg/result
 // types + the store-local types (Mode/DescentMode/LengthMode/PinConstraint/
