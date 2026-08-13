@@ -322,6 +322,60 @@ this sweep stopped at 960 per the task's N list).
 
 Full data: `bench/results/2026-08-13-gpu-phase0-g6.json`.
 
+## toleranceSkeleton — T1-T3 harness proven falsifiable
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a:
+`bun bench/gpu/drive.ts toleranceSkeleton --out t-skeleton`. Implements the
+T1/T2/T3 checking machinery (rel-err comparator for T1/T2, cosine comparator
+for T3) wired to a DELIBERATELY WRONG kernel, per spec §5 Phase 0 ("tolerance-
+gate harness skeleton, T1–T3 runnable against a trivially-wrong kernel to
+prove they can fail"):
+
+- **T1** (per-pair kernel value vs f64, threshold `relErr < 1e-5`): plain-f32
+  (hi-only, `lo` discarded) pair kernel on `nearTouchPair(1e-6)`, its own
+  `wgslFn` port of `tangentPointKernelPieceCPU`'s op order (not a reuse of
+  G2's committed kernel object, to keep this spike independent of G2's
+  internals — same formula, verified separately). **`value = 0.4097`,
+  `pass = false`** — FAILS, as designed (consistent with G2's own
+  `relErrPlain ≈ 0.410` on the same fixture).
+- **T2** (total energy vs f64, threshold `relErr < 1e-6`): naive
+  LEFT-TO-RIGHT f32 accumulation over `trefoil(60)`'s ordered disjoint pairs
+  (same traversal order as `calculateEnergy`, `src/core/tangentPointEnergy.ts`
+  — only precision differs), one thread, no tree reduction. **`value =
+  1.383e-6`, `pass = false`** — narrowly fails (trefoil(60) has no near-touch
+  pairs, so cancellation is far milder than T1's fixture, but 60 f32-summed
+  positive-and-similar-magnitude terms still drift past the tighter 1e-6
+  energy gate). Honest measurement, not tuned to fail or pass.
+- **T3** (gradient cosine, threshold `cosine > 1 - 1e-6`): cosine of the
+  plain-f32 vs f64 per-(i,j)-term 4-vectors from the T1 fixture — an explicit
+  STAND-IN for a real gradient-direction pair (spec's own allowance: "you may
+  feed it the plain-f32 vs f64 per-vertex kernel values as a stand-in vector
+  pair"), not a real T3 fixture run. **`value ≈ 0.99999999999999989`, `pass =
+  true`** — the two dominant near-touch terms in this 4-vector dominate both
+  the f32 and f64 versions in the same proportion, so the direction survives
+  even though T1's magnitude comparison doesn't; this is expected for a
+  scalar-magnitude-only precision loss and does not contradict T1's failure.
+  T3's job here is proving the comparator machinery exists and reports
+  honestly, not exercising a real failure case.
+
+**Pass condition for this task: `t1.pass === false`** — satisfied. A harness
+that can't fail certifies nothing (same lesson as issue #7); this run proves
+the T1 gate is load-bearing.
+
+**PASS/FAIL semantics note:** `drive.ts`'s `status` field derives ONLY from
+adapter classification + whether the spike threw an exception (see
+`drive.ts` `main()`, the `status` ternary) — it never inspects a spike's
+returned data. This run's committed result therefore shows `"status":
+"PASS"` (the spike ran successfully against confirmed hardware) even though
+`data.t1.pass`/`data.t2.pass` are `false` inside it — that is CORRECT, not a
+bug: a milestone gate FAIL and "the tolerance-checking machinery ran and
+reported a failing measurement" are different things, and conflating them
+would make every future intentionally-failing test look like a driver
+malfunction. `data.expectedFailure: true` is the spike-level flag that marks
+this distinction explicitly for any future reader of the JSON.
+
+Full result: `bench/results/2026-08-13-gpu-t-skeleton.json`.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.

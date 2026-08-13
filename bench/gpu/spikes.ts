@@ -2,9 +2,10 @@
 // @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 1
 
 import * as THREE from 'three/webgpu';
-import { nearTouchPair, splitHiLo } from '../../src/core/fixtures';
+import { nearTouchPair, splitHiLo, trefoil } from '../../src/core/fixtures';
 import { DEFAULTS } from '../../src/core/optimizer';
-import type { Vec3 } from '../../src/core/testConfigs';
+import { calculateDisjointPairs, calculateEnergy } from '../../src/core/tangentPointEnergy';
+import type { Edge, Vec3 } from '../../src/core/testConfigs';
 
 type SpikeResult = Record<string, unknown>;
 const spikes: Record<string, () => Promise<SpikeResult>> = {};
@@ -326,6 +327,40 @@ spikes.g1 = async () => {
  * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md
  * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 8
  */
+/**
+ * ONE (i,j) endpoint-combination term of the sumK inner loop — extracted
+ * (pure, semantics-preserving) out of `tangentPointKernelPieceCPU` below so
+ * the toleranceSkeleton spike (T11) can reuse the exact same f64 formula to
+ * build its per-term "vector" stand-ins for the T3 cosine comparator, per
+ * spec §4 G2/T1 op-order requirements (ε-after-norm, cross-product component
+ * order) — same as `tangentPointKernelPieceCPU`'s own docstring cites.
+ * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T1/T3), §4 G2
+ */
+function tangentPointKernelTermCPU(
+    vertices: Vec3[],
+    i1: number,
+    i2: number,
+    i: number,
+    j: number,
+    alpha: number,
+    beta: number,
+    epsilon: number,
+): number {
+    const eIx = vertices[i2][0] - vertices[i1][0];
+    const eIy = vertices[i2][1] - vertices[i1][1];
+    const eIz = vertices[i2][2] - vertices[i1][2];
+    const dx = vertices[i][0] - vertices[j][0];
+    const dy = vertices[i][1] - vertices[j][1];
+    const dz = vertices[i][2] - vertices[j][2];
+    const d_norm = Math.sqrt(dx * dx + dy * dy + dz * dz) + epsilon; // ε after norm — tangentPointEnergy.ts:90
+    const cx = eIy * dz - eIz * dy;
+    const cy = eIz * dx - eIx * dz;
+    const cz = eIx * dy - eIy * dx;
+    const c_norm = Math.sqrt(cx * cx + cy * cy + cz * cz) + epsilon; // ε after norm — tangentPointEnergy.ts:97
+    return Math.pow(c_norm, alpha) / Math.pow(d_norm, beta);
+}
+
 function tangentPointKernelPieceCPU(
     vertices: Vec3[],
     i1: number,
@@ -336,22 +371,10 @@ function tangentPointKernelPieceCPU(
     beta: number,
     epsilon: number,
 ): number {
-    const eIx = vertices[i2][0] - vertices[i1][0];
-    const eIy = vertices[i2][1] - vertices[i1][1];
-    const eIz = vertices[i2][2] - vertices[i1][2];
-
     let sumK = 0;
     for (const i of [i1, i2]) {
         for (const j of [j1, j2]) {
-            const dx = vertices[i][0] - vertices[j][0];
-            const dy = vertices[i][1] - vertices[j][1];
-            const dz = vertices[i][2] - vertices[j][2];
-            const d_norm = Math.sqrt(dx * dx + dy * dy + dz * dz) + epsilon; // ε after norm — tangentPointEnergy.ts:90
-            const cx = eIy * dz - eIz * dy;
-            const cy = eIz * dx - eIx * dz;
-            const cz = eIx * dy - eIy * dx;
-            const c_norm = Math.sqrt(cx * cx + cy * cy + cz * cz) + epsilon; // ε after norm — tangentPointEnergy.ts:97
-            sumK += Math.pow(c_norm, alpha) / Math.pow(d_norm, beta);
+            sumK += tangentPointKernelTermCPU(vertices, i1, i2, i, j, alpha, beta, epsilon);
         }
     }
     return sumK;
@@ -722,6 +745,326 @@ spikes.g4 = async () => {
         // mistake — "Line2NodeMaterial fights it" per spec §4 G4's own FAIL
         // disposition, now confirmed on real hardware.
         note: 'zero-readback combine/scatter DATA is proven correct (mismatches counted at the buffer\'s actual post-pad stride), but the RENDER fails: three r185 silently pads any itemSize-3 StorageBufferAttribute to itemSize 4 in-place (WGSL forbids packed vec3 in storage buffers, WebGPUAttributeUtils.js:114-119) — the SAME buffer is also the instanceStart/instanceEnd vertex attribute, and Line2NodeMaterial hardcodes a vec3 read for it (Line2NodeMaterial.js:117-121), so the mutation desyncs the vertex shader and nothing is painted (0 colored pixels) — "Line2NodeMaterial fights it" per spec §4 G4 FAIL disposition',
+    };
+};
+
+// ---------------------------------------------------------------------------
+// toleranceSkeleton (T11) — T1/T2/T3 checking machinery, wired to a
+// DELIBERATELY WRONG kernel to prove the gates can fail before any real GPU
+// kernel exists. @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3
+// ---------------------------------------------------------------------------
+
+/**
+ * Generic rel-err comparator for T1 (per-pair kernel value) / T2 (total
+ * energy): `|gpu - cpuRef| / |cpuRef|`, matching the spec §3 tolerance
+ * definitions verbatim ("rel err").
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T1, T2)
+ */
+function relErrComparator(gpu: number, cpuRef: number): number {
+    return Math.abs(gpu - cpuRef) / Math.abs(cpuRef);
+}
+
+/**
+ * Generic cosine comparator for T3 (gradient direction agreement):
+ * `dot(a,b) / (|a| * |b|)`. Spec §3 T3 threshold is `cosine > 1 - 1e-6`.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T3)
+ */
+function cosineComparator(a: number[], b: number[]): number {
+    if (a.length !== b.length) throw new Error('cosineComparator: length mismatch');
+    let dot = 0;
+    let na = 0;
+    let nb = 0;
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+/**
+ * T1/T3 GPU pass — the DELIBERATELY WRONG kernel: plain-f32 positions (hi
+ * only, `lo` discarded), reusing `nearTouchPair(1e-6)` and the same op order
+ * as `tangentPointKernelPieceCPU`/G2's plain branch (ε-after-norm placement,
+ * cross-product component order) — this is the "plain-f32 G2 variant" the
+ * task calls for, factored into its own kernel so toleranceSkeleton doesn't
+ * depend on G2's committed spike internals. Returns both the summed T1 value
+ * AND the 4 individual (i,j)-combination terms (T3's stand-in vector).
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T1), §4 G2
+ */
+async function runPlainF32PairKernel(
+    renderer: THREE.WebGPURenderer,
+): Promise<{ sumPlain: number; termsPlain: number[] }> {
+    const { attributeArray, instancedArray, wgslFn } = await import('three/tsl');
+    const { vertices } = nearTouchPair(1e-6);
+    const { alpha, beta, epsilon } = DEFAULTS;
+    const { hi } = splitHiLo(vertices);
+    const hiBuf = attributeArray(hi, 'float').toReadOnly();
+    const outSumBuf = instancedArray(1, 'float');
+    const outTermsBuf = instancedArray(4, 'float');
+
+    const kernelFn = wgslFn(`
+        fn plainF32PairKernel(
+            hi: ptr<storage, array<f32>, read>,
+            outSum: ptr<storage, array<f32>, read_write>,
+            outTerms: ptr<storage, array<f32>, read_write>
+        ) -> void {
+            let alpha = ${alpha}.0;
+            let beta = ${beta}.0;
+            let eps = ${epsilon};
+
+            // Plain-f32 differences (hi only, lo discarded) — the
+            // DELIBERATELY WRONG variant under test (spec §4 G2 "gpuPlain").
+            let eIx = hi[3u] - hi[0u];
+            let eIy = hi[4u] - hi[1u];
+            let eIz = hi[5u] - hi[2u];
+
+            var sumPlain = 0.0;
+            var idx = 0u;
+            for (var ii = 0u; ii < 2u; ii = ii + 1u) {
+                for (var jj = 0u; jj < 2u; jj = jj + 1u) {
+                    let i = ii;
+                    let j = 2u + jj;
+                    let dx = hi[3u * i + 0u] - hi[3u * j + 0u];
+                    let dy = hi[3u * i + 1u] - hi[3u * j + 1u];
+                    let dz = hi[3u * i + 2u] - hi[3u * j + 2u];
+                    let d_norm = sqrt(dx * dx + dy * dy + dz * dz) + eps;
+                    let cx = eIy * dz - eIz * dy;
+                    let cy = eIz * dx - eIx * dz;
+                    let cz = eIx * dy - eIy * dx;
+                    let c_norm = sqrt(cx * cx + cy * cy + cz * cz) + eps;
+                    let term = pow(c_norm, alpha) / pow(d_norm, beta);
+                    outTerms[idx] = term;
+                    sumPlain = sumPlain + term;
+                    idx = idx + 1u;
+                }
+            }
+            outSum[0u] = sumPlain;
+        }
+    `);
+
+    const compute = kernelFn({ hi: hiBuf, outSum: outSumBuf, outTerms: outTermsBuf }).compute(1);
+    renderer.compute(compute);
+    const sumData = new Float32Array(await renderer.getArrayBufferAsync(outSumBuf.value));
+    const termsData = new Float32Array(await renderer.getArrayBufferAsync(outTermsBuf.value));
+    return { sumPlain: sumData[0], termsPlain: Array.from(termsData) };
+}
+
+/**
+ * T2 GPU pass — naive LEFT-TO-RIGHT f32 energy accumulation over
+ * `trefoil(60)`'s ordered disjoint edge pairs, one thread, sequential
+ * accumulator (the "trivially wrong" contrast to spec §2.2's eventual
+ * fixed-fanout tree reduction — no reassociation help here). Mirrors
+ * `calculateEnergy`'s formula and traversal order exactly (same ε-after-norm
+ * placement, same pair order from `calculateDisjointPairs`), but every op is
+ * f32. Vertex/edge/pair-index data is CPU-computed and uploaded (not
+ * GPU-evaluated) — only the accumulation is under test.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T2), §2.2 (reductions)
+ * @see src/core/tangentPointEnergy.ts (calculateEnergy — the f64 reference this mirrors)
+ */
+async function runNaiveF32EnergySum(
+    renderer: THREE.WebGPURenderer,
+    vertices: Vec3[],
+    edges: Edge[],
+    disjointPairs: number[][],
+): Promise<number> {
+    const { attributeArray, instancedArray, wgslFn } = await import('three/tsl');
+    const { alpha, beta, epsilon } = DEFAULTS;
+
+    const vertsFlat = new Float32Array(vertices.length * 3);
+    for (let i = 0; i < vertices.length; i++) {
+        vertsFlat[3 * i] = vertices[i][0];
+        vertsFlat[3 * i + 1] = vertices[i][1];
+        vertsFlat[3 * i + 2] = vertices[i][2];
+    }
+    const edgesFlat = new Uint32Array(edges.length * 2);
+    for (let i = 0; i < edges.length; i++) {
+        edgesFlat[2 * i] = edges[i][0];
+        edgesFlat[2 * i + 1] = edges[i][1];
+    }
+    // Ordered (I,J) pairs in calculateDisjointPairs's own order (I ascending,
+    // J ascending within disjointPairs[I]) — the SAME order calculateEnergy
+    // iterates, so the naive sum's only difference from the f64 reference is
+    // precision, not traversal order.
+    const pairs: number[] = [];
+    for (let I = 0; I < disjointPairs.length; I++) {
+        for (const J of disjointPairs[I]) pairs.push(I, J);
+    }
+    const pairCount = pairs.length / 2;
+    const pairsFlat = new Uint32Array(pairs);
+
+    const vertsBuf = attributeArray(vertsFlat, 'float').toReadOnly();
+    const edgesBuf = attributeArray(edgesFlat, 'uint').toReadOnly();
+    const pairsBuf = attributeArray(pairsFlat, 'uint').toReadOnly();
+    const outBuf = instancedArray(1, 'float');
+
+    const kernelFn = wgslFn(`
+        fn naiveEnergyKernel(
+            verts: ptr<storage, array<f32>, read>,
+            edgesArr: ptr<storage, array<u32>, read>,
+            pairsArr: ptr<storage, array<u32>, read>,
+            outTotal: ptr<storage, array<f32>, read_write>
+        ) -> void {
+            let alpha = ${alpha}.0;
+            let beta = ${beta}.0;
+            let eps = ${epsilon};
+            var total = 0.0;
+            for (var p = 0u; p < ${pairCount}u; p = p + 1u) {
+                let I = pairsArr[2u * p + 0u];
+                let J = pairsArr[2u * p + 1u];
+                let i1 = edgesArr[2u * I + 0u];
+                let i2 = edgesArr[2u * I + 1u];
+                let j1 = edgesArr[2u * J + 0u];
+                let j2 = edgesArr[2u * J + 1u];
+
+                let eIx = verts[3u * i2 + 0u] - verts[3u * i1 + 0u];
+                let eIy = verts[3u * i2 + 1u] - verts[3u * i1 + 1u];
+                let eIz = verts[3u * i2 + 2u] - verts[3u * i1 + 2u];
+                let ell_I = sqrt(eIx * eIx + eIy * eIy + eIz * eIz) + eps;
+
+                let eJx = verts[3u * j2 + 0u] - verts[3u * j1 + 0u];
+                let eJy = verts[3u * j2 + 1u] - verts[3u * j1 + 1u];
+                let eJz = verts[3u * j2 + 2u] - verts[3u * j1 + 2u];
+                let ell_J = sqrt(eJx * eJx + eJy * eJy + eJz * eJz) + eps;
+
+                var sumK = 0.0;
+                for (var ii = 0u; ii < 2u; ii = ii + 1u) {
+                    for (var jj = 0u; jj < 2u; jj = jj + 1u) {
+                        let vi = select(i2, i1, ii == 0u);
+                        let vj = select(j2, j1, jj == 0u);
+                        let dx = verts[3u * vi + 0u] - verts[3u * vj + 0u];
+                        let dy = verts[3u * vi + 1u] - verts[3u * vj + 1u];
+                        let dz = verts[3u * vi + 2u] - verts[3u * vj + 2u];
+                        let d_norm = sqrt(dx * dx + dy * dy + dz * dz) + eps;
+                        let cx = eIy * dz - eIz * dy;
+                        let cy = eIz * dx - eIx * dz;
+                        let cz = eIx * dy - eIy * dx;
+                        let c_norm = sqrt(cx * cx + cy * cy + cz * cz) + eps;
+                        sumK = sumK + pow(c_norm, alpha) / pow(d_norm, beta);
+                    }
+                }
+                total = total + 0.25 * pow(ell_I, 1.0 - alpha) * ell_J * sumK;
+            }
+            // /2: disjointPairs lists both (I,J) and (J,I) — see
+            // calculateEnergy's own /2 comment (tangentPointEnergy.ts).
+            outTotal[0u] = total * 0.5;
+        }
+    `);
+
+    const compute = kernelFn({
+        verts: vertsBuf,
+        edgesArr: edgesBuf,
+        pairsArr: pairsBuf,
+        outTotal: outBuf,
+    }).compute(1);
+    renderer.compute(compute);
+    const data = new Float32Array(await renderer.getArrayBufferAsync(outBuf.value));
+    return data[0];
+}
+
+/**
+ * T11 — tolerance-gate harness skeleton, DELIBERATELY wired to a wrong
+ * kernel so the T1-T3 checking machinery can be proven falsifiable before
+ * any real GPU kernel exists (same lesson as issue #7: "a harness that can't
+ * fail certifies nothing"). This spike's PASS CONDITION is `t1.pass ===
+ * false` — not an overall green result.
+ *
+ * - T1: plain-f32 (no two-float) pair kernel on `nearTouchPair(1e-6)` vs the
+ *   f64 CPU reference (`tangentPointKernelPieceCPU`) — EXPECTED to fail
+ *   (relErr ≈ 0.41 measured by G2's `gpuPlain`; this spike recomputes it
+ *   independently through its own kernel).
+ * - T2: naive left-to-right f32 energy accumulation over `trefoil(60)`'s
+ *   ordered disjoint pairs vs `calculateEnergy` (f64, the production
+ *   reference) — may or may not fail; trefoil(60) has no near-touch pairs so
+ *   cancellation is milder than T1's fixture (honest report either way).
+ * - T3: cosine of the plain-f32 vs f64 per-(i,j)-term "vectors" from the T1
+ *   fixture — a stand-in for a real gradient-direction comparison; proves
+ *   the COMPARATOR exists and reports honestly, not a real T3 fixture run.
+ *
+ * `expectedFailure: true` marks this run for the driver/README: T1 failing
+ * here is the intended, falsifying result, not a milestone-gate FAIL — see
+ * bench/gpu/README.md "toleranceSkeleton" section for how `drive.ts`'s
+ * PASS/FAIL derivation (adapter + exception only, never gate-value content)
+ * keeps this from ever being misrecorded as a gate FAIL.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T1-T3)
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 11
+ */
+spikes.toleranceSkeleton = async () => {
+    const renderer = new THREE.WebGPURenderer();
+    await renderer.init();
+
+    // --- T1 + T3 fixture: nearTouchPair(1e-6), same as G2. ---
+    const { vertices: pairVertices } = nearTouchPair(1e-6);
+    const { alpha, beta, epsilon } = DEFAULTS;
+    const cpu64Sum = tangentPointKernelPieceCPU(pairVertices, 0, 1, 2, 3, alpha, beta, epsilon);
+    const cpu64Terms: number[] = [];
+    for (const i of [0, 1]) {
+        for (const j of [2, 3]) {
+            cpu64Terms.push(
+                tangentPointKernelTermCPU(pairVertices, 0, 1, i, j, alpha, beta, epsilon),
+            );
+        }
+    }
+    const { sumPlain, termsPlain } = await runPlainF32PairKernel(renderer);
+
+    const t1Value = relErrComparator(sumPlain, cpu64Sum);
+    const t1Threshold = 1e-5; // spec §3 T1
+    const t1 = {
+        value: t1Value,
+        threshold: t1Threshold,
+        pass: t1Value < t1Threshold,
+        gpu: sumPlain,
+        cpu64: cpu64Sum,
+    };
+
+    // --- T2 fixture: trefoil(60). ---
+    const { vertices: trefoilVertices, edges: trefoilEdges } = trefoil(60);
+    const disjointPairs = calculateDisjointPairs(trefoilEdges);
+    const cpu64Energy = calculateEnergy(
+        trefoilVertices,
+        trefoilEdges,
+        disjointPairs,
+        alpha,
+        beta,
+        epsilon,
+    );
+    const gpuEnergy = await runNaiveF32EnergySum(
+        renderer,
+        trefoilVertices,
+        trefoilEdges,
+        disjointPairs,
+    );
+    const t2Value = relErrComparator(gpuEnergy, cpu64Energy);
+    const t2Threshold = 1e-6; // spec §3 T2
+    const t2 = {
+        value: t2Value,
+        threshold: t2Threshold,
+        pass: t2Value < t2Threshold,
+        gpu: gpuEnergy,
+        cpu64: cpu64Energy,
+    };
+
+    // --- T3: cosine of the T1 fixture's plain-f32 vs f64 per-term vectors
+    // (stand-in for a real gradient-direction pair; see docstring above). ---
+    const t3Value = cosineComparator(termsPlain, cpu64Terms);
+    const t3Threshold = 1 - 1e-6; // spec §3 T3
+    const t3 = {
+        value: t3Value,
+        threshold: t3Threshold,
+        pass: t3Value > t3Threshold,
+        gpuVec: termsPlain,
+        cpuVec: cpu64Terms,
+    };
+
+    return {
+        gate: 'toleranceSkeleton',
+        // T1 is DESIGNED to fail on this fixture — see docstring. Consumed by
+        // drive.ts/README so a "failing" tolerance result is never conflated
+        // with a milestone gate FAIL.
+        expectedFailure: true,
+        t1,
+        t2,
+        t3,
     };
 };
 
