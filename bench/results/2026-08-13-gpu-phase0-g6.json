@@ -1,0 +1,83 @@
+{
+  "exactCondMaxN": 240,
+  "flagged": [
+    {
+      "kappaTimesUf32": 2.1345330604601647,
+      "mode": "perEdge",
+      "n": 480
+    },
+    {
+      "kappaTimesUf32": 54.63926598222091,
+      "mode": "perEdge",
+      "n": 960
+    }
+  ],
+  "gate": "G6",
+  "growthExponent": {
+    "perEdge": 4.512114587825197,
+    "total": 3.2845321835919328
+  },
+  "rows": [
+    {
+      "kappa": 160.22753112955843,
+      "kappaTimesUf32": 9.549560855321683e-6,
+      "mode": "total",
+      "n": 60
+    },
+    {
+      "kappa": 3745.9844521122905,
+      "kappaTimesUf32": 0.0002232606733458925,
+      "mode": "perEdge",
+      "n": 60
+    },
+    {
+      "kappa": 1425.0573344895397,
+      "kappaTimesUf32": 8.493341713557656e-5,
+      "mode": "total",
+      "n": 120
+    },
+    {
+      "kappa": 56056.18404038219,
+      "kappaTimesUf32": 0.0033409485688067784,
+      "mode": "perEdge",
+      "n": 120
+    },
+    {
+      "kappa": 13978.240714768304,
+      "kappaTimesUf32": 0.0008331031466001909,
+      "mode": "total",
+      "n": 240
+    },
+    {
+      "kappa": 1400899.116055319,
+      "kappaTimesUf32": 0.08349358731689702,
+      "mode": "perEdge",
+      "n": 240
+    },
+    {
+      "kappa": 140458.290840075,
+      "kappaTimesUf32": 0.00837131413406847,
+      "mode": "total",
+      "n": 480
+    },
+    {
+      "kappa": 35814313.094969206,
+      "kappaTimesUf32": 2.1345330604601647,
+      "mode": "perEdge",
+      "n": 480
+    },
+    {
+      "kappa": 1417728.8104008473,
+      "kappaTimesUf32": 0.0844966370998905,
+      "mode": "total",
+      "n": 960
+    },
+    {
+      "kappa": 916766207.7553844,
+      "kappaTimesUf32": 54.63926598222091,
+      "mode": "perEdge",
+      "n": 960
+    }
+  ],
+  "uF32": 5.96e-8
+}

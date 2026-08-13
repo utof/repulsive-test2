@@ -271,6 +271,57 @@ already uses, with `instanceStart`/`instanceEnd` bound to
   + a frame of latency) unless a future milestone spikes option (a) or (b).
 - Full result: `bench/results/2026-08-13-gpu-g4.json`.
 
+## G6 — perEdge conditioning sweep
+
+Measured 2026-08-13, `oracle/check_kappa_peredge.py` (`uv run --with numpy
+--with scipy python oracle/check_kappa_peredge.py`), trefoil N=60/120/240/
+480/960, both constraint modes. K = [[A3, C^T], [C, 0]] assembled via the
+existing oracle machinery (`tpe_stage1_oracle.assemble_inner_product` +
+`tpe_constraints_oracle`'s `barycenter_block`/`total_length_block`/
+`edge_lengths_block`), same trefoil parametrization as `src/core/fixtures.ts`
+transcribed to numpy. kappa_2(K) estimated by power iteration (sigma_max) +
+inverse iteration via `scipy.linalg.lu_factor`/`lu_solve` (sigma_min) — the
+[PREC Q2] method, K symmetric so singular values = |eigenvalues|. **Method
+used per N:** N=60/120/240 — `numpy.linalg.cond` (exact SVD, cheap at this
+size) as the reported value, cross-checked against power/inverse iteration
+(agreed within 0.06% at every point, e.g. N=240 perEdge: iteration
+1.4009e6 vs cond 1.4009e6). N=480/960 — power/inverse iteration only (dense
+SVD too slow to be worth it at this size; A3 assembly itself, the O(N²) pure-
+Python part, is the dominant cost: 0.39s/1.66s/6.46s/25.52s/102.67s at
+N=60/120/240/480/960).
+
+| N | mode | kappa | kappa·u_f32 | method |
+|---|---|---|---|---|
+| 60 | total | 1.602e2 | 9.55e-6 | cond (cross-checked) |
+| 60 | perEdge | 3.746e3 | 2.23e-4 | cond (cross-checked) |
+| 120 | total | 1.425e3 | 8.49e-5 | cond (cross-checked) |
+| 120 | perEdge | 5.606e4 | 3.34e-3 | cond (cross-checked) |
+| 240 | total | 1.398e4 | 8.33e-4 | cond (cross-checked) |
+| 240 | perEdge | 1.401e6 | 8.35e-2 | cond (cross-checked) |
+| 480 | total | 1.405e5 | 8.37e-3 | power/inverse iteration |
+| 480 | perEdge | 3.581e7 | **2.13** | power/inverse iteration |
+| 960 | total | 1.418e6 | 8.45e-2 | power/inverse iteration |
+| 960 | perEdge | 9.168e8 | **54.6** | power/inverse iteration |
+
+Fitted growth exponent (log-log): **total mode kappa ~ N^3.285** — matches
+[PREC Q2]'s N^3.3 growth law closely (different fixture, same law), and the
+absolute values at N=60/120 are within ~2x of extrapolating [PREC Q2]'s
+32/64/128 points forward. **perEdge mode kappa ~ N^4.512** — steeper growth,
+new data (perEdge conditioning was untested before this gate).
+
+**G6 GATE result: FLAGGED.** `kappa·u_f32 > 0.1` at **perEdge N=480**
+(2.13) and **perEdge N=960** (54.6) — per spec §4 G6, **perEdge mode falls
+back to CPU f64 solve at N≥480**; the milestone's f32/GPU-solve claims (§2.4)
+are narrowed to **total-length mode** at these sizes, per spec §1's scoping.
+perEdge N≤240 stays under the gate (worst case 240: 0.0835, i.e. ~83% of the
+threshold — close enough that a future GPU-solve variant should re-check it
+at N=240 rather than assume headroom). total mode stays comfortably under
+the gate through N=960 (worst case 0.0845, also close to the threshold but
+on the currently-in-scope side — re-verify if N=1000 is measured directly,
+this sweep stopped at 960 per the task's N list).
+
+Full data: `bench/results/2026-08-13-gpu-phase0-g6.json`.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.
@@ -283,5 +334,5 @@ Filled by Task 12 once every gate below has a committed result.
 | G2 (spike) | PASS | relErr≈4.60e-6 (<1e-5), relErrPlain≈0.410 (>1e-3, not vacuous) | two-float positions survive this compiler's reassociation |
 | G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |
 | G4 | FAIL | readbacksDuringLoop=0, mismatches=0 (data OK), rendered=false, coloredPixels=0/65536 | Line2NodeMaterial vec3-vs-padded-vec4 storage-buffer collision; Phase 3 needs a copy-bridge or custom material, or falls back to 1-readback/frame |
-| G6 | | | |
+| G6 | FLAGGED | total N^3.285, perEdge N^4.512; perEdge kappa·u_f32 > 0.1 at N=480 (2.13), N=960 (54.6) | perEdge falls back to CPU f64 solve at N≥480; milestone f32-solve claims narrowed to total-length mode at these sizes |
 | Baselines | | | |
