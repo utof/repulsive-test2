@@ -1,0 +1,75 @@
+{
+  "gate": "toleranceSkeleton",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "23b4161",
+  "date": "2026-08-13",
+  "data": {
+    "gate": "toleranceSkeleton",
+    "expectedFailure": true,
+    "t1": {
+      "value": 0.40965505044198985,
+      "threshold": 0.00001,
+      "pass": false,
+      "gpu": 75524494937794020000,
+      "cpu64": 127932821301069870000
+    },
+    "t2": {
+      "value": 0.0000013834623988442792,
+      "threshold": 0.000001,
+      "pass": false,
+      "gpu": 16.596790313720703,
+      "cpu64": 16.59681327478781
+    },
+    "t3": {
+      "value": 0.9999999999999999,
+      "threshold": 0.999999,
+      "pass": true,
+      "gpuVec": [
+        37762247468897010000, 2.647144527203193e-20, 2.647144527203193e-20, 37762247468897010000
+      ],
+      "cpuVec": [
+        63966410650534940000, 1.562617190850269e-20, 1.562617190850269e-20, 63966410650534940000
+      ]
+    }
+  },
+  "consoleLines": []
+}

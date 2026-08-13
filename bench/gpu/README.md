@@ -1,0 +1,405 @@
+# bench/gpu — GPU gate harness
+
+CDP-driven headless-Chrome harness for the WebGPU solver Phase 0 kill gates.
+@see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3–§5
+@see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md
+
+## Winning launch recipe (G0a)
+
+Verified 2026-08-13 against the real NVIDIA Quadro RTX 3000 in this machine
+(`git a1f6022`). **Headless succeeded on the first flag set** — no headed
+fallback was needed:
+
+```
+google-chrome \
+  --headless=new \
+  --enable-unsafe-webgpu \
+  --enable-features=Vulkan \
+  --use-angle=vulkan \
+  --enable-gpu \
+  --no-sandbox \
+  --remote-debugging-port=9223 \
+  --user-data-dir=<fresh temp dir> \
+  http://localhost:3000/bench/gpu/harness.html
+```
+
+Result: `vendor: "nvidia"`, `architecture: "turing"` (Quadro RTX 3000 is a
+Turing-class part) — a genuine hardware adapter, not SwiftShader/llvmpipe.
+`bench/gpu/drive.ts` tries `FLAG_SETS` in this order automatically and
+records whichever one first classifies as `hardware`; the raw result lives at
+`bench/results/2026-08-13-gpu-g0a.json`.
+
+A **fresh `--user-data-dir` per Chrome launch is required** — reusing the
+default profile can make `google-chrome` hand off to an already-running
+instance and silently ignore the new process's flags (including
+`--remote-debugging-port`), which looks like a hang, not a flag failure.
+
+## INVALID vs FAIL semantics
+
+- **FAIL** — a gate ran against a confirmed hardware adapter and the
+  measurement itself did not meet its threshold (e.g. G1's batching ratio,
+  G3's CV). This is real, recordable evidence.
+- **INVALID** — a gate ran against a software adapter (SwiftShader, llvmpipe,
+  or anything `classifyAdapter()` in `drive.ts` calls `'software'`). Software
+  rasterizers do not exercise real GPU dispatch/timing/precision behavior, so
+  *any* number from such a run is worthless for a gate decision — per spec §3
+  it must be **rerun with the recipe above**, never recorded as a gate
+  result. `drive.ts` marks non-G0a runs `"status": "INVALID"` automatically
+  when the adapter it detects is software; it never fabricates a PASS/FAIL
+  for those.
+- G0a itself is special: it *is* the hardware-adapter check. If no flag set
+  (headless or headed) yields hardware, that is a **STOP-BRANCH**
+  (`"status": "FAIL"` with full per-flag-set `attempts` diagnostics) — the
+  rest of the browser-dependent gates cannot run honestly. See plan Task 1
+  Step 3.
+
+## Running a spike
+
+Dev server must be up: `bun run dev` (serves `bench/gpu/harness.html` and
+bundles `bench/gpu/spikes.ts` on the fly).
+
+```
+bun bench/gpu/drive.ts adapterInfo --out g0a   # G0a — must be run first
+bun bench/gpu/drive.ts <spike> --out <label>   # any later spike, once G0a has PASSed
+```
+
+- `adapterInfo` (gate `G0a`) tries every entry in `FLAG_SETS` until one
+  classifies as hardware, recording every attempt.
+- Every other spike reads the flags from the most recent **PASSing**
+  `bench/results/*-gpu-g0a*.json` and launches Chrome once with those flags —
+  it does not re-search `FLAG_SETS`. If no passing G0a result file exists,
+  the driver refuses to run and exits non-zero.
+- Results are written to `bench/results/<date>-gpu-<label>.json`:
+  `{ gate, status, adapter, flags, attempts, gitShaShort, date, data, consoleLines }`.
+
+## Console noise to ignore
+
+These lines can appear even on a genuine hardware adapter and are not
+evidence of software fallback; `drive.ts`'s `CONSOLE_NOISE` filters them out
+of `consoleLines` automatically:
+
+- `RangeError: createBuffer failed, size (144) is too large` (~60/s from
+  three's fat-lines)
+- `Instance dropped in popErrorScope`
+- Duplicate-key `0` React warning (`Warning: Encountered two children with
+  the same key, \`0\`...`)
+
+**Hardware-headless canvas-present noise (verified 2026-08-13, phase0 T4):**
+when the *app* (not the harness page) runs under `--headless=new` on the
+hardware Vulkan adapter, every presented frame spams a 4-line Dawn
+validation chain starting with:
+
+- `GPUValidationError: Requested allocation size (…) is smaller than the
+  image requires (…) at ImportMemory (…MemoryServiceImplementationOpaqueFD.cpp…)`
+  followed by `[Invalid Texture]` / `[Invalid TextureView]` /
+  `[Invalid CommandBuffer]` cascade errors on `renderContext_*`.
+
+This is the headless compositor frame-export path (canvas presentation),
+NOT an app bug and NOT adapter fallback — A/B verified identical with and
+without the `trackTimestamp` change, and absent in headed mode. It only
+affects pages that *present a canvas* headlessly; pure compute spikes are
+untouched. G4 (which renders frames) verifies via a buffer readback, not
+the presented image, so these lines don't invalidate it — but grep them
+out of any console-based assertion.
+
+## G3 — timestamp benchmarking viability
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a (no
+`--enable-webgpu-developer-features` needed): 5 runs of 100 batched dispatches
+of a 65536-thread FMA kernel (`Loop(4096)` inner iterations, tuned so the
+100-dispatch total lands at ~16 ms, comfortably above Dawn's 100 µs
+quantization floor) gave `totalsMs ≈ [16.04, 16.01, 16.03, 15.99, 15.99]`,
+`cv ≈ 0.0013` (0.13%) — **PASS** against the `cv < 0.1` gate by two orders of
+magnitude. `renderer.info.compute.timestamp` is overwritten (not
+accumulated) by each `resolveTimestampsAsync()` call
+(`WebGPUTimestampQueryPool.js:94-121` resets `currentQueryIndex`/
+`queryOffsets` inside `_resolveQueries()`), so no `renderer.info.reset()`
+between runs was needed. GPU-timestamp benchmarking (`trackTimestamp` +
+`resolveTimestampsAsync`) is viable for the remaining perf gates on this
+machine; no CPU-wall-clock fallback required.
+
+## G0t — throughput probe (G5 estimator input)
+
+Verified 2026-08-13 against the Quadro RTX 3000, G3 methodology (5 runs,
+medians, GPU timestamps — G3 PASSed so no wall-clock fallback needed):
+
+- **FMA rate:** 2²² threads × 64-iteration raw-WGSL multiply-add chain
+  (`wgslFn`, data-dependent per-thread accumulator so neither TSL nor the
+  driver compiler can fold it), batched 20× per run. `fmaGflops ≈ 1505`
+  (≈28% of the ≈5.3 TFLOPs f32 peak assumption — inside the 20–70% sanity
+  band).
+- **Dense matvec:** `y = M·x`, one thread per row, 3072×3072 f32 `M` seeded
+  deterministically (xorshift32, no `Math.random`) and uploaded, `wgslFn`
+  with `ptr<storage, ..., read>`/`read_write` params, batched 200× per run.
+  `matvecMs ≈ 0.463` (inside the expected 0.1–0.5 ms band, ≈3.2–4.1× the
+  ≈0.11–0.15 ms bandwidth floor — consistent with a naive, non-tiled
+  per-row kernel, not a sign the kernel was optimized away), `matvecGflops
+  ≈ 40.75`.
+- Both `fmaTotalsMs`/`matvecTotalsMs` arrays show the median (not mean) is
+  the right statistic: the matvec's first run is a ~2× outlier (`177 ms` vs.
+  a steady `~92-93 ms`), a one-time pipeline/shader-compile warm-up cost,
+  not throughput signal.
+- `wgslFn` storage-buffer-parameter syntax (`ptr<storage, array<f32>,
+  read|read_write>` + a named-object call site, e.g.
+  `matvecFn({ M: matBuf, x: xBuf, y: yBuf, row: instanceIndex })`) has no
+  local three.js example in this repo's `node_modules`; verified against
+  https://discourse.threejs.org/t/how-to-use-storagebufferattribute-as-a-input-to-wgslfn/73006
+  and https://blog.maximeheckel.com/posts/field-guide-to-tsl-and-webgpu/
+  (fetched 2026-08-13).
+- Full numbers: `bench/results/2026-08-13-gpu-g0t.json`.
+
+## G1 — dispatch-batching kill gate
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a: 250
+DISTINCT no-op compute nodes (each a separate `Fn(() => {...})()` closure
+over its own index `i`, `.compute(1)` — 1 workgroup each), 5 runs/medians,
+sequential-dispatches-with-a-single-terminal-sync methodology (CPU wall
+time of the submission loop only; `device.queue.onSubmittedWorkDone()` is a
+between-run barrier, not part of the timed region)
+[research doc §4, `docs/2026-08-13-ai-research-webgpu-compute.md`]:
+
+- Arm A (batched, one `renderer.compute([...250 nodes])`):
+  `batchedMs ≈ 0.3` (runs `[0.8, 0.3, 0.3, 0.5, 0.3]`).
+- Arm B (unbatched, 250 separate `renderer.compute(node)` calls):
+  `unbatchedMs ≈ 2.3` (runs `[3.2, 2.3, 2.2, 4.0, 2.2]`).
+- `ratio ≈ 0.130`.
+- **PASS**: `batchedMs (0.3) < 2` AND `batchedMs (0.3) < 0.25 × unbatchedMs
+  (0.575)`. Both numbers land well below the plan's rough expected band
+  (≈0.8–1.7 ms batched / ≈7.5 ms unbatched) — this machine's Vulkan/Dawn
+  dispatch overhead is lower than the cross-machine estimate in the
+  implementation research doc, but the batching *ratio* (the load-bearing
+  half of the gate) holds by a wide margin either way.
+- Per-frame iterative GPU solve loop is NOT dead — dispatch batching
+  amortizes as required; the milestone is not reduced to kernels-only on
+  this gate.
+- Full result: `bench/results/2026-08-13-gpu-g1.json`.
+
+## G2 — two-float reassociation spike
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a. Tests
+the two-float positions trick through the PRODUCTION tangent-point kernel
+arithmetic (not a standalone expression) — a `wgslFn` port of
+`calculateEnergy`'s inner (i,j) loop [`src/core/tangentPointEnergy.ts:60-100`]
+for ONE edge pair (`nearTouchPair(1e-6)`'s edges I=[0,1]/J=[2,3]), same op
+order and ε-after-norm placement, α=3/β=6/ε=1e-10 from `DEFAULTS`
+(`src/core/optimizer.ts:18`). Two `sumK`-shaped outputs computed in the same
+kernel run: `gpu` from two-float differences
+(`(hi_i − hi_j) + (lo_i − lo_j)` before any other arithmetic), `gpuPlain`
+from hi-only plain-f32 differences:
+
+- `gpu ≈ 1.27932232890620840×10²⁰`, `cpu64 ≈ 1.27932821301069870×10²⁰`,
+  **`relErr ≈ 4.60×10⁻⁶`** — PASS against `relErr < 1e-5`.
+- `gpuPlain ≈ 7.5524494937794020×10¹⁹`, **`relErrPlain ≈ 0.410`** (41%) —
+  comfortably `> 1e-3`, confirming the fixture stresses cancellation and the
+  spike isn't vacuous (the two clauses are checking different things: `gpu`
+  proves the two-float trick survives this compiler's reassociation
+  freedom [PREC Q3]; `gpuPlain` proves the fixture would have caught it if
+  it hadn't).
+- The two disjoint-edge endpoint pairs with `‖d‖ = gap = 1e-6` (raised to
+  `-β = -6` in the kernel) dominate `sumK` and are exactly what makes
+  `relErrPlain` this large — the near-touch cancellation the fixture was
+  designed to exercise (`src/core/fixtures.ts` `nearTouchPair` docstring).
+- `splitHiLo` (`src/core/fixtures.ts`) hi/lo split has its own measured
+  precision floor from `lo = fround(residual)` double-rounding: reconstructed
+  `nearTouchPair(1e-6)` gap recovers to `relErr ≈ 2.5×10⁻⁹` (not the
+  originally-hoped 1e-9 — see `test/core/fixtures.test.ts`'s `splitHiLo`
+  describe block for the derivation) — still ~1e5× better than plain f32
+  and far inside the G2 kernel's `1e-5` gate.
+- Full result: `bench/results/2026-08-13-gpu-g2.json`.
+
+## G4 — zero-readback render spike
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a. 120
+frames of a 64-edge open polyline (`y = sin(x + t)`) were CPU-precomputed as
+f32 hi/lo pairs (`splitHiLo`) and uploaded once per frame; each frame then
+ran the spec §2.7 combine/scatter kernel (`pos = hi + lo` per vertex,
+scattered into edge `e`'s `instanceStart`/`instanceEnd`) entirely on GPU and
+rendered through the SAME `Line2NodeMaterial` fat-line material the app
+already uses, with `instanceStart`/`instanceEnd` bound to
+`StorageBufferAttribute`s (`STORAGE | VERTEX` usage,
+`WebGPUBackend.js:2564`) instead of `Curve.tsx`'s per-frame
+`setPositions()`. **FAIL, with a precisely isolated root cause** —
+`bench/results/2026-08-13-gpu-g4.json`:
+
+- `readbacksDuringLoop: 0` — the 120-frame loop issued zero readbacks, as required.
+- `mismatches: 0` — the verification readback of the last frame's instance
+  buffer matches the uploaded wave f32-exact, per element, once compared at
+  the buffer's ACTUAL post-mutation stride (see below). **The zero-readback
+  combine/scatter DATA pipeline is proven correct.**
+- `rendered: false`, `coloredPixels: 0` (of 65536) — **nothing was painted.**
+  The render itself is broken.
+- **Root cause, confirmed via three r185 source + a stride/pixel probe, not
+  guesswork:** WGSL forbids packed `vec3` in storage buffers, so
+  `WebGPUAttributeUtils.createAttribute()` silently pads ANY itemSize-3
+  `StorageBufferAttribute` to itemSize 4 in place on first GPU use
+  (`node_modules/three/src/renderers/webgpu/utils/WebGPUAttributeUtils.js:114-119`,
+  "WGSL does not support packed vec3 data in storage buffers, pad to
+  vec4") — mutating the SAME attribute object's `.itemSize`/`.array` that's
+  also bound as the `instanceStart`/`instanceEnd` VERTEX attribute.
+  `Line2NodeMaterial` hardcodes a vec3 read for it
+  (`vec4(instanceStart, 1.0)`,
+  `node_modules/three/src/materials/nodes/Line2NodeMaterial.js:117-121`),
+  which desyncs against the mutated itemSize-4 buffer — surfaced by a
+  captured console warning ("Length of parameters exceeds maximum length of
+  function 'vec4()' type") and confirmed decisively by the 0/65536
+  colored-pixel readback. This is a structural collision between a WGSL
+  requirement (three.js's own correct padding) and `Line2NodeMaterial`'s
+  fixed shader graph, not a spike plumbing mistake — exactly the "Line2NodeMaterial
+  fights it" risk research doc §2 and spec §2.7/§4 G4 flagged in advance,
+  now confirmed on real hardware.
+- Separate, unrelated finding worth recording: the FIRST attempt presented
+  directly to the default canvas swapchain and hit a genuine
+  `VK_ERROR_OUT_OF_DEVICE_MEMORY` device loss AFTER all 120 frames rendered
+  successfully (confirmed via a temporary per-frame log: the loop completed,
+  the crash surfaced only in the post-loop verification readback) — an
+  escalation of the documented "Hardware-headless canvas-present noise"
+  above from log spam to a real leak at ~120 presented frames. The final
+  spike renders into an offscreen `THREE.RenderTarget` instead (same vertex/
+  fragment pipeline, no swapchain export), which resolved it. Anyone
+  presenting a WebGPU canvas headlessly for >~100 frames on this stack
+  should expect this.
+- **Consequence per spec §4 G4's own disposition:** Phase 3 cannot bind a
+  compute-writable `StorageBufferAttribute` directly as `Curve.tsx`'s
+  `instanceStart`/`instanceEnd` without either (a) a GPU-side
+  `copyBufferToBuffer` from a flat (non-vec3, unpadded) compute-written
+  storage buffer into a separate plain (non-storage) vertex buffer each
+  frame — still zero CPU readback, one extra GPU-side copy, unverified here
+  — or (b) a custom material replacing `Line2NodeMaterial`'s hardcoded
+  vertex node. Neither was attempted (spec: "do NOT hack around it"; a
+  bespoke bridge/material is real implementation work, not a Phase 0 spike).
+  Ceiling per spec: Phase 3 falls back to the 1-readback/frame path (~0.5 ms
+  + a frame of latency) unless a future milestone spikes option (a) or (b).
+- Full result: `bench/results/2026-08-13-gpu-g4.json`.
+
+## G6 — perEdge conditioning sweep
+
+Measured 2026-08-13, `oracle/check_kappa_peredge.py` (`uv run --with numpy
+--with scipy python oracle/check_kappa_peredge.py`), trefoil N=60/120/240/
+480/960, both constraint modes. K = [[A3, C^T], [C, 0]] assembled via the
+existing oracle machinery (`tpe_stage1_oracle.assemble_inner_product` +
+`tpe_constraints_oracle`'s `barycenter_block`/`total_length_block`/
+`edge_lengths_block`), same trefoil parametrization as `src/core/fixtures.ts`
+transcribed to numpy. kappa_2(K) estimated by power iteration (sigma_max) +
+inverse iteration via `scipy.linalg.lu_factor`/`lu_solve` (sigma_min) — the
+[PREC Q2] method, K symmetric so singular values = |eigenvalues|. **Method
+used per N:** N=60/120/240 — `numpy.linalg.cond` (exact SVD, cheap at this
+size) as the reported value, cross-checked against power/inverse iteration
+(agreed within 0.06% at every point, e.g. N=240 perEdge: iteration
+1.4009e6 vs cond 1.4009e6). N=480/960 — power/inverse iteration only (dense
+SVD too slow to be worth it at this size; A3 assembly itself, the O(N²) pure-
+Python part, is the dominant cost: 0.39s/1.66s/6.46s/25.52s/102.67s at
+N=60/120/240/480/960).
+
+| N | mode | kappa | kappa·u_f32 | method |
+|---|---|---|---|---|
+| 60 | total | 1.602e2 | 9.55e-6 | cond (cross-checked) |
+| 60 | perEdge | 3.746e3 | 2.23e-4 | cond (cross-checked) |
+| 120 | total | 1.425e3 | 8.49e-5 | cond (cross-checked) |
+| 120 | perEdge | 5.606e4 | 3.34e-3 | cond (cross-checked) |
+| 240 | total | 1.398e4 | 8.33e-4 | cond (cross-checked) |
+| 240 | perEdge | 1.401e6 | 8.35e-2 | cond (cross-checked) |
+| 480 | total | 1.405e5 | 8.37e-3 | power/inverse iteration |
+| 480 | perEdge | 3.581e7 | **2.13** | power/inverse iteration |
+| 960 | total | 1.418e6 | 8.45e-2 | power/inverse iteration |
+| 960 | perEdge | 9.168e8 | **54.6** | power/inverse iteration |
+
+Fitted growth exponent (log-log): **total mode kappa ~ N^3.285** — matches
+[PREC Q2]'s N^3.3 growth law closely (different fixture, same law), and the
+absolute values at N=60/120 are within ~2x of extrapolating [PREC Q2]'s
+32/64/128 points forward. **perEdge mode kappa ~ N^4.512** — steeper growth,
+new data (perEdge conditioning was untested before this gate).
+
+**G6 GATE result: FLAGGED.** `kappa·u_f32 > 0.1` at **perEdge N=480**
+(2.13) and **perEdge N=960** (54.6) — per spec §4 G6, **perEdge mode falls
+back to CPU f64 solve at N≥480**; the milestone's f32/GPU-solve claims (§2.4)
+are narrowed to **total-length mode** at these sizes, per spec §1's scoping.
+perEdge N≤240 stays under the gate (worst case 240: 0.0835, i.e. ~83% of the
+threshold — close enough that a future GPU-solve variant should re-check it
+at N=240 rather than assume headroom). total mode stays comfortably under
+the gate through N=960 (worst case 0.0845, also close to the threshold but
+on the currently-in-scope side — re-verify if N=1000 is measured directly,
+this sweep stopped at 960 per the task's N list).
+
+Full data: `bench/results/2026-08-13-gpu-phase0-g6.json`.
+
+## toleranceSkeleton — T1-T3 harness proven falsifiable
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a:
+`bun bench/gpu/drive.ts toleranceSkeleton --out t-skeleton`. Implements the
+T1/T2/T3 checking machinery (rel-err comparator for T1/T2, cosine comparator
+for T3) wired to a DELIBERATELY WRONG kernel, per spec §5 Phase 0 ("tolerance-
+gate harness skeleton, T1–T3 runnable against a trivially-wrong kernel to
+prove they can fail"):
+
+- **T1** (per-pair kernel value vs f64, threshold `relErr < 1e-5`): plain-f32
+  (hi-only, `lo` discarded) pair kernel on `nearTouchPair(1e-6)`, its own
+  `wgslFn` port of `tangentPointKernelPieceCPU`'s op order (not a reuse of
+  G2's committed kernel object, to keep this spike independent of G2's
+  internals — same formula, verified separately). **`value = 0.4097`,
+  `pass = false`** — FAILS, as designed (consistent with G2's own
+  `relErrPlain ≈ 0.410` on the same fixture).
+- **T2** (total energy vs f64, threshold `relErr < 1e-6`): naive
+  LEFT-TO-RIGHT f32 accumulation over `trefoil(60)`'s ordered disjoint pairs
+  (same traversal order as `calculateEnergy`, `src/core/tangentPointEnergy.ts`
+  — only precision differs), one thread, no tree reduction. **`value =
+  1.383e-6`, `pass = false`** — narrowly fails (trefoil(60) has no near-touch
+  pairs, so cancellation is far milder than T1's fixture, but 60 f32-summed
+  positive-and-similar-magnitude terms still drift past the tighter 1e-6
+  energy gate). Honest measurement, not tuned to fail or pass.
+- **T3** (gradient cosine, threshold `cosine > 1 - 1e-6`): cosine of the
+  plain-f32 vs f64 per-(i,j)-term 4-vectors from the T1 fixture — an explicit
+  STAND-IN for a real gradient-direction pair (spec's own allowance: "you may
+  feed it the plain-f32 vs f64 per-vertex kernel values as a stand-in vector
+  pair"), not a real T3 fixture run. **`value ≈ 0.99999999999999989`, `pass =
+  true`** — the two dominant near-touch terms in this 4-vector dominate both
+  the f32 and f64 versions in the same proportion, so the direction survives
+  even though T1's magnitude comparison doesn't; this is expected for a
+  scalar-magnitude-only precision loss and does not contradict T1's failure.
+  T3's job here is proving the comparator machinery exists and reports
+  honestly, not exercising a real failure case.
+
+**Pass condition for this task: `t1.pass === false`** — satisfied. A harness
+that can't fail certifies nothing (same lesson as issue #7); this run proves
+the T1 gate is load-bearing.
+
+**PASS/FAIL semantics note:** `drive.ts`'s `status` field derives ONLY from
+adapter classification + whether the spike threw an exception (see
+`drive.ts` `main()`, the `status` ternary) — it never inspects a spike's
+returned data. This run's committed result therefore shows `"status":
+"PASS"` (the spike ran successfully against confirmed hardware) even though
+`data.t1.pass`/`data.t2.pass` are `false` inside it — that is CORRECT, not a
+bug: a milestone gate FAIL and "the tolerance-checking machinery ran and
+reported a failing measurement" are different things, and conflating them
+would make every future intentionally-failing test look like a driver
+malfunction. `data.expectedFailure: true` is the spike-level flag that marks
+this distinction explicitly for any future reader of the JSON.
+
+Full result: `bench/results/2026-08-13-gpu-t-skeleton.json`.
+
+## Phase 0 gate report
+
+Final (Task 12, 2026-08-13). Every row is backed by a committed result file
+under `bench/results/`; the go/no-go reading follows the table.
+
+| Gate | Result | Number | Consequence |
+|---|---|---|---|
+| G0a | PASS | nvidia/turing, hardware Vulkan adapter | browser gates unblocked |
+| G0t | recorded | fmaGflops≈1505, matvecMs≈0.463, matvecGflops≈40.75 | G5 estimator input |
+| G1 | PASS | batchedMs≈0.3, unbatchedMs≈2.3, ratio≈0.130 | per-frame GPU solve loop not dead; batching amortizes |
+| G2 (spike) | PASS | relErr≈4.60e-6 (<1e-5), relErrPlain≈0.410 (>1e-3, not vacuous) | two-float positions survive this compiler's reassociation |
+| G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |
+| G4 | FAIL | readbacksDuringLoop=0, mismatches=0 (data OK), rendered=false, coloredPixels=0/65536 | Line2NodeMaterial vec3-vs-padded-vec4 storage-buffer collision; Phase 3 needs a copy-bridge or custom material, or falls back to 1-readback/frame |
+| G6 | FLAGGED | total N^3.285, perEdge N^4.512; perEdge kappa·u_f32 > 0.1 at N=480 (2.13), N=960 (54.6) | perEdge falls back to CPU f64 solve at N≥480; milestone f32-solve claims narrowed to total-length mode at these sizes |
+| Baselines | recorded | full-step ms (total/frozen/ldlt): N=480 ≈ 1064, N=960 ≈ 7195, N=1000 ≈ 7816; perEdge N=480 ≈ 2013 | G7 ratio anchor at N=480; N=1000 CPU step is ~7.8 s → realtime (>15 fps) needs ~100× |
+
+**Go/no-go reading (spec §4):** no milestone-kill gate fired. G0a/G1/G2/G3
+are green, G0t and baselines are recorded as estimator inputs. Two
+pre-registered reds with spec-named consequences (neither kills the
+milestone): **G4 FAIL** → Phase 3 either builds a compute→vertex copy-bridge
+/ custom line material or permanently downgrades to 1 readback per frame
+(decision belongs in the Phase 3 plan); **G6 FLAGGED** → perEdge-constraint
+solves at N≥480 stay on the CPU f64 path — GPU f32-solve claims are narrowed
+to total-length mode at those sizes (total mode itself is at ~85% of the
+κ·u_f32 budget at N=960, so Phase 2's G5 experiment must include the
+iterative-refinement arm, not assume raw f32-CG). Phase 1 (dE gather kernel
++ T1–T3 shipping gates) is unblocked and unaffected by either red.

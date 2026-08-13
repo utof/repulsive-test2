@@ -14,12 +14,19 @@
  *   bun bench/sobolev.bench.ts --save baseline          # + write results JSON
  *   bun bench/sobolev.bench.ts --baseline <path> --save e0-reuse   # + Δ% column
  *   bun bench/sobolev.bench.ts --big                    # add N=240
+ *   bun bench/sobolev.bench.ts --large --save cpu-baseline-largeN
+ *                                                        # explicit N=240..1000
+ *                                                        # tuple list (no cross-
+ *                                                        # product, no isolated
+ *                                                        # micros for N≥480)
  *
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 2)
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md (Task 3) — --large mode
  * @see local_files/2026-07-03-next-steps-briefing.md §1 (measured profile)
  */
 import { execSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { trefoil } from '../src/core/fixtures';
 import { DEFAULTS, type ProjectionMode, sobolevStepSet } from '../src/core/optimizer';
 import {
     barycenterBlock,
@@ -66,24 +73,6 @@ interface ResultsFile {
 }
 
 const { alpha, beta, epsilon } = DEFAULTS;
-
-// Parametric closed trefoil: p(t) = (sin t + 2 sin 2t, cos t − 2 cos 2t, −sin 3t),
-// t = 2πi/N, edges [i, (i+1) mod N]. Deterministic — no Math.random — so every
-// repeated step does identical work (the step is pure). @see plan Task 2.
-function trefoil(n: number): { vertices: Vec3[]; edges: Edge[] } {
-    const vertices: Vec3[] = [];
-    const edges: Edge[] = [];
-    for (let i = 0; i < n; i++) {
-        const t = (2 * Math.PI * i) / n;
-        vertices.push([
-            Math.sin(t) + 2 * Math.sin(2 * t),
-            Math.cos(t) - 2 * Math.cos(2 * t),
-            -Math.sin(3 * t),
-        ]);
-        edges.push([i, (i + 1) % n]);
-    }
-    return { vertices, edges };
-}
 
 function median(xs: number[]): number {
     const s = [...xs].sort((a, b) => a - b);
@@ -141,6 +130,15 @@ function runCase(
     constraintMode: ConstraintMode,
     projectionMode: ProjectionMode,
     factorMode: FactorMode,
+    // reps (K): default unchanged (5) so pre-existing cross-product call
+    // sites are untouched; --large mode overrides per-case per the
+    // pre-registered tuple list (N≥960 uses K=3 — dense O(N³) factor cost).
+    // skipIsolated: the isolated block issues 9 unconditional solveSaddle-
+    // class calls; at N≥480 those are expensive and not part of the
+    // pre-registered baseline datum (full step + per-phase medians are).
+    // @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md (Task 3)
+    reps = 5,
+    skipIsolated = false,
 ): CaseResult {
     const { vertices, edges } = trefoil(nV);
     const disjointPairs = calculateDisjointPairs(edges);
@@ -164,7 +162,7 @@ function runCase(
     // initial vertices (the step is pure/deterministic → identical work).
     for (let w = 0; w < 2; w++) sobolevStepSet(vertices, edges, disjointPairs, set, opts);
 
-    const K = 5;
+    const K = reps;
     const fullMs: number[] = [];
     const perStep: SobolevStepTimings[] = [];
     for (let k = 0; k < K; k++) {
@@ -188,29 +186,34 @@ function runCase(
 
     // Isolated micro-medians (of 7) — acc is null here (each sobolevStepSet
     // already disarmed the collector), so the timed() wraps are plain calls.
-    const A = assembleA(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    const A3 = expandBlockDiag(A);
-    const dEFlat = flatten(
-        gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon),
-    );
-    const { C } = evaluateConstraintSet(set, vertices, edges);
-    const isolated: Record<string, number> = {
-        calculateEnergy: round3(
+    // Skipped when skipIsolated is set (--large mode, N≥480): 9 unconditional
+    // solveSaddle-class calls are expensive at these sizes and are not part
+    // of the pre-registered baseline datum.
+    // @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md (Task 3)
+    const isolated: Record<string, number> = {};
+    if (!skipIsolated) {
+        const A = assembleA(vertices, edges, disjointPairs, alpha, beta, epsilon);
+        const A3 = expandBlockDiag(A);
+        const dEFlat = flatten(
+            gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon),
+        );
+        const { C } = evaluateConstraintSet(set, vertices, edges);
+        isolated.calculateEnergy = round3(
             microMedian(() =>
                 calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
             ),
-        ),
-        gradientAnalytical: round3(
+        );
+        isolated.gradientAnalytical = round3(
             microMedian(() =>
                 gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon),
             ),
-        ),
-        assembleA: round3(
+        );
+        isolated.assembleA = round3(
             microMedian(() => assembleA(vertices, edges, disjointPairs, alpha, beta, epsilon)),
-        ),
-        expandBlockDiag: round3(microMedian(() => expandBlockDiag(A))),
-        solveSaddle: round3(microMedian(() => solveSaddle(A3, C, dEFlat))),
-    };
+        );
+        isolated.expandBlockDiag = round3(microMedian(() => expandBlockDiag(A)));
+        isolated.solveSaddle = round3(microMedian(() => solveSaddle(A3, C, dEFlat)));
+    }
 
     return {
         name: `N${nV}-${constraintMode}${projectionMode === 'frozen' ? '-frozen' : ''}${factorMode === 'ldlt' ? '-ldlt' : ''}`,
@@ -228,6 +231,7 @@ function runCase(
 // ── arg parsing ───────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const big = argv.includes('--big');
+const large = argv.includes('--large');
 const saveIdx = argv.indexOf('--save');
 const saveLabel = saveIdx >= 0 ? argv[saveIdx + 1] : undefined;
 const baselineIdx = argv.indexOf('--baseline');
@@ -245,12 +249,32 @@ const projModes: ProjectionMode[] = ['reassemble', 'frozen'];
 const factorModes: FactorMode[] = ['lu', 'ldlt'];
 
 const cases: CaseResult[] = [];
-for (const n of sizes) {
-    for (const mode of modes) {
-        for (const proj of projModes) {
-            for (const fm of factorModes) {
-                process.stderr.write(`running N${n}-${mode}-${proj}-${fm}…\n`);
-                cases.push(runCase(n, mode, proj, fm));
+if (large) {
+    // Explicit tuple list, NOT the cross-product below: reassemble variants
+    // at N≥480 re-factor per Armijo trial (plausibly hours), so --large
+    // bypasses sizes/modes/projModes/factorModes entirely and runs only
+    // this pre-registered set. skipIsolated fires at N≥480 (see runCase).
+    // @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md (Task 3)
+    const largeCases: Array<[number, ConstraintMode, ProjectionMode, FactorMode, number]> = [
+        [240, 'total', 'frozen', 'ldlt', 5],
+        [240, 'perEdge', 'frozen', 'ldlt', 5],
+        [480, 'total', 'frozen', 'ldlt', 5],
+        [480, 'perEdge', 'frozen', 'ldlt', 5],
+        [960, 'total', 'frozen', 'ldlt', 3],
+        [1000, 'total', 'frozen', 'ldlt', 3],
+    ];
+    for (const [n, mode, proj, fm, reps] of largeCases) {
+        process.stderr.write(`running N${n}-${mode}-${proj}-${fm} (K=${reps})…\n`);
+        cases.push(runCase(n, mode, proj, fm, reps, n >= 480));
+    }
+} else {
+    for (const n of sizes) {
+        for (const mode of modes) {
+            for (const proj of projModes) {
+                for (const fm of factorModes) {
+                    process.stderr.write(`running N${n}-${mode}-${proj}-${fm}…\n`);
+                    cases.push(runCase(n, mode, proj, fm));
+                }
             }
         }
     }

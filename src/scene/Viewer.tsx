@@ -376,7 +376,14 @@ export function Viewer() {
             gl={async (props) => {
                 // `as any`: R3F's gl-factory props aren't typed for WebGPURenderer's ctor; the
                 // awaited init() is what actually enables the WebGPU backend. @see spec §6.
-                const renderer = new THREE.WebGPURenderer(props as any);
+                // trackTimestamp: required by the WebGPU milestone's G3/G7 GPU-time gates
+                // (injects timestamp queries around compute/render passes; experimental
+                // API — re-verify on any three upgrade).
+                // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §6
+                const renderer = new THREE.WebGPURenderer({
+                    ...(props as any),
+                    trackTimestamp: true,
+                });
                 await renderer.init();
                 return renderer;
             }}

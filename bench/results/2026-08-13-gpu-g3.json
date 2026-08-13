@@ -1,0 +1,52 @@
+{
+  "gate": "g3",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "5f87e97",
+  "date": "2026-08-13",
+  "data": {
+    "totalsMs": [16.042912, 16.009216, 16.027648, 15.991456, 15.990784],
+    "mean": 16.0124032,
+    "cv": 0.001273621710856252,
+    "pass": true
+  },
+  "consoleLines": []
+}
