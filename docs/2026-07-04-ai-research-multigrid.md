@@ -675,6 +675,18 @@ I keep the paper’s unweighted average by default; length-weighted interpolatio
 
 ### 3.5 Smoother, cycle, and coarse solve
 
+> **FIXED (2026-08-13, utof/repulsive-test2#5):** this section originally left the
+> coarse operator $\bar A_\ell$ undefined; the delivered code rediscretized it
+> (reassembled A on coarse geometry), which is spectrally inconsistent with the
+> fine form at open-chain boundaries/junctions (pencil eigenvalues up to ~9;
+> two-grid diverges with an EXACT coarse solve). The oracle now uses **Galerkin
+> coarse operators** $\bar A_{\ell+1} = P_3^\top \bar A_\ell P_3$ by default
+> (`prepare_levels(..., coarse_op="galerkin")`), diverging runs raise
+> `MGDivergenceError` instead of returning, and the dense cleanup must certify
+> its post-cleanup residual ≤ 100·tol or it raises too. Regression gate:
+> `oracle/check_mg_stage2.py`. The paper's B.3.1 nested-iteration initialization
+> remains unported (still open in #5/#8).
+
 Default scheme:
 
 [

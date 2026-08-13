@@ -943,10 +943,31 @@ def projector(C: Array) -> Tuple[Array, Array]:
 
 
 def prepare_levels(levels: List[Level], alpha: float, beta: float, epsilon: float,
-                   spec: ConstraintSpec, targets: dict) -> None:
-    for L in levels:
-        _, _, A = assemble_B_B0(L.vertices, L.edges, alpha, beta, epsilon)
-        L.A3 = expand_A3(A)
+                   spec: ConstraintSpec, targets: dict, coarse_op: str = "galerkin") -> None:
+    """Assemble per-level operators and constraints.
+
+    coarse_op="galerkin" (default): coarse A3 is the Galerkin triple product
+    P3^T A_f P3 taken recursively from the fine assembled operator. Why: the
+    original rediscretized coarse operators (reassembling A on coarse geometry)
+    are spectrally inconsistent with the fine form at open-chain boundaries and
+    junctions — generalized eigenvalues of (P3^T A_f P3, A_c) on ker(C_c) reach
+    ~9 and two-grid correction diverges even with an EXACT coarse solve.
+    Galerkin makes that pencil identically 1 by construction; measured in the
+    pre-registered experiment on 2026-08-13. @issue utof/repulsive-test2#5
+
+    coarse_op="rediscretize" retains the old behavior for A/B comparison and
+    for exercising the divergence guard in mg_projected_solve; do not use it
+    for goldens.
+    """
+    if coarse_op not in ("galerkin", "rediscretize"):
+        raise ValueError(f"unknown coarse_op: {coarse_op!r}")
+    for li, L in enumerate(levels):
+        if li == 0 or coarse_op == "rediscretize":
+            _, _, A = assemble_B_B0(L.vertices, L.edges, alpha, beta, epsilon)
+            L.A3 = expand_A3(A)
+        else:
+            P3 = block_prolong(L.P_to_fine)
+            L.A3 = P3.T @ levels[li - 1].A3 @ P3
         # Coarse edge-length constraints use aggregate target path lengths.
         vertex_map = {orig: i for i, orig in enumerate(L.orig_vertices)}
         phi, C, blocks = eval_constraints(L.vertices, L.edges, spec, targets, edge_map=L.edge_paths, vertex_map=vertex_map)
@@ -1013,6 +1034,29 @@ def v_cycle(levels: List[Level], li: int, x: Array, rhs: Array, nu_pre: int, nu_
     return x
 
 
+class MGDivergenceError(RuntimeError):
+    """Raised when the MG iteration diverges or cleanup cannot certify the answer.
+
+    Why: the pre-fix oracle silently returned post-divergence "corrections" with
+    residual ~1e67 and used_direct_cleanup=True — mg_saddles would have written
+    them straight into a golden. Divergence must fail loudly, never be labeled
+    self-certified. @issue utof/repulsive-test2#5 (audit must-not-copy item 1)
+    """
+
+    def __init__(self, msg: str, residual_history: Optional[List[float]] = None):
+        super().__init__(msg)
+        self.residual_history = residual_history or []
+
+
+# Residual growth beyond this factor over the best residual seen so far is
+# divergence, not smoother noise: a contracting V-cycle never regresses 10x.
+# @issue utof/repulsive-test2#5
+MG_DIVERGENCE_GROWTH = 10.0
+# Dense cleanup is only sound when MG has already stagnated near tol; the
+# certificate is the post-cleanup residual itself, checked against this slack.
+MG_CLEANUP_CERTIFY_FACTOR = 100.0
+
+
 def mg_projected_solve(levels: List[Level], rhs: Array, tol: float = 1e-10, max_cycles: int = 50,
                        nu_pre: int = 2, nu_post: int = 2) -> Dict[str, object]:
     L0 = levels[0]
@@ -1020,14 +1064,23 @@ def mg_projected_solve(levels: List[Level], rhs: Array, tol: float = 1e-10, max_
     assert A0 is not None and C0 is not None
     x = np.zeros_like(rhs)
     residuals = []
+    best = math.inf
     for it in range(max_cycles + 1):
         _, rn = projected_residual(A0, C0, x, rhs)
         residuals.append(rn)
+        if not math.isfinite(rn) or rn > MG_DIVERGENCE_GROWTH * best:
+            raise MGDivergenceError(
+                f"MG diverged at cycle {it}: residual {rn:.3e} vs best {best:.3e} "
+                f"(growth > {MG_DIVERGENCE_GROWTH}x)", residuals)
+        best = min(best, rn)
         if rn <= tol:
             break
         x = v_cycle(levels, 0, x, rhs, nu_pre, nu_post)
-    # If V-cycles stagnate before 1e-10 on a tiny/pathological fixture, perform one direct correction.
-    # This preserves a self-certifying final residual while still emitting the MG cycle history.
+    # If V-cycles stagnate before tol on a tiny/pathological fixture, perform one
+    # direct correction — and CHECK the certificate. A post-cleanup residual that
+    # is still far from tol means the iterate was garbage (e.g. post-divergence
+    # magnitudes where the dense correction cancels catastrophically); returning
+    # it with a success flag is exactly the issue-#5 bug. @issue utof/repulsive-test2#5
     _, rn = projected_residual(A0, C0, x, rhs)
     used_direct_cleanup = False
     if rn > tol:
@@ -1037,6 +1090,10 @@ def mg_projected_solve(levels: List[Level], rhs: Array, tol: float = 1e-10, max_
         used_direct_cleanup = True
         _, rn = projected_residual(A0, C0, x, rhs)
         residuals.append(rn)
+        if not math.isfinite(rn) or rn > MG_CLEANUP_CERTIFY_FACTOR * tol:
+            raise MGDivergenceError(
+                f"dense cleanup failed to certify: post-cleanup residual {rn:.3e} "
+                f"> {MG_CLEANUP_CERTIFY_FACTOR}*tol", residuals)
     return {"x": x, "iterations": len(residuals) - 1, "residual": rn,
             "residual_history": residuals, "used_direct_cleanup": used_direct_cleanup}
 
