@@ -530,7 +530,23 @@ def bh_ordered_cluster_term(vertices: Array, geom: Dict[str, Array], I: int, q: 
 
 
 def bh_energy(vertices: Array, edges: Array, alpha: float, beta: float, epsilon: float,
-              theta: float = 0.5, leaf_size: int = 8) -> Tuple[float, Dict[str, float]]:
+              theta: float = 0.5, leaf_size: int = 8,
+              theta_t: Optional[float] = None) -> Tuple[float, Dict[str, float]]:
+    """Barnes-Hut energy. Admissibility (revised per the issue-#6 measured sweep):
+
+    - Leaf nodes CAN be admissible. The delivered `not node.is_leaf` guard was
+      an undocumented deviation that excluded the only usable clusters at
+      N≤120 (θ=0.5/leaf=8 accepted ZERO clusters — BH degenerated to the exact
+      sum plus tree overhead). @issue utof/repulsive-test2#6
+    - Tangent coherence uses its own threshold theta_t (default 1.5·theta, the
+      sweep's best kernel-eval/error trade-off: θx=0.5/θT=0.75 → 3.8× fewer
+      kernel evals at 1.7e-2 rel err on trefoil N=120). Sharing θ made the
+      tangent test binding on coarse curves.
+    - Clusters need ≥2 edges: a singleton's radii are 0, so it would be
+      admissible at EVERY θ including 0, while its endpoint-collapse error is
+      NOT θ-controlled — the guard is what makes "θ=0 ⇒ exact" true.
+    """
+    theta_t = 1.5 * theta if theta_t is None else theta_t
     geom = edge_geometry(vertices, edges, epsilon)
     nodes, Cedge, Tedge, mass = build_edge_bvh(vertices, edges, epsilon, leaf_size)
     D = disjoint_matrix(edges)
@@ -543,8 +559,8 @@ def bh_energy(vertices: Array, edges: Array, alpha: float, beta: float, epsilon:
         if len(node.indices) == 0:
             return 0.0
         dist = float(np.linalg.norm(Cedge[I] - node.center))
-        admiss = (not node.is_leaf and all_disjoint(I, node.indices, D) and dist > 0.0 and
-                  (node.rx / dist <= theta) and (node.rT <= theta))
+        admiss = (len(node.indices) >= 2 and all_disjoint(I, node.indices, D) and dist > 0.0 and
+                  (node.rx / dist <= theta) and (node.rT <= theta_t))
         if admiss:
             approximated += len(node.indices)
             return bh_ordered_cluster_term(vertices, geom, I, node.center, node.mass, alpha, beta, epsilon)
@@ -631,7 +647,13 @@ def bct_kernel_node(kind: str, cT: Array, tT: Array, cS: Array, tS: Array, epsil
 
 
 def bct_matvec_kernel(vertices: Array, edges: Array, epsilon: float, psi: Array, kind: str,
-                      theta: float = 0.5, leaf_size: int = 8) -> Tuple[Array, Dict[str, float]]:
+                      theta: float = 0.5, leaf_size: int = 8,
+                      theta_t: Optional[float] = None) -> Tuple[Array, Dict[str, float]]:
+    # Admissibility mirrors bh_energy: decoupled theta_t (default 1.5·theta) and
+    # a size guard — singleton×singleton blocks have zero radii and were
+    # admissible at every θ including 0, which falsified the "θ=0 ⇒ exact"
+    # acceptance gate at leaf_size=2. @issue utof/repulsive-test2#6
+    theta_t = 1.5 * theta if theta_t is None else theta_t
     psi = np.asarray(psi, dtype=float)
     m = len(edges)
     vector = psi.ndim == 2
@@ -646,8 +668,9 @@ def bct_matvec_kernel(vertices: Array, edges: Array, epsilon: float, psi: Array,
         nonlocal leaves, admissible_blocks, direct_blocks, direct_pairs
         tn = nodes[ti]; sn = nodes[si]
         dist = float(np.linalg.norm(tn.center - sn.center))
-        well = (blocks_all_disjoint(tn.indices, sn.indices, D) and dist > 0.0 and
-                (max(tn.rx, sn.rx) / dist <= theta) and (max(tn.rT, sn.rT) <= theta))
+        well = (len(tn.indices) + len(sn.indices) >= 3 and
+                blocks_all_disjoint(tn.indices, sn.indices, D) and dist > 0.0 and
+                (max(tn.rx, sn.rx) / dist <= theta) and (max(tn.rT, sn.rT) <= theta_t))
         if well:
             leaves += 1; admissible_blocks += 1
             kval = bct_kernel_node(kind, tn.center, tn.tangent, sn.center, sn.tangent, epsilon)
@@ -738,12 +761,13 @@ def apply_Dt(vertices: Array, edges: Array, epsilon: float, z: Array) -> Array:
 
 
 def bct_apply_B_scalar(vertices: Array, edges: Array, epsilon: float, u: Array, kind: str,
-                       theta: float, leaf_size: int) -> Tuple[Array, Dict[str, float]]:
+                       theta: float, leaf_size: int,
+                       theta_t: Optional[float] = None) -> Tuple[Array, Dict[str, float]]:
     if kind == "low":
         y = edge_average_u(u, edges)
         ones = np.ones(len(edges))
-        K1, stats1 = bct_matvec_kernel(vertices, edges, epsilon, ones, "low", theta, leaf_size)
-        Ky, stats2 = bct_matvec_kernel(vertices, edges, epsilon, y, "low", theta, leaf_size)
+        K1, stats1 = bct_matvec_kernel(vertices, edges, epsilon, ones, "low", theta, leaf_size, theta_t=theta_t)
+        Ky, stats2 = bct_matvec_kernel(vertices, edges, epsilon, y, "low", theta, leaf_size, theta_t=theta_t)
         z = K1 * y - Ky
         out = np.zeros(len(vertices), dtype=float)
         for I, (a, b) in enumerate(edges):
@@ -755,8 +779,8 @@ def bct_apply_B_scalar(vertices: Array, edges: Array, epsilon: float, u: Array, 
     if kind == "high":
         y = edge_difference_Du(vertices, edges, epsilon, u)
         ones = np.ones(len(edges))
-        K1, stats1 = bct_matvec_kernel(vertices, edges, epsilon, ones, "high", theta, leaf_size)
-        Ky, stats2 = bct_matvec_kernel(vertices, edges, epsilon, y, "high", theta, leaf_size)
+        K1, stats1 = bct_matvec_kernel(vertices, edges, epsilon, ones, "high", theta, leaf_size, theta_t=theta_t)
+        Ky, stats2 = bct_matvec_kernel(vertices, edges, epsilon, y, "high", theta, leaf_size, theta_t=theta_t)
         z = K1[:, None] * y - Ky
         out = apply_Dt(vertices, edges, epsilon, z)
         stats = {"K1_" + k: v for k, v in stats1.items()}
@@ -1240,6 +1264,9 @@ def run_oracle(data: dict) -> dict:
     edges = asarray_edges(data["edges"])
     alpha = float(data.get("alpha", 3.0)); beta = float(data.get("beta", 6.0)); epsilon = float(data.get("epsilon", 1e-10))
     theta = float(data.get("theta", 0.5)); leaf_size = int(data.get("leaf_size", 4))
+    # Decoupled tangent-coherence threshold; default 1.5*theta per the issue-#6
+    # sweep. @issue utof/repulsive-test2#6
+    theta_t = float(data["theta_t"]) if "theta_t" in data else 1.5 * theta
     spec = initial_constraint_spec(vertices, edges, data.get("constraints"))
     targets = {"x0": barycenter_target(vertices, edges)}
     L0, ell0 = length_targets(vertices, edges)
@@ -1257,8 +1284,10 @@ def run_oracle(data: dict) -> dict:
     # BH at theta and at half theta for monotone error checks.
     bh_results = {}
     for th in [theta, theta / 2.0]:
-        Eb, stats = bh_energy(vertices, edges, alpha, beta, epsilon, th, leaf_size)
-        gb = finite_difference_gradient(lambda V, th=th: bh_energy(V, edges, alpha, beta, epsilon, th, leaf_size)[0], vertices)
+        # theta_t scales with theta so the half-theta probe tightens BOTH tests.
+        tht = theta_t * (th / theta) if theta > 0 else 0.0
+        Eb, stats = bh_energy(vertices, edges, alpha, beta, epsilon, th, leaf_size, theta_t=tht)
+        gb = finite_difference_gradient(lambda V, th=th, tht=tht: bh_energy(V, edges, alpha, beta, epsilon, th, leaf_size, theta_t=tht)[0], vertices)
         bh_results[f"theta_{th:g}"] = {"energy": Eb, "dE": gb, "stats": stats,
                                        "energy_rel_error": abs(Eb - E) / max(1.0, abs(E)),
                                        "dE_rel_error_vs_exact_fd": rel_norm(flatten_block(gb), flatten_block(dE))}
@@ -1270,17 +1299,17 @@ def run_oracle(data: dict) -> dict:
     bct = {}
     for kind in ["high", "low"]:
         Kexact = exact_edge_kernel_sym(vertices, edges, epsilon, kind)
-        Kpsi_bct, st = bct_matvec_kernel(vertices, edges, epsilon, psi_edge, kind, theta, leaf_size)
+        Kpsi_bct, st = bct_matvec_kernel(vertices, edges, epsilon, psi_edge, kind, theta, leaf_size, theta_t=theta_t)
         Kpsi_exact = Kexact @ psi_edge
-        Kvec_bct, stv = bct_matvec_kernel(vertices, edges, epsilon, psi_edge_vec, kind, theta, leaf_size)
+        Kvec_bct, stv = bct_matvec_kernel(vertices, edges, epsilon, psi_edge_vec, kind, theta, leaf_size, theta_t=theta_t)
         Kvec_exact = Kexact @ psi_edge_vec
         bct[kind] = {"Kpsi": Kpsi_bct, "Kpsi_exact": Kpsi_exact,
                      "rel_error": rel_norm(Kpsi_bct, Kpsi_exact),
                      "Kvec_rel_error": rel_norm(Kvec_bct.reshape(-1), Kvec_exact.reshape(-1)),
                      "stats": st, "vector_stats": stv}
     u = deterministic_probe(n)
-    Bu_bct, stH = bct_apply_B_scalar(vertices, edges, epsilon, u, "high", theta, leaf_size)
-    B0u_bct, stL = bct_apply_B_scalar(vertices, edges, epsilon, u, "low", theta, leaf_size)
+    Bu_bct, stH = bct_apply_B_scalar(vertices, edges, epsilon, u, "high", theta, leaf_size, theta_t=theta_t)
+    B0u_bct, stL = bct_apply_B_scalar(vertices, edges, epsilon, u, "low", theta, leaf_size, theta_t=theta_t)
     bct["B_matvec"] = {"u": u, "Bu_bct": Bu_bct, "Bu_exact": B @ u,
                        "rel_error": rel_norm(Bu_bct, B @ u), "stats": stH}
     bct["B0_matvec"] = {"u": u, "B0u_bct": B0u_bct, "B0u_exact": B0 @ u,
@@ -1311,7 +1340,7 @@ def run_oracle(data: dict) -> dict:
             "flattening": "coordinate-block",
             "energy_pair_factor": 0.5,
             "inner_product_pair_factor": 1.0,
-            "theta": theta, "leaf_size": leaf_size,
+            "theta": theta, "theta_t": theta_t, "leaf_size": leaf_size,
         },
         "energy": E,
         "dE": dE,
