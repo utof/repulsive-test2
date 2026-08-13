@@ -20,6 +20,7 @@
  */
 import { execSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { trefoil } from '../src/core/fixtures';
 import { DEFAULTS, type ProjectionMode, sobolevStepSet } from '../src/core/optimizer';
 import {
     barycenterBlock,
@@ -66,24 +67,6 @@ interface ResultsFile {
 }
 
 const { alpha, beta, epsilon } = DEFAULTS;
-
-// Parametric closed trefoil: p(t) = (sin t + 2 sin 2t, cos t − 2 cos 2t, −sin 3t),
-// t = 2πi/N, edges [i, (i+1) mod N]. Deterministic — no Math.random — so every
-// repeated step does identical work (the step is pure). @see plan Task 2.
-function trefoil(n: number): { vertices: Vec3[]; edges: Edge[] } {
-    const vertices: Vec3[] = [];
-    const edges: Edge[] = [];
-    for (let i = 0; i < n; i++) {
-        const t = (2 * Math.PI * i) / n;
-        vertices.push([
-            Math.sin(t) + 2 * Math.sin(2 * t),
-            Math.cos(t) - 2 * Math.cos(2 * t),
-            -Math.sin(3 * t),
-        ]);
-        edges.push([i, (i + 1) % n]);
-    }
-    return { vertices, edges };
-}
 
 function median(xs: number[]): number {
     const s = [...xs].sort((a, b) => a - b);
