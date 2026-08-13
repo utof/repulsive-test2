@@ -488,7 +488,242 @@ spikes.g2 = async () => {
     };
 };
 
-// Later tasks append spikes here (g4).
+/**
+ * G4 — zero-readback render spike. Stands in for "solver output lands in a
+ * storage buffer, gets rendered with zero per-frame readbacks": 120 frames of
+ * a 64-edge open polyline (`y = sin(x + t)`) are CPU-precomputed as f32
+ * hi/lo pairs (`splitHiLo`) and uploaded ONE buffer-write per frame — the
+ * wave itself is NOT GPU-evaluated (review-3 F5: a GPU `sin` could never
+ * bit-match CPU f32 exactly, and the render plumbing is what's under test).
+ * Each frame then runs the §2.7 combine/scatter kernel entirely on GPU and
+ * renders the result through the SAME fat-line material the app already
+ * uses (`Line2NodeMaterial`, `src/scene/Curve.tsx`) — but with
+ * `instanceStart`/`instanceEnd` bound to `StorageBufferAttribute`s (usage
+ * `STORAGE | VERTEX`, `WebGPUBackend.js:2564`) instead of the production
+ * per-frame `setPositions()` CPU path. `Line2NodeMaterial` reads
+ * `attribute('instanceStart'/'instanceEnd')` off whatever geometry
+ * attribute has that name (`Line2NodeMaterial.js:117-118`) — it does not
+ * care whether the backing buffer is CPU- or GPU-authored, so no material
+ * changes are needed, only the geometry's attribute wiring (Phase 3 will
+ * make this same swap in `Curve.tsx`).
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.7, §4 G4
+ * @see docs/2026-08-13-ai-research-webgpu-compute.md §2 (StorageBufferAttribute usage flags; Line2NodeMaterial hardcoded attribute names)
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 9
+ */
+spikes.g4 = async () => {
+    const { LineSegmentsGeometry } = await import('three/addons/lines/LineSegmentsGeometry.js');
+    const { LineSegments2 } = await import('three/addons/lines/webgpu/LineSegments2.js');
+    const { Fn, instanceIndex, storage } = await import('three/tsl');
+
+    const renderer = new THREE.WebGPURenderer();
+    await renderer.init();
+    renderer.setSize(256, 256);
+    document.body.appendChild(renderer.domElement);
+
+    // Render into an offscreen RenderTarget instead of presenting the
+    // default canvas swapchain. First attempt presented directly and hit a
+    // genuine `VK_ERROR_OUT_OF_DEVICE_MEMORY` device loss after all 120
+    // frames rendered successfully (confirmed via a temporary per-frame
+    // console.log: the loop completed, the crash surfaced only in the
+    // POST-loop verification readback) — headless Chrome's canvas-present
+    // path is documented (README "Hardware-headless canvas-present noise")
+    // to spam a benign-looking Dawn `ImportMemory` validation chain on every
+    // presented frame; at 120 presented frames it apparently escalates to a
+    // real leak, not just log noise. Rendering off-canvas exercises the
+    // IDENTICAL vertex/fragment pipeline (same geometry, same
+    // StorageBufferAttribute-backed `instanceStart`/`instanceEnd`, same
+    // Line2NodeMaterial) without touching the leaking swapchain-export path
+    // — legitimate given G4 verifies via buffer readback, not the presented
+    // image [spec §4 G4; README "G4 ... verifies via a buffer readback, not
+    // the presented image"].
+    const renderTarget = new THREE.RenderTarget(256, 256);
+    renderer.setRenderTarget(renderTarget);
+
+    // Readback-entrypoint counter (spec §4 G4: "asserted by instrumentation
+    // counter"). Wraps `renderer.getArrayBufferAsync` — the only readback
+    // entry point any spike in this file uses (see g2 above) — AND the
+    // backend method it forwards to (`Renderer.js:1980` ->
+    // `backend.getArrayBufferAsync`), so a hypothetical internal call that
+    // bypasses the renderer-level wrapper is still counted.
+    let readbackCount = 0;
+    const origRendererReadback = renderer.getArrayBufferAsync.bind(renderer);
+    renderer.getArrayBufferAsync = (async (...args: Parameters<typeof origRendererReadback>) => {
+        readbackCount++;
+        return origRendererReadback(...args);
+    }) as typeof renderer.getArrayBufferAsync;
+    const backend = renderer.backend as unknown as {
+        getArrayBufferAsync: (...args: unknown[]) => Promise<ArrayBuffer>;
+    };
+    const origBackendReadback = backend.getArrayBufferAsync.bind(backend);
+    backend.getArrayBufferAsync = async (...args: unknown[]) => {
+        readbackCount++;
+        return origBackendReadback(...args);
+    };
+
+    // ---- geometry: 64-edge open polyline (65 vertices). instanceStart/End
+    // are StorageBufferAttributes instead of the production Curve.tsx's
+    // setPositions()-derived InterleavedBufferAttribute [research doc §2].
+    const V = 65;
+    const E = 64;
+    const geometry = new LineSegmentsGeometry();
+    const instanceStartAttr = new THREE.StorageBufferAttribute(E, 3);
+    const instanceEndAttr = new THREE.StorageBufferAttribute(E, 3);
+    geometry.setAttribute('instanceStart', instanceStartAttr);
+    geometry.setAttribute('instanceEnd', instanceEndAttr);
+    geometry.instanceCount = E;
+    // GPU compute writes land ONLY in the GPU-side buffer, never mirrored
+    // back into these attributes' CPU-side `.array` (doing so would itself
+    // be a readback) — so geometry.computeBoundingSphere()/BoundingBox(),
+    // which read that CPU-side array, would see stale zeros. Set fixed
+    // bounds from the known wave extent instead, and disable frustum
+    // culling so a wrong/degenerate CPU-derived bound can never hide the
+    // mesh (this is the honest GPU-authored-attribute adaptation, not a
+    // workaround for a spike-only bug).
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(Math.PI, 0, 0), 4);
+    geometry.boundingBox = new THREE.Box3(
+        new THREE.Vector3(0, -1.5, -1.5),
+        new THREE.Vector3(2 * Math.PI, 1.5, 1.5),
+    );
+
+    const material = new THREE.Line2NodeMaterial({
+        color: 0x4a9eff,
+        linewidth: 3,
+        worldUnits: false,
+    });
+    const lineMesh = new LineSegments2(geometry, material);
+    lineMesh.frustumCulled = false;
+
+    const scene = new THREE.Scene();
+    scene.add(lineMesh);
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+    camera.position.set(Math.PI, 0, 5);
+    camera.lookAt(Math.PI, 0, 0);
+
+    // ---- CPU-precomputed wave frames: y = sin(x + t), x uniform over
+    // [0, 2π] — NOT GPU-evaluated [spec §4 G4, review-3 F5].
+    const FRAMES = 120;
+    const xs = Array.from({ length: V }, (_, v) => (v / E) * 2 * Math.PI);
+    const frameHiLo = Array.from({ length: FRAMES }, (_, f) => {
+        const t = (f / FRAMES) * 2 * Math.PI;
+        const verts: Vec3[] = xs.map((x) => [x, Math.sin(x + t), 0]);
+        return splitHiLo(verts);
+    });
+
+    // Per-vertex hi/lo storage buffers, updated (not recreated) each frame.
+    const hiAttr = new THREE.StorageBufferAttribute(V, 3);
+    const loAttr = new THREE.StorageBufferAttribute(V, 3);
+    const hiBuf = storage(hiAttr, 'vec3', V).toReadOnly();
+    const loBuf = storage(loAttr, 'vec3', V).toReadOnly();
+    const instanceStartNode = storage(instanceStartAttr, 'vec3', E);
+    const instanceEndNode = storage(instanceEndAttr, 'vec3', E);
+
+    /**
+     * Combine/scatter kernel — spec §2.7: `pos = hi + lo` per vertex (the
+     * combine), then scatter vertex i, i+1 into instance slot i's start/end
+     * (the scatter). Ships unmodified into Phase 3 against the production
+     * geometry. Interior vertices are read twice (once as an edge's "end",
+     * once as the next edge's "start") instead of through a separate
+     * combine pass into an intermediate buffer — same result, one dispatch,
+     * no atomics, no cross-thread write conflicts.
+     * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.7
+     */
+    const combineScatterKernel = Fn(() => {
+        const e = instanceIndex;
+        instanceStartNode.element(e).assign(hiBuf.element(e).add(loBuf.element(e)));
+        instanceEndNode.element(e).assign(hiBuf.element(e.add(1)).add(loBuf.element(e.add(1))));
+    })().compute(E);
+
+    for (let f = 0; f < FRAMES; f++) {
+        // Upload — a buffer write + needsUpdate flag, NOT a readback.
+        (hiAttr.array as Float32Array).set(frameHiLo[f].hi);
+        (loAttr.array as Float32Array).set(frameHiLo[f].lo);
+        hiAttr.needsUpdate = true;
+        loAttr.needsUpdate = true;
+
+        renderer.compute(combineScatterKernel);
+        renderer.render(scene, camera);
+    }
+
+    const readbacksDuringLoop = readbackCount;
+
+    // ONE verification readback, post-loop, of the last frame's instance
+    // buffers — f32-exact per element [spec §4 G4]. Compared at
+    // `instanceStartAttr.itemSize` (the buffer's ACTUAL current stride),
+    // not the itemSize=3 it was constructed with: three r185 silently pads
+    // any itemSize-3 StorageBufferAttribute to itemSize 4 in-place on first
+    // GPU use (WGSL forbids packed vec3 in storage buffers —
+    // `WebGPUAttributeUtils.js:114-119` "WGSL does not support packed vec3
+    // data in storage buffers, pad to vec4"), and mutates the attribute's
+    // own `.itemSize`/`.array` to match. Comparing at a hardcoded stride of
+    // 3 against that mutated, 4-wide buffer would misalign every element
+    // after the first and report a false mismatch — that would be a bug in
+    // THIS verification, not evidence about the GPU data.
+    const lastHiLo = frameHiLo[FRAMES - 1];
+    const expectedStart = new Float32Array(E * 3);
+    const expectedEnd = new Float32Array(E * 3);
+    for (let e = 0; e < E; e++) {
+        for (let d = 0; d < 3; d++) {
+            expectedStart[e * 3 + d] = Math.fround(lastHiLo.hi[e * 3 + d] + lastHiLo.lo[e * 3 + d]);
+            expectedEnd[e * 3 + d] = Math.fround(
+                lastHiLo.hi[(e + 1) * 3 + d] + lastHiLo.lo[(e + 1) * 3 + d],
+            );
+        }
+    }
+    const actualStart = new Float32Array(await renderer.getArrayBufferAsync(instanceStartAttr));
+    const actualEnd = new Float32Array(await renderer.getArrayBufferAsync(instanceEndAttr));
+    const stride = instanceStartAttr.itemSize; // 3 if unpadded, 4 if three.js padded it
+
+    let mismatches = 0;
+    for (let e = 0; e < E; e++) {
+        for (let d = 0; d < 3; d++) {
+            if (!Object.is(expectedStart[e * 3 + d], actualStart[e * stride + d])) mismatches++;
+            if (!Object.is(expectedEnd[e * 3 + d], actualEnd[e * stride + d])) mismatches++;
+        }
+    }
+
+    // SECOND check, independent of the buffer-contents question above:
+    // whether Line2NodeMaterial actually painted the line anywhere. The
+    // buffer padding above is silently applied to the SAME GPU buffer
+    // that's also bound as the `instanceStart`/`instanceEnd` VERTEX
+    // attribute, and Line2NodeMaterial hardcodes a vec3 read for it
+    // (`vec4(instanceStart, 1.0)`, `Line2NodeMaterial.js:120-121`) — the
+    // itemSize-4 mutation desyncs that assumption (surfaced by the "Length
+    // of parameters exceeds maximum length of function 'vec4()'" console
+    // warning this run also captures), so the buffer contents can be
+    // correct while the RENDER is still broken. One-off pixel readback,
+    // same "post-loop only" allowance as the buffer verification above.
+    const pixels = await renderer.readRenderTargetPixelsAsync(renderTarget, 0, 0, 256, 256);
+    let coloredPixels = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i + 2] > 100 && pixels[i + 0] < 150) coloredPixels++; // bluish (line color 0x4a9eff)
+    }
+    const rendered = coloredPixels > 0;
+
+    return {
+        frames: FRAMES,
+        readbacksDuringLoop,
+        mismatches,
+        rendered,
+        coloredPixels,
+        pass: readbacksDuringLoop === 0 && mismatches === 0 && rendered,
+        // Root-cause note for the record (spec §4 G4 FAIL disposition: "do
+        // NOT hack around it ... record the honest FAIL"). `mismatches`
+        // above proves the zero-readback combine/scatter DATA pipeline is
+        // correct (f32-exact) — the failure is `rendered === false`:
+        // WGSL's mandatory vec3-storage padding
+        // (`WebGPUAttributeUtils.js:114-119`) mutates the SAME buffer
+        // object's `itemSize` that Line2NodeMaterial hardcodes as vec3 for
+        // its `instanceStart`/`instanceEnd` vertex read
+        // (`Line2NodeMaterial.js:117-121`), so nothing is painted (0 of
+        // 65536 pixels matched the line color) even though the underlying
+        // storage buffer holds the exactly-correct wave data. This is a
+        // structural collision between a WGSL requirement and
+        // Line2NodeMaterial's fixed shader graph, not a spike plumbing
+        // mistake — "Line2NodeMaterial fights it" per spec §4 G4's own FAIL
+        // disposition, now confirmed on real hardware.
+        note: 'zero-readback combine/scatter DATA is proven correct (mismatches counted at the buffer\'s actual post-pad stride), but the RENDER fails: three r185 silently pads any itemSize-3 StorageBufferAttribute to itemSize 4 in-place (WGSL forbids packed vec3 in storage buffers, WebGPUAttributeUtils.js:114-119) — the SAME buffer is also the instanceStart/instanceEnd vertex attribute, and Line2NodeMaterial hardcodes a vec3 read for it (Line2NodeMaterial.js:117-121), so the mutation desyncs the vertex shader and nothing is painted (0 colored pixels) — "Line2NodeMaterial fights it" per spec §4 G4 FAIL disposition',
+    };
+};
 
 declare global {
     interface Window {

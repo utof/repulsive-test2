@@ -207,6 +207,70 @@ from hi-only plain-f32 differences:
   and far inside the G2 kernel's `1e-5` gate.
 - Full result: `bench/results/2026-08-13-gpu-g2.json`.
 
+## G4 — zero-readback render spike
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a. 120
+frames of a 64-edge open polyline (`y = sin(x + t)`) were CPU-precomputed as
+f32 hi/lo pairs (`splitHiLo`) and uploaded once per frame; each frame then
+ran the spec §2.7 combine/scatter kernel (`pos = hi + lo` per vertex,
+scattered into edge `e`'s `instanceStart`/`instanceEnd`) entirely on GPU and
+rendered through the SAME `Line2NodeMaterial` fat-line material the app
+already uses, with `instanceStart`/`instanceEnd` bound to
+`StorageBufferAttribute`s (`STORAGE | VERTEX` usage,
+`WebGPUBackend.js:2564`) instead of `Curve.tsx`'s per-frame
+`setPositions()`. **FAIL, with a precisely isolated root cause** —
+`bench/results/2026-08-13-gpu-g4.json`:
+
+- `readbacksDuringLoop: 0` — the 120-frame loop issued zero readbacks, as required.
+- `mismatches: 0` — the verification readback of the last frame's instance
+  buffer matches the uploaded wave f32-exact, per element, once compared at
+  the buffer's ACTUAL post-mutation stride (see below). **The zero-readback
+  combine/scatter DATA pipeline is proven correct.**
+- `rendered: false`, `coloredPixels: 0` (of 65536) — **nothing was painted.**
+  The render itself is broken.
+- **Root cause, confirmed via three r185 source + a stride/pixel probe, not
+  guesswork:** WGSL forbids packed `vec3` in storage buffers, so
+  `WebGPUAttributeUtils.createAttribute()` silently pads ANY itemSize-3
+  `StorageBufferAttribute` to itemSize 4 in place on first GPU use
+  (`node_modules/three/src/renderers/webgpu/utils/WebGPUAttributeUtils.js:114-119`,
+  "WGSL does not support packed vec3 data in storage buffers, pad to
+  vec4") — mutating the SAME attribute object's `.itemSize`/`.array` that's
+  also bound as the `instanceStart`/`instanceEnd` VERTEX attribute.
+  `Line2NodeMaterial` hardcodes a vec3 read for it
+  (`vec4(instanceStart, 1.0)`,
+  `node_modules/three/src/materials/nodes/Line2NodeMaterial.js:117-121`),
+  which desyncs against the mutated itemSize-4 buffer — surfaced by a
+  captured console warning ("Length of parameters exceeds maximum length of
+  function 'vec4()' type") and confirmed decisively by the 0/65536
+  colored-pixel readback. This is a structural collision between a WGSL
+  requirement (three.js's own correct padding) and `Line2NodeMaterial`'s
+  fixed shader graph, not a spike plumbing mistake — exactly the "Line2NodeMaterial
+  fights it" risk research doc §2 and spec §2.7/§4 G4 flagged in advance,
+  now confirmed on real hardware.
+- Separate, unrelated finding worth recording: the FIRST attempt presented
+  directly to the default canvas swapchain and hit a genuine
+  `VK_ERROR_OUT_OF_DEVICE_MEMORY` device loss AFTER all 120 frames rendered
+  successfully (confirmed via a temporary per-frame log: the loop completed,
+  the crash surfaced only in the post-loop verification readback) — an
+  escalation of the documented "Hardware-headless canvas-present noise"
+  above from log spam to a real leak at ~120 presented frames. The final
+  spike renders into an offscreen `THREE.RenderTarget` instead (same vertex/
+  fragment pipeline, no swapchain export), which resolved it. Anyone
+  presenting a WebGPU canvas headlessly for >~100 frames on this stack
+  should expect this.
+- **Consequence per spec §4 G4's own disposition:** Phase 3 cannot bind a
+  compute-writable `StorageBufferAttribute` directly as `Curve.tsx`'s
+  `instanceStart`/`instanceEnd` without either (a) a GPU-side
+  `copyBufferToBuffer` from a flat (non-vec3, unpadded) compute-written
+  storage buffer into a separate plain (non-storage) vertex buffer each
+  frame — still zero CPU readback, one extra GPU-side copy, unverified here
+  — or (b) a custom material replacing `Line2NodeMaterial`'s hardcoded
+  vertex node. Neither was attempted (spec: "do NOT hack around it"; a
+  bespoke bridge/material is real implementation work, not a Phase 0 spike).
+  Ceiling per spec: Phase 3 falls back to the 1-readback/frame path (~0.5 ms
+  + a frame of latency) unless a future milestone spikes option (a) or (b).
+- Full result: `bench/results/2026-08-13-gpu-g4.json`.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.
@@ -218,6 +282,6 @@ Filled by Task 12 once every gate below has a committed result.
 | G1 | PASS | batchedMs≈0.3, unbatchedMs≈2.3, ratio≈0.130 | per-frame GPU solve loop not dead; batching amortizes |
 | G2 (spike) | PASS | relErr≈4.60e-6 (<1e-5), relErrPlain≈0.410 (>1e-3, not vacuous) | two-float positions survive this compiler's reassociation |
 | G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |
-| G4 | | | |
+| G4 | FAIL | readbacksDuringLoop=0, mismatches=0 (data OK), rendered=false, coloredPixels=0/65536 | Line2NodeMaterial vec3-vs-padded-vec4 storage-buffer collision; Phase 3 needs a copy-bridge or custom material, or falls back to 1-readback/frame |
 | G6 | | | |
 | Baselines | | | |

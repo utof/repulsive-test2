@@ -1,0 +1,58 @@
+{
+  "gate": "g4",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "e90e71d",
+  "date": "2026-08-13",
+  "data": {
+    "frames": 120,
+    "readbacksDuringLoop": 0,
+    "mismatches": 0,
+    "rendered": false,
+    "coloredPixels": 0,
+    "pass": false,
+    "note": "zero-readback combine/scatter DATA is proven correct (mismatches counted at the buffer's actual post-pad stride), but the RENDER fails: three r185 silently pads any itemSize-3 StorageBufferAttribute to itemSize 4 in-place (WGSL forbids packed vec3 in storage buffers, WebGPUAttributeUtils.js:114-119) — the SAME buffer is also the instanceStart/instanceEnd vertex attribute, and Line2NodeMaterial hardcodes a vec3 read for it (Line2NodeMaterial.js:117-121), so the mutation desyncs the vertex shader and nothing is painted (0 colored pixels) — \"Line2NodeMaterial fights it\" per spec §4 G4 FAIL disposition"
+  },
+  "consoleLines": [
+    "THREE.TSL: Length of parameters exceeds maximum length of function 'vec4()' type. Stack trace not available. Enable \"THREE.Node.captureStackTrace\" to capture stack traces.",
+    "THREE.TSL: Length of parameters exceeds maximum length of function 'vec4()' type. Stack trace not available. Enable \"THREE.Node.captureStackTrace\" to capture stack traces."
+  ]
+}
