@@ -84,6 +84,24 @@ of `consoleLines` automatically:
 - Duplicate-key `0` React warning (`Warning: Encountered two children with
   the same key, \`0\`...`)
 
+**Hardware-headless canvas-present noise (verified 2026-08-13, phase0 T4):**
+when the *app* (not the harness page) runs under `--headless=new` on the
+hardware Vulkan adapter, every presented frame spams a 4-line Dawn
+validation chain starting with:
+
+- `GPUValidationError: Requested allocation size (…) is smaller than the
+  image requires (…) at ImportMemory (…MemoryServiceImplementationOpaqueFD.cpp…)`
+  followed by `[Invalid Texture]` / `[Invalid TextureView]` /
+  `[Invalid CommandBuffer]` cascade errors on `renderContext_*`.
+
+This is the headless compositor frame-export path (canvas presentation),
+NOT an app bug and NOT adapter fallback — A/B verified identical with and
+without the `trackTimestamp` change, and absent in headed mode. It only
+affects pages that *present a canvas* headlessly; pure compute spikes are
+untouched. G4 (which renders frames) verifies via a buffer readback, not
+the presented image, so these lines don't invalidate it — but grep them
+out of any console-based assertion.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.
