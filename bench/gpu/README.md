@@ -102,17 +102,33 @@ untouched. G4 (which renders frames) verifies via a buffer readback, not
 the presented image, so these lines don't invalidate it — but grep them
 out of any console-based assertion.
 
+## G3 — timestamp benchmarking viability
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a (no
+`--enable-webgpu-developer-features` needed): 5 runs of 100 batched dispatches
+of a 65536-thread FMA kernel (`Loop(4096)` inner iterations, tuned so the
+100-dispatch total lands at ~16 ms, comfortably above Dawn's 100 µs
+quantization floor) gave `totalsMs ≈ [16.04, 16.01, 16.03, 15.99, 15.99]`,
+`cv ≈ 0.0013` (0.13%) — **PASS** against the `cv < 0.1` gate by two orders of
+magnitude. `renderer.info.compute.timestamp` is overwritten (not
+accumulated) by each `resolveTimestampsAsync()` call
+(`WebGPUTimestampQueryPool.js:94-121` resets `currentQueryIndex`/
+`queryOffsets` inside `_resolveQueries()`), so no `renderer.info.reset()`
+between runs was needed. GPU-timestamp benchmarking (`trackTimestamp` +
+`resolveTimestampsAsync`) is viable for the remaining perf gates on this
+machine; no CPU-wall-clock fallback required.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.
 
 | Gate | Result | Number | Consequence |
 |---|---|---|---|
-| G0a | | | |
+| G0a | PASS | nvidia/turing, hardware Vulkan adapter | browser gates unblocked |
 | G0t | | | |
 | G1 | | | |
 | G2 (spike) | | | |
-| G3 | | | |
+| G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |
 | G4 | | | |
 | G6 | | | |
 | Baselines | | | |
