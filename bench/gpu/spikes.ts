@@ -122,6 +122,16 @@ function median(xs: number[]): number {
 }
 
 /**
+ * Minimal shape of `GPUDevice.queue` this file reads — see
+ * `DeviceWithAdapterInfo` above for why a local type instead of the (empty
+ * stub) ambient `@types/three` `GPUDevice`.
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 7
+ */
+type GPUQueueLike = {
+    onSubmittedWorkDone: () => Promise<void>;
+};
+
+/**
  * G0t: GPU throughput probe (FMA rate + dense f32 matvec), under G3
  * methodology (batched dispatches, GPU timestamps, 5 runs/medians) since G3
  * PASSed. Not pass/fail — feeds the G5 kernel-cost estimator.
@@ -231,7 +241,78 @@ spikes.g0t = async () => {
     };
 };
 
-// Later tasks append spikes here (g1, g2, g4).
+/**
+ * G1 — dispatch-batching kill gate. 250 DISTINCT no-op compute nodes (each
+ * `Fn(() => {...})()` call below closes over a different `i`, so this is a
+ * genuinely different node graph per index, not the same node object reused
+ * — required so the pipeline/bindings cache can't dedupe the unbatched arm
+ * into something artificially cheap) [spec §4 G1 "DISTINCT node objects"].
+ * Arm A: one `renderer.compute([...])` call with all 250. Arm B: 250
+ * separate `renderer.compute(node)` calls. Both arms submit ALL dispatches
+ * before the single terminal `device.queue.onSubmittedWorkDone()` sync per
+ * arm/run — "sequential dispatches with a single terminal sync", never a
+ * sync per dispatch, or the ~20x sync-conflation artifact makes batching
+ * look miraculous and non-batching look catastrophic for the wrong reason.
+ * The timed region is the submission loop only; the terminal sync is a
+ * barrier between runs (drains the queue so run N+1's CPU submission timing
+ * isn't polluted by run N's backlog), not part of the measured CPU cost.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §4 G1
+ * @see docs/2026-08-13-ai-research-webgpu-compute.md §4 (single-terminal-sync methodology), (c)2
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 7
+ */
+spikes.g1 = async () => {
+    const renderer = new THREE.WebGPURenderer();
+    await renderer.init();
+    const { Fn, instancedArray } = await import('three/tsl');
+
+    const N = 250;
+    const buf = instancedArray(N, 'float');
+    const nodes = Array.from({ length: N }, (_, i) =>
+        Fn(() => {
+            const e = buf.element(i);
+            e.assign(e.add(1));
+        })().compute(1),
+    ); // compute(1): 1 thread == 1 workgroup per node [plan Task 7].
+
+    const device = (renderer.backend as unknown as { device: { queue: GPUQueueLike } }).device;
+
+    // Warm-up (both arms compile/cache all 250 pipelines once here) so
+    // neither arm's timed runs pay first-use shader-compile cost unevenly.
+    renderer.compute(nodes);
+    await device.queue.onSubmittedWorkDone();
+    for (const node of nodes) renderer.compute(node);
+    await device.queue.onSubmittedWorkDone();
+
+    const batchedRuns: number[] = [];
+    const unbatchedRuns: number[] = [];
+    for (let run = 0; run < 5; run++) {
+        const t0 = performance.now();
+        renderer.compute(nodes);
+        const t1 = performance.now();
+        await device.queue.onSubmittedWorkDone(); // terminal sync, outside the timed region
+        batchedRuns.push(t1 - t0);
+
+        const t2 = performance.now();
+        for (const node of nodes) renderer.compute(node);
+        const t3 = performance.now();
+        await device.queue.onSubmittedWorkDone(); // terminal sync, outside the timed region
+        unbatchedRuns.push(t3 - t2);
+    }
+
+    const batchedMs = median(batchedRuns);
+    const unbatchedMs = median(unbatchedRuns);
+    const ratio = batchedMs / unbatchedMs;
+    return {
+        batchedMs,
+        unbatchedMs,
+        ratio,
+        batchedRuns,
+        unbatchedRuns,
+        pass: batchedMs < 2 && batchedMs < 0.25 * unbatchedMs,
+    };
+};
+
+// Later tasks append spikes here (g2, g4).
 
 declare global {
     interface Window {

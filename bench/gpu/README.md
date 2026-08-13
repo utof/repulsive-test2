@@ -148,6 +148,32 @@ medians, GPU timestamps — G3 PASSed so no wall-clock fallback needed):
   (fetched 2026-08-13).
 - Full numbers: `bench/results/2026-08-13-gpu-g0t.json`.
 
+## G1 — dispatch-batching kill gate
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a: 250
+DISTINCT no-op compute nodes (each a separate `Fn(() => {...})()` closure
+over its own index `i`, `.compute(1)` — 1 workgroup each), 5 runs/medians,
+sequential-dispatches-with-a-single-terminal-sync methodology (CPU wall
+time of the submission loop only; `device.queue.onSubmittedWorkDone()` is a
+between-run barrier, not part of the timed region)
+[research doc §4, `docs/2026-08-13-ai-research-webgpu-compute.md`]:
+
+- Arm A (batched, one `renderer.compute([...250 nodes])`):
+  `batchedMs ≈ 0.3` (runs `[0.8, 0.3, 0.3, 0.5, 0.3]`).
+- Arm B (unbatched, 250 separate `renderer.compute(node)` calls):
+  `unbatchedMs ≈ 2.3` (runs `[3.2, 2.3, 2.2, 4.0, 2.2]`).
+- `ratio ≈ 0.130`.
+- **PASS**: `batchedMs (0.3) < 2` AND `batchedMs (0.3) < 0.25 × unbatchedMs
+  (0.575)`. Both numbers land well below the plan's rough expected band
+  (≈0.8–1.7 ms batched / ≈7.5 ms unbatched) — this machine's Vulkan/Dawn
+  dispatch overhead is lower than the cross-machine estimate in the
+  implementation research doc, but the batching *ratio* (the load-bearing
+  half of the gate) holds by a wide margin either way.
+- Per-frame iterative GPU solve loop is NOT dead — dispatch batching
+  amortizes as required; the milestone is not reduced to kernels-only on
+  this gate.
+- Full result: `bench/results/2026-08-13-gpu-g1.json`.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.
@@ -156,7 +182,7 @@ Filled by Task 12 once every gate below has a committed result.
 |---|---|---|---|
 | G0a | PASS | nvidia/turing, hardware Vulkan adapter | browser gates unblocked |
 | G0t | recorded | fmaGflops≈1505, matvecMs≈0.463, matvecGflops≈40.75 | G5 estimator input |
-| G1 | | | |
+| G1 | PASS | batchedMs≈0.3, unbatchedMs≈2.3, ratio≈0.130 | per-frame GPU solve loop not dead; batching amortizes |
 | G2 (spike) | | | |
 | G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |
 | G4 | | | |
