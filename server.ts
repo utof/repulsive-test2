@@ -16,6 +16,19 @@ const server = Bun.serve({
             });
         }
 
+        // Serve any other static .html file (e.g. bench/gpu/harness.html) — mirrors
+        // the index.html handler above. @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 1
+        if (path.endsWith('.html')) {
+            const filePath = join(import.meta.dir, path);
+            try {
+                return new Response(readFileSync(filePath), {
+                    headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' },
+                });
+            } catch {
+                return new Response('Not found', { status: 404 });
+            }
+        }
+
         // Bundle and serve TypeScript/TSX files
         if (path.endsWith('.tsx') || path.endsWith('.ts')) {
             const filePath = join(import.meta.dir, path);
