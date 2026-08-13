@@ -1,6 +1,10 @@
 // bench/gpu/spikes.ts — spike registry; each spike returns JSON-serializable data.
 // @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 1
+
 import * as THREE from 'three/webgpu';
+import { nearTouchPair, splitHiLo } from '../../src/core/fixtures';
+import { DEFAULTS } from '../../src/core/optimizer';
+import type { Vec3 } from '../../src/core/testConfigs';
 
 type SpikeResult = Record<string, unknown>;
 const spikes: Record<string, () => Promise<SpikeResult>> = {};
@@ -312,7 +316,179 @@ spikes.g1 = async () => {
     };
 };
 
-// Later tasks append spikes here (g2, g4).
+/**
+ * CPU f64 reference quantity for the G2 spike: the sumK term of ONE (I,J)
+ * edge pair (the 4 endpoint-combination sum, PRE the `0.25 * ell_I^(1-a) *
+ * ell_J` scaling) — ported VERBATIM (op order + ε-after-norm placement) from
+ * `calculateEnergy`'s inner loop body [tangentPointEnergy.ts:60-100], scoped
+ * to a single (I,J) instead of the full O(E²) sum. This is what the GPU
+ * kernel below reproduces; NOT the full curve energy.
+ * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 8
+ */
+function tangentPointKernelPieceCPU(
+    vertices: Vec3[],
+    i1: number,
+    i2: number,
+    j1: number,
+    j2: number,
+    alpha: number,
+    beta: number,
+    epsilon: number,
+): number {
+    const eIx = vertices[i2][0] - vertices[i1][0];
+    const eIy = vertices[i2][1] - vertices[i1][1];
+    const eIz = vertices[i2][2] - vertices[i1][2];
+
+    let sumK = 0;
+    for (const i of [i1, i2]) {
+        for (const j of [j1, j2]) {
+            const dx = vertices[i][0] - vertices[j][0];
+            const dy = vertices[i][1] - vertices[j][1];
+            const dz = vertices[i][2] - vertices[j][2];
+            const d_norm = Math.sqrt(dx * dx + dy * dy + dz * dz) + epsilon; // ε after norm — tangentPointEnergy.ts:90
+            const cx = eIy * dz - eIz * dy;
+            const cy = eIz * dx - eIx * dz;
+            const cz = eIx * dy - eIy * dx;
+            const c_norm = Math.sqrt(cx * cx + cy * cy + cz * cz) + epsilon; // ε after norm — tangentPointEnergy.ts:97
+            sumK += Math.pow(c_norm, alpha) / Math.pow(d_norm, beta);
+        }
+    }
+    return sumK;
+}
+
+/**
+ * G2 — two-float reassociation spike, tested through the production tangent-
+ * point kernel arithmetic (not a standalone expression), per spec §4 G2.
+ * Fixture: `nearTouchPair(1e-6)` — edge I=[0,1], edge J=[2,3], disjoint. The
+ * pairs (i=0,j=2) and (i=1,j=3) have `d = v_i − v_j` along the near-touch
+ * axis (‖d‖ = gap = 1e-6), and that ‖d‖ is raised to `-beta` (=-6) in the
+ * kernel — the exact catastrophic-cancellation-under-f32 case T1/G2 exist to
+ * catch, amplified sharply by the β=6 exponent.
+ *
+ * WGSL kernel mirrors `tangentPointKernelPieceCPU` above (== calculateEnergy
+ * inner loop) EXACTLY: same (i,j) traversal order, same cross-product
+ * component order, same ε-after-norm placement. `pow()` (not repeated
+ * multiplication) is used for the integer exponents here — PREC Q1 measured
+ * WGSL's `pow` = `exp2(y·log2 x)` as harmless at this α=3/β=6, and this
+ * spike's job is isolating the two-float reassociation question, not the
+ * separate pow-vs-repeated-multiply choice §2.3 makes for the production
+ * kernel.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.3, §4 G2
+ * @see docs/2026-08-13-ai-research-gpu-precision.md Q1, Q3 (residual reassociation risk)
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 8
+ */
+spikes.g2 = async () => {
+    const renderer = new THREE.WebGPURenderer();
+    await renderer.init();
+    const { attributeArray, instancedArray, wgslFn } = await import('three/tsl');
+
+    const { vertices } = nearTouchPair(1e-6);
+    const { alpha, beta, epsilon } = DEFAULTS;
+
+    const cpu64 = tangentPointKernelPieceCPU(vertices, 0, 1, 2, 3, alpha, beta, epsilon);
+
+    const { hi, lo } = splitHiLo(vertices);
+    const hiBuf = attributeArray(hi, 'float').toReadOnly();
+    const loBuf = attributeArray(lo, 'float').toReadOnly();
+    const outTwoBuf = instancedArray(1, 'float');
+    const outPlainBuf = instancedArray(1, 'float');
+
+    // wgslFn storage-pointer-param syntax verified against the g0t spike
+    // above (same session-verified pattern: discourse.threejs.org
+    // "storagebufferattribute as input to wgslfn" / Maxime Heckel's TSL
+    // field guide).
+    const g2KernelFn = wgslFn(`
+        fn g2Kernel(
+            hi: ptr<storage, array<f32>, read>,
+            lo: ptr<storage, array<f32>, read>,
+            outTwo: ptr<storage, array<f32>, read_write>,
+            outPlain: ptr<storage, array<f32>, read_write>
+        ) -> void {
+            let alpha = ${alpha}.0;
+            let beta = ${beta}.0;
+            let eps = ${epsilon};
+
+            // Two-float coordinate differences: (hi_i - hi_j) + (lo_i - lo_j)
+            // BEFORE any other arithmetic — the reassociation under test.
+            // A legal-but-fatal compiler move would collapse this back to
+            // (hi_i + lo_i) - (hi_j + lo_j), i.e. plain f32 [PREC Q3].
+            // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.3
+            let eIx_two = (hi[3u] - hi[0u]) + (lo[3u] - lo[0u]);
+            let eIy_two = (hi[4u] - hi[1u]) + (lo[4u] - lo[1u]);
+            let eIz_two = (hi[5u] - hi[2u]) + (lo[5u] - lo[2u]);
+            // Plain-f32 control (separate output slot): hi only, lo ignored.
+            let eIx_pl = hi[3u] - hi[0u];
+            let eIy_pl = hi[4u] - hi[1u];
+            let eIz_pl = hi[5u] - hi[2u];
+
+            var sumTwo = 0.0;
+            var sumPlain = 0.0;
+
+            // 4 endpoint combinations: i in {v0,v1} (edge I), j in {v2,v3}
+            // (edge J) — mirrors calculateEnergy's (i,j) inner loop and c/d/
+            // pow op order + ε-after-norm placement EXACTLY
+            // [tangentPointEnergy.ts:84-99].
+            for (var ii = 0u; ii < 2u; ii = ii + 1u) {
+                for (var jj = 0u; jj < 2u; jj = jj + 1u) {
+                    let i = ii;
+                    let j = 2u + jj;
+
+                    let dx_two = (hi[3u * i + 0u] - hi[3u * j + 0u]) + (lo[3u * i + 0u] - lo[3u * j + 0u]);
+                    let dy_two = (hi[3u * i + 1u] - hi[3u * j + 1u]) + (lo[3u * i + 1u] - lo[3u * j + 1u]);
+                    let dz_two = (hi[3u * i + 2u] - hi[3u * j + 2u]) + (lo[3u * i + 2u] - lo[3u * j + 2u]);
+                    let dx_pl = hi[3u * i + 0u] - hi[3u * j + 0u];
+                    let dy_pl = hi[3u * i + 1u] - hi[3u * j + 1u];
+                    let dz_pl = hi[3u * i + 2u] - hi[3u * j + 2u];
+
+                    let d_norm_two = sqrt(dx_two * dx_two + dy_two * dy_two + dz_two * dz_two) + eps;
+                    let cx_two = eIy_two * dz_two - eIz_two * dy_two;
+                    let cy_two = eIz_two * dx_two - eIx_two * dz_two;
+                    let cz_two = eIx_two * dy_two - eIy_two * dx_two;
+                    let c_norm_two = sqrt(cx_two * cx_two + cy_two * cy_two + cz_two * cz_two) + eps;
+                    sumTwo = sumTwo + pow(c_norm_two, alpha) / pow(d_norm_two, beta);
+
+                    let d_norm_pl = sqrt(dx_pl * dx_pl + dy_pl * dy_pl + dz_pl * dz_pl) + eps;
+                    let cx_pl = eIy_pl * dz_pl - eIz_pl * dy_pl;
+                    let cy_pl = eIz_pl * dx_pl - eIx_pl * dz_pl;
+                    let cz_pl = eIx_pl * dy_pl - eIy_pl * dx_pl;
+                    let c_norm_pl = sqrt(cx_pl * cx_pl + cy_pl * cy_pl + cz_pl * cz_pl) + eps;
+                    sumPlain = sumPlain + pow(c_norm_pl, alpha) / pow(d_norm_pl, beta);
+                }
+            }
+
+            outTwo[0u] = sumTwo;
+            outPlain[0u] = sumPlain;
+        }
+    `);
+
+    const g2Compute = g2KernelFn({
+        hi: hiBuf,
+        lo: loBuf,
+        outTwo: outTwoBuf,
+        outPlain: outPlainBuf,
+    }).compute(1);
+
+    renderer.compute(g2Compute);
+    const outTwoData = new Float32Array(await renderer.getArrayBufferAsync(outTwoBuf.value));
+    const outPlainData = new Float32Array(await renderer.getArrayBufferAsync(outPlainBuf.value));
+    const gpu = outTwoData[0];
+    const gpuPlain = outPlainData[0];
+
+    const relErr = Math.abs(gpu - cpu64) / Math.abs(cpu64);
+    const relErrPlain = Math.abs(gpuPlain - cpu64) / Math.abs(cpu64);
+
+    return {
+        gpu,
+        gpuPlain,
+        cpu64,
+        relErr,
+        relErrPlain,
+        pass: relErr < 1e-5,
+    };
+};
+
+// Later tasks append spikes here (g4).
 
 declare global {
     interface Window {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { nearTouchPair, trefoil } from '../../src/core/fixtures';
+import { nearTouchPair, splitHiLo, trefoil } from '../../src/core/fixtures';
 
 describe('trefoil', () => {
     test('produces n vertices and n closed-loop edges', () => {
@@ -43,5 +43,30 @@ describe('nearTouchPair', () => {
         const d32 = Math.fround(vertices[2][1]) - Math.fround(vertices[0][1]);
         const relErr = Math.abs(d32 - 1e-6) / 1e-6;
         expect(relErr).toBeGreaterThan(1e-3);
+    });
+});
+
+describe('splitHiLo', () => {
+    // Measured (not the originally-targeted 1e-9): the hi/lo split is
+    // `lo = fround(c - hi)` — the residual is ROUNDED TO f32, not kept
+    // exact (that would be two-sum, which PREC Q3/design §2.3 explicitly
+    // rule out as not portable in WGSL). That double-rounding puts an
+    // absolute-error floor of ~ulp_f32(residual) ≈ 2^-48 per coordinate
+    // (≈3.5e-15 at this O(1) magnitude) under the reconstruction; relative
+    // to nearTouchPair's 1e-6 gap that floor is ≈2.5e-9, confirmed by
+    // direct measurement (2026-08-13) — still a ~1e5x improvement over the
+    // plain-f32 cancellation above (relErr > 1e-3), just not 1e-9 at this
+    // specific gap. 1e-8 gives >3x margin over the measured value without
+    // papering over the double-rounding floor.
+    // @see docs/2026-08-13-ai-research-gpu-precision.md Q1 (extent/gap error law), Q3 (not two-sum)
+    test('hi+lo reconstruction recovers the nearTouchPair gap to relErr < 1e-8 (f64)', () => {
+        // index 7 = vertex 2's y (3*2+1); index 1 = vertex 0's y (3*0+1) —
+        // the same pair the plain-f32 cancellation test above uses, but
+        // reconstructed from the hi/lo split instead of hi alone.
+        const { vertices, gap } = nearTouchPair(1e-6);
+        const { hi, lo } = splitHiLo(vertices);
+        const reconstructedGap = hi[7] + lo[7] - (hi[1] + lo[1]);
+        const relErr = Math.abs(reconstructedGap - gap) / gap;
+        expect(relErr).toBeLessThan(1e-8);
     });
 });

@@ -174,6 +174,39 @@ between-run barrier, not part of the timed region)
   this gate.
 - Full result: `bench/results/2026-08-13-gpu-g1.json`.
 
+## G2 — two-float reassociation spike
+
+Verified 2026-08-13 against the Quadro RTX 3000, same recipe as G0a. Tests
+the two-float positions trick through the PRODUCTION tangent-point kernel
+arithmetic (not a standalone expression) — a `wgslFn` port of
+`calculateEnergy`'s inner (i,j) loop [`src/core/tangentPointEnergy.ts:60-100`]
+for ONE edge pair (`nearTouchPair(1e-6)`'s edges I=[0,1]/J=[2,3]), same op
+order and ε-after-norm placement, α=3/β=6/ε=1e-10 from `DEFAULTS`
+(`src/core/optimizer.ts:18`). Two `sumK`-shaped outputs computed in the same
+kernel run: `gpu` from two-float differences
+(`(hi_i − hi_j) + (lo_i − lo_j)` before any other arithmetic), `gpuPlain`
+from hi-only plain-f32 differences:
+
+- `gpu ≈ 1.27932232890620840×10²⁰`, `cpu64 ≈ 1.27932821301069870×10²⁰`,
+  **`relErr ≈ 4.60×10⁻⁶`** — PASS against `relErr < 1e-5`.
+- `gpuPlain ≈ 7.5524494937794020×10¹⁹`, **`relErrPlain ≈ 0.410`** (41%) —
+  comfortably `> 1e-3`, confirming the fixture stresses cancellation and the
+  spike isn't vacuous (the two clauses are checking different things: `gpu`
+  proves the two-float trick survives this compiler's reassociation
+  freedom [PREC Q3]; `gpuPlain` proves the fixture would have caught it if
+  it hadn't).
+- The two disjoint-edge endpoint pairs with `‖d‖ = gap = 1e-6` (raised to
+  `-β = -6` in the kernel) dominate `sumK` and are exactly what makes
+  `relErrPlain` this large — the near-touch cancellation the fixture was
+  designed to exercise (`src/core/fixtures.ts` `nearTouchPair` docstring).
+- `splitHiLo` (`src/core/fixtures.ts`) hi/lo split has its own measured
+  precision floor from `lo = fround(residual)` double-rounding: reconstructed
+  `nearTouchPair(1e-6)` gap recovers to `relErr ≈ 2.5×10⁻⁹` (not the
+  originally-hoped 1e-9 — see `test/core/fixtures.test.ts`'s `splitHiLo`
+  describe block for the derivation) — still ~1e5× better than plain f32
+  and far inside the G2 kernel's `1e-5` gate.
+- Full result: `bench/results/2026-08-13-gpu-g2.json`.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.
@@ -183,7 +216,7 @@ Filled by Task 12 once every gate below has a committed result.
 | G0a | PASS | nvidia/turing, hardware Vulkan adapter | browser gates unblocked |
 | G0t | recorded | fmaGflops≈1505, matvecMs≈0.463, matvecGflops≈40.75 | G5 estimator input |
 | G1 | PASS | batchedMs≈0.3, unbatchedMs≈2.3, ratio≈0.130 | per-frame GPU solve loop not dead; batching amortizes |
-| G2 (spike) | | | |
+| G2 (spike) | PASS | relErr≈4.60e-6 (<1e-5), relErrPlain≈0.410 (>1e-3, not vacuous) | two-float positions survive this compiler's reassociation |
 | G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |
 | G4 | | | |
 | G6 | | | |

@@ -54,3 +54,27 @@ export function nearTouchPair(gap: number): {
         gap,
     };
 }
+
+/**
+ * Split each vertex coordinate into an f32 hi/lo pair: `hi = fround(c)`,
+ * `lo = fround(c - hi)` (the residual of the f32 rounding, itself rounded to
+ * f32) — the two-float positions trick that survives near-touch cancellation
+ * GPU-side, since `(hi_i − hi_j) + (lo_i − lo_j)` recovers precision the
+ * plain-f32 `hi_i − hi_j` alone loses. Flat xyz layout (index `3*i+0/1/2`),
+ * matching the storage-buffer layout the G2 spike/production kernel upload.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.3 (two-float positions)
+ * @see docs/2026-08-13-ai-research-gpu-precision.md Q1 (extent/gap error law), Q3 (residual reassociation risk)
+ */
+export function splitHiLo(v: Vec3[]): { hi: Float32Array; lo: Float32Array } {
+    const hi = new Float32Array(v.length * 3);
+    const lo = new Float32Array(v.length * 3);
+    for (let i = 0; i < v.length; i++) {
+        for (let d = 0; d < 3; d++) {
+            const c = v[i][d];
+            const h = Math.fround(c);
+            hi[3 * i + d] = h;
+            lo[3 * i + d] = Math.fround(c - h);
+        }
+    }
+    return { hi, lo };
+}
