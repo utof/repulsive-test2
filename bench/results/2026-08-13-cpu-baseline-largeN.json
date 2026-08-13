@@ -1,0 +1,332 @@
+{
+  "label": "cpu-baseline-largeN",
+  "date": "2026-08-13",
+  "gitShaShort": "f282aa4",
+  "bunVersion": "1.3.11",
+  "cases": [
+    {
+      "name": "N240-total-frozen-ldlt",
+      "nV": 240,
+      "nE": 240,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 47.818,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 58.763,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 11.765,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 15.257,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 26.501,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 94.312,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 88.145,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 2.972,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 61.944,
+          "calls": 1
+        },
+        "step": {
+          "ms": 247.539,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 11.054,
+        "gradientAnalytical": 32.749,
+        "assembleA": 21.699,
+        "expandBlockDiag": 0.942,
+        "solveSaddle": 186.274
+      },
+      "fullStepMsMedian": 247.548
+    },
+    {
+      "name": "N240-perEdge-frozen-ldlt",
+      "nV": 240,
+      "nE": 240,
+      "constraintMode": "perEdge",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 37.724,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 6.951,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 10.759,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 9.569,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 21.05,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 214.687,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 198.764,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 7.776,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 16.407,
+          "calls": 1
+        },
+        "step": {
+          "ms": 286.63,
+          "calls": 1
+        }
+      },
+      "isolated": {
+        "calculateEnergy": 6.389,
+        "gradientAnalytical": 32.998,
+        "assembleA": 21.618,
+        "expandBlockDiag": 0.928,
+        "solveSaddle": 428.213
+      },
+      "fullStepMsMedian": 286.642
+    },
+    {
+      "name": "N480-total-frozen-ldlt",
+      "nV": 480,
+      "nE": 480,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 142.777,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 46.163,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 44.164,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 42.379,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 85.941,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 728.993,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 700.162,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 13.175,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 59.04,
+          "calls": 1
+        },
+        "step": {
+          "ms": 1064.317,
+          "calls": 1
+        }
+      },
+      "isolated": {},
+      "fullStepMsMedian": 1064.331
+    },
+    {
+      "name": "N480-perEdge-frozen-ldlt",
+      "nV": 480,
+      "nE": 480,
+      "constraintMode": "perEdge",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 141.062,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 21.921,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 46.051,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 38.716,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 84.931,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 1763.256,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 1700.184,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 30.255,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 52.482,
+          "calls": 1
+        },
+        "step": {
+          "ms": 2012.759,
+          "calls": 1
+        }
+      },
+      "isolated": {},
+      "fullStepMsMedian": 2012.803
+    },
+    {
+      "name": "N960-total-frozen-ldlt",
+      "nV": 960,
+      "nE": 960,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 553.503,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 91.572,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 185.787,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 169.251,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 355.442,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 6186.043,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 6039.673,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 53.174,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 143.8,
+          "calls": 1
+        },
+        "step": {
+          "ms": 7194.5,
+          "calls": 1
+        }
+      },
+      "isolated": {},
+      "fullStepMsMedian": 7194.52
+    },
+    {
+      "name": "N1000-total-frozen-ldlt",
+      "nV": 1000,
+      "nE": 1000,
+      "constraintMode": "total",
+      "projectionMode": "frozen",
+      "factorMode": "ldlt",
+      "phases": {
+        "dE": {
+          "ms": 570.655,
+          "calls": 1
+        },
+        "energy": {
+          "ms": 97.205,
+          "calls": 1
+        },
+        "bHigh": {
+          "ms": 193.104,
+          "calls": 1
+        },
+        "bLow": {
+          "ms": 177.115,
+          "calls": 1
+        },
+        "assembleA": {
+          "ms": 372.971,
+          "calls": 1
+        },
+        "saddle": {
+          "ms": 6771.142,
+          "calls": 2
+        },
+        "factor": {
+          "ms": 6640.457,
+          "calls": 1
+        },
+        "projection": {
+          "ms": 54.077,
+          "calls": 1
+        },
+        "lineSearch": {
+          "ms": 160.97,
+          "calls": 1
+        },
+        "step": {
+          "ms": 7816.38,
+          "calls": 1
+        }
+      },
+      "isolated": {},
+      "fullStepMsMedian": 7816.39
+    }
+  ]
+}
