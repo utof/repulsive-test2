@@ -1,0 +1,54 @@
+{
+  "gate": "g0t",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "4fec523",
+  "date": "2026-08-13",
+  "data": {
+    "fmaGflops": 1505.1892789054614,
+    "fmaTotalsMs": [7.124992, 7.166816, 7.1336, 7.127104, 7.196288],
+    "matvecMs": 0.46317568000000003,
+    "matvecGflops": 40.749911567032186,
+    "matvecTotalsMs": [177.38384, 93.592288, 92.513536, 92.635136, 92.442592],
+    "method": "timestamp"
+  },
+  "consoleLines": []
+}

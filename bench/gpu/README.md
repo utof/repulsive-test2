@@ -118,6 +118,36 @@ between runs was needed. GPU-timestamp benchmarking (`trackTimestamp` +
 `resolveTimestampsAsync`) is viable for the remaining perf gates on this
 machine; no CPU-wall-clock fallback required.
 
+## G0t — throughput probe (G5 estimator input)
+
+Verified 2026-08-13 against the Quadro RTX 3000, G3 methodology (5 runs,
+medians, GPU timestamps — G3 PASSed so no wall-clock fallback needed):
+
+- **FMA rate:** 2²² threads × 64-iteration raw-WGSL multiply-add chain
+  (`wgslFn`, data-dependent per-thread accumulator so neither TSL nor the
+  driver compiler can fold it), batched 20× per run. `fmaGflops ≈ 1505`
+  (≈28% of the ≈5.3 TFLOPs f32 peak assumption — inside the 20–70% sanity
+  band).
+- **Dense matvec:** `y = M·x`, one thread per row, 3072×3072 f32 `M` seeded
+  deterministically (xorshift32, no `Math.random`) and uploaded, `wgslFn`
+  with `ptr<storage, ..., read>`/`read_write` params, batched 200× per run.
+  `matvecMs ≈ 0.463` (inside the expected 0.1–0.5 ms band, ≈3.2–4.1× the
+  ≈0.11–0.15 ms bandwidth floor — consistent with a naive, non-tiled
+  per-row kernel, not a sign the kernel was optimized away), `matvecGflops
+  ≈ 40.75`.
+- Both `fmaTotalsMs`/`matvecTotalsMs` arrays show the median (not mean) is
+  the right statistic: the matvec's first run is a ~2× outlier (`177 ms` vs.
+  a steady `~92-93 ms`), a one-time pipeline/shader-compile warm-up cost,
+  not throughput signal.
+- `wgslFn` storage-buffer-parameter syntax (`ptr<storage, array<f32>,
+  read|read_write>` + a named-object call site, e.g.
+  `matvecFn({ M: matBuf, x: xBuf, y: yBuf, row: instanceIndex })`) has no
+  local three.js example in this repo's `node_modules`; verified against
+  https://discourse.threejs.org/t/how-to-use-storagebufferattribute-as-a-input-to-wgslfn/73006
+  and https://blog.maximeheckel.com/posts/field-guide-to-tsl-and-webgpu/
+  (fetched 2026-08-13).
+- Full numbers: `bench/results/2026-08-13-gpu-g0t.json`.
+
 ## Phase 0 gate report
 
 Filled by Task 12 once every gate below has a committed result.
@@ -125,7 +155,7 @@ Filled by Task 12 once every gate below has a committed result.
 | Gate | Result | Number | Consequence |
 |---|---|---|---|
 | G0a | PASS | nvidia/turing, hardware Vulkan adapter | browser gates unblocked |
-| G0t | | | |
+| G0t | recorded | fmaGflops≈1505, matvecMs≈0.463, matvecGflops≈40.75 | G5 estimator input |
 | G1 | | | |
 | G2 (spike) | | | |
 | G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |

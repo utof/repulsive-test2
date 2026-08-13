@@ -98,7 +98,140 @@ spikes.g3 = async () => {
     return { totalsMs: totals, mean, cv: sd / mean, pass: sd / mean < 0.1 };
 };
 
-// Later tasks append spikes here (g0t, g1, g2, g4).
+/**
+ * Deterministic xorshift32 PRNG — no `Math.random`, so seeded data (the
+ * matvec matrix in particular) is reproducible across runs/machines.
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 6
+ */
+function xorshift32(seed: number): () => number {
+    let s = seed >>> 0 || 1;
+    return () => {
+        s ^= s << 13;
+        s >>>= 0;
+        s ^= s >>> 17;
+        s ^= s << 5;
+        s >>>= 0;
+        return s / 4294967296;
+    };
+}
+
+function median(xs: number[]): number {
+    const sorted = [...xs].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/**
+ * G0t: GPU throughput probe (FMA rate + dense f32 matvec), under G3
+ * methodology (batched dispatches, GPU timestamps, 5 runs/medians) since G3
+ * PASSed. Not pass/fail — feeds the G5 kernel-cost estimator.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §4 G0t
+ * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 6
+ */
+spikes.g0t = async () => {
+    const renderer = new THREE.WebGPURenderer({ trackTimestamp: true });
+    await renderer.init();
+    const { instancedArray, attributeArray, instanceIndex, wgslFn } = await import('three/tsl');
+
+    // ---- 1. FMA rate: raw-WGSL loop (not TSL Loop) so the multiply-add
+    // chain can't be folded by the TSL node compiler, plus a per-thread
+    // data-dependent seed (buf[index], not a literal) so the driver
+    // compiler can't constant-fold it across threads either
+    // [plan Task 6 Step 1]. wgslFn storage-buffer-parameter syntax
+    // (`ptr<storage, array<f32>, read_write>` + named-object call args)
+    // verified against https://discourse.threejs.org/t/how-to-use-storagebufferattribute-as-a-input-to-wgslfn/73006
+    // and https://blog.maximeheckel.com/posts/field-guide-to-tsl-and-webgpu/
+    // (fetched this session — no local three.js example ships this pattern).
+    const FMA_N = 1 << 22; // 2**22 threads
+    const FMA_ITERS = 64;
+    const rngFma = xorshift32(0x9e3779b9);
+    const fmaSeed = new Float32Array(FMA_N);
+    for (let i = 0; i < FMA_N; i++) fmaSeed[i] = rngFma();
+    const fmaBuf = attributeArray(fmaSeed, 'float');
+
+    const fmaKernelFn = wgslFn(`
+        fn fmaKernel(buf: ptr<storage, array<f32>, read_write>, index: u32) -> void {
+            var acc = buf[index];
+            for (var i = 0u; i < 64u; i = i + 1u) {
+                acc = acc * 1.0000001 + 0.5;
+            }
+            buf[index] = acc;
+        }
+    `);
+    const fmaCompute = fmaKernelFn({ buf: fmaBuf, index: instanceIndex }).compute(FMA_N);
+
+    // Batched like G3 (one renderer.compute() array/one submit per run) so a
+    // sub-ms single dispatch doesn't fall prey to Dawn's 100 µs timestamp
+    // quantization [IMPL §6]; repeat count tuned during implementation.
+    const FMA_REPEATS = 20;
+    const fmaTotalsMs: number[] = [];
+    for (let run = 0; run < 5; run++) {
+        renderer.compute(Array.from({ length: FMA_REPEATS }, () => fmaCompute));
+        await renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE);
+        fmaTotalsMs.push(renderer.info.compute.timestamp);
+    }
+    const fmaMedianMs = median(fmaTotalsMs);
+    const fmaFlopsPerDispatch = FMA_N * FMA_ITERS * 2; // 1 mul + 1 add per iter
+    const fmaGflops = (FMA_REPEATS * fmaFlopsPerDispatch) / (fmaMedianMs * 1e6);
+
+    // ---- 2. Dense matvec: y = M*x, one thread per row, 3072x3072 f32 M
+    // seeded deterministically CPU-side and uploaded [plan Task 6 Step 1].
+    const MV_N = 3072;
+    const rngMv = xorshift32(0xc2b2ae35);
+    const matData = new Float32Array(MV_N * MV_N);
+    for (let i = 0; i < matData.length; i++) matData[i] = rngMv() * 2 - 1;
+    const xData = new Float32Array(MV_N);
+    for (let i = 0; i < MV_N; i++) xData[i] = rngMv() * 2 - 1;
+
+    const matBuf = attributeArray(matData, 'float').toReadOnly();
+    const xBuf = attributeArray(xData, 'float').toReadOnly();
+    const yBuf = instancedArray(MV_N, 'float');
+
+    const matvecFn = wgslFn(`
+        fn matvecKernel(
+            M: ptr<storage, array<f32>, read>,
+            x: ptr<storage, array<f32>, read>,
+            y: ptr<storage, array<f32>, read_write>,
+            row: u32
+        ) -> void {
+            var acc = 0.0;
+            let base = row * 3072u;
+            for (var col = 0u; col < 3072u; col = col + 1u) {
+                acc = acc + M[base + col] * x[col];
+            }
+            y[row] = acc;
+        }
+    `);
+    const matvecCompute = matvecFn({ M: matBuf, x: xBuf, y: yBuf, row: instanceIndex }).compute(
+        MV_N,
+    );
+
+    // A single matvec is bandwidth-bound and sub-ms [plan Task 6 sanity
+    // band]; batch like the FMA probe above so timestamps clear the
+    // quantization floor, then divide back out to ms/matvec.
+    const MV_REPEATS = 200;
+    const matvecTotalsMs: number[] = [];
+    for (let run = 0; run < 5; run++) {
+        renderer.compute(Array.from({ length: MV_REPEATS }, () => matvecCompute));
+        await renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE);
+        matvecTotalsMs.push(renderer.info.compute.timestamp);
+    }
+    const mvMedianMs = median(matvecTotalsMs);
+    const matvecMs = mvMedianMs / MV_REPEATS;
+    const matvecFlops = 2 * MV_N * MV_N; // 1 mul + 1 add per (row, col)
+    const matvecGflops = matvecFlops / (matvecMs * 1e6);
+
+    return {
+        fmaGflops,
+        fmaTotalsMs,
+        matvecMs,
+        matvecGflops,
+        matvecTotalsMs,
+        method: 'timestamp',
+    };
+};
+
+// Later tasks append spikes here (g1, g2, g4).
 
 declare global {
     interface Window {
