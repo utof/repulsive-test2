@@ -378,7 +378,8 @@ Full result: `bench/results/2026-08-13-gpu-t-skeleton.json`.
 
 ## Phase 0 gate report
 
-Filled by Task 12 once every gate below has a committed result.
+Final (Task 12, 2026-08-13). Every row is backed by a committed result file
+under `bench/results/`; the go/no-go reading follows the table.
 
 | Gate | Result | Number | Consequence |
 |---|---|---|---|
@@ -389,4 +390,16 @@ Filled by Task 12 once every gate below has a committed result.
 | G3 | PASS | cv = 0.0013 (< 0.1 gate) | GPU-timestamp benchmarking viable, no wall-clock fallback needed |
 | G4 | FAIL | readbacksDuringLoop=0, mismatches=0 (data OK), rendered=false, coloredPixels=0/65536 | Line2NodeMaterial vec3-vs-padded-vec4 storage-buffer collision; Phase 3 needs a copy-bridge or custom material, or falls back to 1-readback/frame |
 | G6 | FLAGGED | total N^3.285, perEdge N^4.512; perEdge kappa·u_f32 > 0.1 at N=480 (2.13), N=960 (54.6) | perEdge falls back to CPU f64 solve at N≥480; milestone f32-solve claims narrowed to total-length mode at these sizes |
-| Baselines | | | |
+| Baselines | recorded | full-step ms (total/frozen/ldlt): N=480 ≈ 1064, N=960 ≈ 7195, N=1000 ≈ 7816; perEdge N=480 ≈ 2013 | G7 ratio anchor at N=480; N=1000 CPU step is ~7.8 s → realtime (>15 fps) needs ~100× |
+
+**Go/no-go reading (spec §4):** no milestone-kill gate fired. G0a/G1/G2/G3
+are green, G0t and baselines are recorded as estimator inputs. Two
+pre-registered reds with spec-named consequences (neither kills the
+milestone): **G4 FAIL** → Phase 3 either builds a compute→vertex copy-bridge
+/ custom line material or permanently downgrades to 1 readback per frame
+(decision belongs in the Phase 3 plan); **G6 FLAGGED** → perEdge-constraint
+solves at N≥480 stay on the CPU f64 path — GPU f32-solve claims are narrowed
+to total-length mode at those sizes (total mode itself is at ~85% of the
+κ·u_f32 budget at N=960, so Phase 2's G5 experiment must include the
+iterative-refinement arm, not assume raw f32-CG). Phase 1 (dE gather kernel
++ T1–T3 shipping gates) is unblocked and unaffected by either red.
