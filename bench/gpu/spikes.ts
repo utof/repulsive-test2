@@ -6,6 +6,8 @@ import { nearTouchPair, splitHiLo, trefoil } from '../../src/core/fixtures';
 import { DEFAULTS } from '../../src/core/optimizer';
 import { calculateDisjointPairs, calculateEnergy } from '../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
+import { cosineComparator, relErrComparator, xorshift32 } from './compare';
+import { phase1Spikes } from './phase1';
 
 type SpikeResult = Record<string, unknown>;
 const spikes: Record<string, () => Promise<SpikeResult>> = {};
@@ -102,23 +104,6 @@ spikes.g3 = async () => {
     );
     return { totalsMs: totals, mean, cv: sd / mean, pass: sd / mean < 0.1 };
 };
-
-/**
- * Deterministic xorshift32 PRNG — no `Math.random`, so seeded data (the
- * matvec matrix in particular) is reproducible across runs/machines.
- * @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 6
- */
-function xorshift32(seed: number): () => number {
-    let s = seed >>> 0 || 1;
-    return () => {
-        s ^= s << 13;
-        s >>>= 0;
-        s ^= s >>> 17;
-        s ^= s << 5;
-        s >>>= 0;
-        return s / 4294967296;
-    };
-}
 
 function median(xs: number[]): number {
     const sorted = [...xs].sort((a, b) => a - b);
@@ -755,34 +740,6 @@ spikes.g4 = async () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Generic rel-err comparator for T1 (per-pair kernel value) / T2 (total
- * energy): `|gpu - cpuRef| / |cpuRef|`, matching the spec §3 tolerance
- * definitions verbatim ("rel err").
- * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T1, T2)
- */
-function relErrComparator(gpu: number, cpuRef: number): number {
-    return Math.abs(gpu - cpuRef) / Math.abs(cpuRef);
-}
-
-/**
- * Generic cosine comparator for T3 (gradient direction agreement):
- * `dot(a,b) / (|a| * |b|)`. Spec §3 T3 threshold is `cosine > 1 - 1e-6`.
- * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T3)
- */
-function cosineComparator(a: number[], b: number[]): number {
-    if (a.length !== b.length) throw new Error('cosineComparator: length mismatch');
-    let dot = 0;
-    let na = 0;
-    let nb = 0;
-    for (let i = 0; i < a.length; i++) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-/**
  * T1/T3 GPU pass — the DELIBERATELY WRONG kernel: plain-f32 positions (hi
  * only, `lo` discarded), reusing `nearTouchPair(1e-6)` and the same op order
  * as `tangentPointKernelPieceCPU`/G2's plain branch (ε-after-norm placement,
@@ -1067,6 +1024,10 @@ spikes.toleranceSkeleton = async () => {
         t3,
     };
 };
+
+// Phase 1 gates live in phase1.ts and share this registry/harness.
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3)
+Object.assign(spikes, phase1Spikes);
 
 declare global {
     interface Window {

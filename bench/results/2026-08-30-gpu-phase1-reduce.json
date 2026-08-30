@@ -1,0 +1,108 @@
+{
+  "gate": "phase1Reduce",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "a2093b7",
+  "date": "2026-08-30",
+  "data": {
+    "gate": "phase1Reduce",
+    "rows": [
+      {
+        "n": 1,
+        "expected": 1,
+        "got": 1,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 63,
+        "expected": 2016,
+        "got": 2016,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 64,
+        "expected": 2080,
+        "got": 2080,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 65,
+        "expected": 2145,
+        "got": 2145,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 128,
+        "expected": 8256,
+        "got": 8256,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 129,
+        "expected": 8385,
+        "got": 8385,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 960,
+        "expected": 461280,
+        "got": 461280,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 16384,
+        "expected": 134225920,
+        "got": 134225920,
+        "exact": true,
+        "exactInF32": true
+      }
+    ],
+    "pass": true
+  },
+  "consoleLines": []
+}
