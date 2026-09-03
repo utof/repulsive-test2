@@ -1,0 +1,76 @@
+{
+  "gate": "phase1DeGate",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "90ef009",
+  "date": "2026-09-03",
+  "data": {
+    "gate": "phase1DeGate",
+    "methodology": "wall-clock incl. pack+upload+compute+readback+Vec3[]; 1 warm-up, 5 runs, medians; same browser for CPU",
+    "fullStepGate": false,
+    "rows": [
+      {
+        "N": 480,
+        "cpuMs": [
+          203.69999999925494, 171.39999999850988, 223.39999999850988, 232.5, 324.5999999977648
+        ],
+        "gpuMs": [3.199999999254942, 3.100000001490116, 3.2000000029802322, 3.300000000745058, 3.5],
+        "cpuP50Ms": 223.39999999850988,
+        "gpuP50Ms": 3.2000000029802322,
+        "gpuComputeOnlyP50Ms": 1.545312,
+        "speedup": 69.81249993451638,
+        "pass": true
+      },
+      {
+        "N": 960,
+        "cpuMs": [765.3999999985099, 912.8000000007451, 784.3000000007451, 774, 859.7000000029802],
+        "gpuMs": [4, 4.200000002980232, 10.699999999254942, 21.5, 24.800000000745058],
+        "cpuP50Ms": 784.3000000007451,
+        "gpuP50Ms": 10.699999999254942,
+        "gpuComputeOnlyP50Ms": 9.19808,
+        "speedup": 73.29906542573431,
+        "pass": true
+      }
+    ],
+    "pass": true
+  },
+  "consoleLines": []
+}

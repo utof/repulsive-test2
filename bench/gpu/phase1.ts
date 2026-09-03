@@ -253,3 +253,87 @@ phase1Spikes.phase1Tolerance = async () => {
         pass,
     };
 };
+
+/**
+ * Median of `xs` (upper middle for an even count). Used instead of the mean
+ * for the perf gate because a single scheduler/driver hiccup in a 5-run
+ * sample moves a mean but not a median, and the gate is pre-registered as
+ * "medians" — averaging or cherry-picking runs is explicitly forbidden.
+ * Sorts a copy so the caller's raw sample array stays in run order in the
+ * committed JSON.
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (D4 timing method; Task 4)
+ */
+const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+
+/**
+ * The pre-registered Phase 1 PERF gate: GPU dE must be >= 5x faster than CPU
+ * dE at N = 480 and N = 960. Method D4, and every part of it is load-bearing:
+ * `gpu.gradient()`'s `wallMs` spans pack -> upload -> ONE `renderer.compute`
+ * -> `getArrayBufferAsync` readback -> `Vec3[]` construction, so the readback
+ * the solver actually pays for is INSIDE the measured window (readback-
+ * inclusive timing is not negotiable, global-constraints "Gates"). CPU dE is
+ * `gradientAnalytical` timed in the SAME browser on the SAME arrays, so the
+ * ratio is not contaminated by a Bun-vs-Chrome JIT difference. One CPU and
+ * one GPU warm-up precede the timed runs; the GPU warm-up exists to pay the
+ * shader compile + pipeline creation once, which would otherwise dominate
+ * run 1. Then 5 timed runs each, interleaved, and the medians are compared.
+ * `gpuComputeOnlyP50Ms` (WebGPU timestamp queries, requires the renderer's
+ * `trackTimestamp: true`) is INFORMATIONAL only — the gate is wall-clock; a
+ * 0/undefined timestamp on some driver is recorded as-is and changes nothing.
+ * `fullStepGate: false` records that this measures dE alone, not a whole
+ * descent step (Phase 1 computes only dE on the GPU, global-constraints).
+ * A red row STOPS THE BRANCH (spec §5); the 5x threshold is pre-registered
+ * and NOT negotiable.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §5 (Phase 1 stop condition)
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 4; D4 timing method)
+ */
+phase1Spikes.phase1DeGate = async () => {
+    // trackTimestamp: the ONLY reason for it here is `gpuComputeOnlyP50Ms`
+    // (informational). Without it `resolveTimestampsAsync` warns and returns
+    // undefined (three r185.1, Backend.js:599-604).
+    const renderer = new THREE.WebGPURenderer({ trackTimestamp: true });
+    await renderer.init();
+    const { alpha, beta, epsilon } = DEFAULTS;
+    const rows = [];
+    for (const N of [480, 960]) {
+        const { vertices, edges } = trefoil(N);
+        const { dp, gpu } = engine(renderer, vertices, edges);
+        try {
+            gradientAnalytical(vertices, edges, dp, alpha, beta, epsilon); // CPU warm-up
+            await gpu.gradient(vertices); // GPU warm-up (pipeline compile) — NOT timed
+            const cpuMs: number[] = [];
+            const gpuMs: number[] = [];
+            const gpuOnly: number[] = [];
+            for (let r = 0; r < 5; r++) {
+                const { wallMs } = await gpu.gradient(vertices);
+                gpuMs.push(wallMs); // D4: pack+upload+compute+readback+Vec3[]
+                await renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE);
+                gpuOnly.push(renderer.info.compute.timestamp);
+                const t0 = performance.now();
+                gradientAnalytical(vertices, edges, dp, alpha, beta, epsilon);
+                cpuMs.push(performance.now() - t0);
+            }
+            const speedup = median(cpuMs) / median(gpuMs);
+            rows.push({
+                N,
+                cpuMs,
+                gpuMs,
+                cpuP50Ms: median(cpuMs),
+                gpuP50Ms: median(gpuMs),
+                gpuComputeOnlyP50Ms: median(gpuOnly),
+                speedup,
+                pass: speedup >= 5,
+            });
+        } finally {
+            gpu.dispose(); // per-N: each N owns its buffers; leaking N=480's would skew N=960.
+        }
+    }
+    return {
+        gate: 'phase1DeGate',
+        methodology:
+            'wall-clock incl. pack+upload+compute+readback+Vec3[]; 1 warm-up, 5 runs, medians; same browser for CPU',
+        fullStepGate: false,
+        rows,
+        pass: rows.every((r) => r.pass),
+    };
+};
