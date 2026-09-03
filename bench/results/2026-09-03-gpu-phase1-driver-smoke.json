@@ -1,0 +1,217 @@
+{
+  "gate": "phase1DriverSmoke",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "3f543df",
+  "date": "2026-09-03",
+  "data": {
+    "gate": "phase1DriverSmoke",
+    "preview": "T5 preview (K=20, one run) — NOT the spec §3 T5 gate (K=50, median of 3, Phase 2)",
+    "fixture": {
+      "name": "trefoil120",
+      "nV": 120,
+      "nE": 120,
+      "K": 20,
+      "e0": 16.623535973674777
+    },
+    "config": {
+      "descentMode": "sobolev",
+      "mode": "analytical",
+      "constraints": ["barycenter", "totalLength"],
+      "projectionMode": "frozen",
+      "penalties": "off"
+    },
+    "chains": {
+      "A": "cpu dE (dispatchDescentStep computes dE)",
+      "B": "gpu dE via the dE seam (GpuTangentPoint.gradient → dispatchDescentStep({...args, dE}))",
+      "C": "GpuDriver.step (informational)"
+    },
+    "energiesA": [
+      16.345632536220485, 16.25306683416916, 16.134571118499913, 16.13335329769456,
+      16.1330607205636, 16.132067689840802, 16.130371538519938, 16.129854174861396,
+      16.129677790318812, 16.12957628926735, 16.12947254064972, 16.129366905251455,
+      16.12926040243419, 16.129151798745962, 16.129038866212795, 16.12891933148087,
+      16.128791604719087, 16.12865505900804, 16.128510041653584, 16.12835754550549
+    ],
+    "energiesB": [
+      16.345631824056305, 16.25306707625545, 16.134571118877428, 16.133353290113796,
+      16.133060755393675, 16.1320669224629, 16.130370369138678, 16.129854121832917,
+      16.12967724392659, 16.12957513116823, 16.129470958394002, 16.12936502786695,
+      16.129258486200566, 16.129150066282754, 16.129037408809026, 16.128918263167616,
+      16.128791231892325, 16.128655180682653, 16.128510517959896, 16.12835844937905
+    ],
+    "energiesC": [
+      16.345631824056305, 16.25306707625545, 16.134571118877428, 16.133353290113796,
+      16.133060755393675, 16.1320669224629, 16.130370369138678, 16.129854121832917,
+      16.12967724392659, 16.12957513116823, 16.129470958394002, 16.12936502786695,
+      16.129258486200566, 16.129150066282754, 16.129037408809026, 16.128918263167616,
+      16.128791231892325, 16.128655180682653, 16.128510517959896, 16.12835844937905
+    ],
+    "acceptedFlagsA": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "acceptedFlagsB": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "acceptedFlagsC": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "reasons": {
+      "A": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "B": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    "acceptedA": 20,
+    "acceptedB": 20,
+    "acceptedC": 20,
+    "usedGpuC": 20,
+    "maxRelEnergyDiff": 1.1880480426869168e-7,
+    "maxRelEnergyDiffBvsC": 0,
+    "monotoneA": true,
+    "monotoneB": true,
+    "monotone": true,
+    "stepsAgreeOnAccept": true,
+    "dEp50Ms": {
+      "cpu": 15.399999998509884,
+      "gpu": 3.199999999254942
+    },
+    "pass": true
+  },
+  "consoleLines": []
+}

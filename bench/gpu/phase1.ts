@@ -1,17 +1,27 @@
 // bench/gpu/phase1.ts — Phase 1 gates through the PRODUCTION kernel pieces.
 // Registered into the Phase 0 spike registry by spikes.ts (Object.assign).
 // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.2, §3 (T1–T3), §4 G2, §5 Phase 1
-// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3)
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel"
+//      and "Task 8: Driver smoke gate (T5 preview) + final verification + gate report"
 import { attributeArray } from 'three/tsl';
 import * as THREE from 'three/webgpu';
+import {
+    type DispatchDescentStepArgs,
+    dispatchDescentStep,
+    type PinConstraint,
+} from '../../src/core/dispatch';
 import { nearTouchPair, trefoil } from '../../src/core/fixtures';
 import { DEFAULTS } from '../../src/core/optimizer';
+import { edgeLengths, totalLength } from '../../src/core/sobolev/constraintSet';
+import { barycenterTarget } from '../../src/core/sobolev/constraints';
+import type { PenaltyConfig } from '../../src/core/sobolev/penalties';
 import {
     calculateDisjointPairs,
     calculateEnergy,
     gradientAnalytical,
 } from '../../src/core/tangentPointEnergy';
 import { type Edge, testConfigs, type Vec3 } from '../../src/core/testConfigs';
+import { GpuDriver, type GpuStepSource } from '../../src/gpu/driver';
 import { makeReduceSum, REDUCE_MAX_EDGES } from '../../src/gpu/reduce';
 import { GpuTangentPoint } from '../../src/gpu/tangentPoint';
 import { packTopology } from '../../src/gpu/topology';
@@ -335,5 +345,272 @@ phase1Spikes.phase1DeGate = async () => {
         fullStepGate: false,
         rows,
         pass: rows.every((r) => r.pass),
+    };
+};
+
+/**
+ * Deep copy of a vertex list so every chain of `phase1DriverSmoke` starts from
+ * IDENTICAL data and no two chains share a tuple (the Viewer mutates `live` in
+ * place, `applyStepOutcome`; a shared start would let one chain's bookkeeping
+ * leak into another's input).
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 8: Driver smoke gate"
+ */
+const cloneVerts = (vs: Vec3[]): Vec3[] => vs.map((v) => [v[0], v[1], v[2]]);
+
+/**
+ * Penalties ALL OFF — the store's default object (`src/store.ts`, `penalties:`),
+ * so `penaltiesActive` is false and the step is the penalty-free build. The
+ * `'gpu'` driver serves penalties-off only (spec §1), so the smoke uses it.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "1. Scope"
+ */
+const PENALTIES_OFF: PenaltyConfig = {
+    totalLength: 0,
+    lengthDiff: 0,
+    field: { weight: 0, X: [1, 0, 0] },
+};
+
+/**
+ * One step's record in a `phase1DriverSmoke` chain. `energy` is the step's
+ * returned CPU-f64 energy: on an accepted step `calculateEnergy` at the new
+ * vertices; on a rejected/converged step the (unchanged) input's energy.
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 8: Driver smoke gate"
+ */
+type ChainRow = {
+    k: number;
+    energy: number;
+    accepted: boolean;
+    converged: boolean;
+    reason?: string;
+};
+
+/**
+ * "No accepted step increases energy" over a chain, starting from `e0` (the
+ * CPU-f64 energy of the shared start). Rejected/converged steps leave the
+ * state unchanged and are skipped. Spec §3 T5 wording, applied to the K=20
+ * preview. Why: in Phase 1 this guards the E₀ chaining, not the GPU
+ * arithmetic — every accepted step already passed the CPU-f64 Armijo test
+ * against the chained `energyBefore`, so monotonicity can only fail if that
+ * chaining is wrong; it is not evidence about the kernel.
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T5)
+ */
+const isMonotone = (rows: ChainRow[], e0: number): boolean => {
+    let prev = e0;
+    for (const r of rows) {
+        if (!r.accepted) continue;
+        if (r.energy > prev) return false;
+        prev = r.energy;
+    }
+    return true;
+};
+
+/**
+ * Max over k of |b[k] − a[k]| / |a[k]| — the chain-vs-chain energy statistic
+ * of `phase1DriverSmoke` (`a` is the reference chain). NaN-propagating: a
+ * non-finite energy anywhere yields NaN, and `NaN < 1e-2` is false, so a
+ * blown-up chain can never pass.
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 8: Driver smoke gate"
+ */
+const maxRelDiff = (a: ChainRow[], b: ChainRow[]): number =>
+    Math.max(...a.map((r, k) => Math.abs(b[k].energy - r.energy) / Math.abs(r.energy)));
+
+/**
+ * The T5 PREVIEW (not the T5 gate — that is K=50, median of 3, two constraint
+ * modes, Phase 2): K=20 sobolev steps on `trefoil(120)` with barycenter +
+ * total-length constraints, `projectionMode: 'frozen'`, penalties off, from ONE
+ * deep-copied start, through three chains:
+ *   A — CPU: `dispatchDescentStep` computes its own dE (the reference);
+ *   B — SEAM: `GpuTangentPoint.gradient(vertices)` → `dispatchDescentStep({...args, dE})`;
+ *   C — DRIVER (informational): the shipped `GpuDriver.step` over a store-shaped source.
+ * Every chain is driven exactly as the Viewer drives a run (`src/scene/Viewer.tsx`
+ * `applyStepOutcome` + `buildStepArgs`): an accepted step's `vertices` become the
+ * next input and its `energy` is the next `energyBefore` (E₀ reuse); a
+ * rejected/converged step leaves the vertices unchanged and — because the
+ * Viewer auto-pauses on it and nulls `lastEnergy` at every !running boundary —
+ * the next step starts with `energyBefore` undefined (fresh E₀ recompute).
+ * ALL energies are CPU f64 (`result.energy` = `calculateEnergy` at the returned
+ * vertices): the GPU contributes dE only (spec §5 Phase 1 energy-source policy),
+ * so spec §2.3 never-mix holds trivially and the A-vs-B comparison is a same-
+ * source comparison of two CPU-f64 trajectories.
+ * PASS = `maxRelEnergyDiff` (A vs B, per-step, max over k) < 1e-2 AND both A and
+ * B monotone (no accepted step increases energy). `stepsAgreeOnAccept`,
+ * `acceptedA/B/C`, the B-vs-C diff, `usedGpuC` and the per-step dE wall times are
+ * INFORMATIONAL — the dE speedup gate is `phase1DeGate`, not this spike.
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 8: Driver smoke gate"
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.3, §3 (T5), §5 Phase 1
+ */
+phase1Spikes.phase1DriverSmoke = async () => {
+    const renderer = new THREE.WebGPURenderer();
+    await renderer.init();
+    const K = 20;
+    const { alpha, beta, epsilon } = DEFAULTS;
+    const { vertices: start, edges } = trefoil(120);
+    const dp = calculateDisjointPairs(edges);
+    // Frozen targets anchored ONCE at the start, as the store does at a run boundary
+    // (src/store.ts rebuild: sobolevX0 / sobolevL0 / sobolevEll0). Never recomputed.
+    // @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.5
+    const x0 = barycenterTarget(start, edges);
+    const L0 = totalLength(start, edges);
+    const ell0 = edgeLengths(start, edges);
+    const e0 = calculateEnergy(start, edges, dp, alpha, beta, epsilon);
+    // Mirrors `buildStepArgs` (src/core/dispatch.ts) field-for-field with the
+    // store defaults the 'gpu' driver serves: sobolev + analytical + penalties-off.
+    const stepArgs = (
+        vertices: Vec3[],
+        energyBefore: number | undefined,
+    ): DispatchDescentStepArgs => ({
+        descentMode: 'sobolev',
+        vertices,
+        edges,
+        disjointPairs: dp,
+        mode: 'analytical',
+        stepSize: 0.001, // store default; unused by the sobolev path (dispatch.ts forwards `mode` only)
+        x0,
+        sobolevL0: L0,
+        barycenterConstraint: true,
+        lengthMode: 'total',
+        sobolevEll0: ell0,
+        pins: [] as PinConstraint[],
+        projectionMode: 'frozen',
+        penalties: PENALTIES_OFF,
+        energyBefore,
+        collectTimings: true,
+    });
+    // Viewer-faithful chaining (see the TSDoc): accepted ⇒ new vertices + E₀ reuse;
+    // rejected/converged ⇒ unchanged vertices, energyBefore reset to undefined.
+    const runChain = async (
+        dEAt?: (vertices: Vec3[]) => Promise<Vec3[]>,
+    ): Promise<{ rows: ChainRow[]; dEms: number[] }> => {
+        let vertices = cloneVerts(start);
+        let energyBefore: number | undefined;
+        const rows: ChainRow[] = [];
+        const dEms: number[] = [];
+        for (let k = 0; k < K; k++) {
+            const args = stepArgs(vertices, energyBefore);
+            const t0 = performance.now();
+            const dE = dEAt ? await dEAt(vertices) : undefined;
+            const gpuDeMs = performance.now() - t0; // upload→compute→readback→Vec3[], BEFORE the step
+            const r = dispatchDescentStep(dE ? { ...args, dE } : args);
+            // Chain A: the core's own 'dE' phase; chain B: the GPU wall time (readback included).
+            dEms.push(dE ? gpuDeMs : (r.timings?.dE?.ms ?? Number.NaN));
+            rows.push({
+                k,
+                energy: r.energy,
+                accepted: r.accepted,
+                converged: r.converged,
+                reason: r.stats?.reason,
+            });
+            if (r.accepted) {
+                vertices = r.vertices;
+                energyBefore = r.energy;
+            } else {
+                energyBefore = undefined;
+            }
+        }
+        return { rows, dEms };
+    };
+
+    // A — CPU reference.
+    const a = await runChain();
+    // B — GPU dE through the seam, on the SAME renderer (one device, spec §2.1).
+    const { gpu } = engine(renderer, start, edges);
+    let b: { rows: ChainRow[]; dEms: number[] };
+    try {
+        b = await runChain(async (v) => (await gpu.gradient(v)).dE);
+    } finally {
+        gpu.dispose();
+    }
+    // C — the shipped driver over a store-shaped source (informational). `live` is
+    // mutated in place on accepted steps exactly as `applyStepOutcome` does.
+    const drv = new GpuDriver(renderer);
+    const live = cloneVerts(start);
+    const src: GpuStepSource = {
+        descentMode: 'sobolev',
+        live,
+        graph: { edges },
+        disjointPairs: dp,
+        mode: 'analytical',
+        stepSize: 0.001,
+        sobolevX0: x0,
+        sobolevL0: L0,
+        barycenterConstraint: true,
+        lengthMode: 'total',
+        sobolevEll0: ell0,
+        pins: [],
+        projectionMode: 'frozen',
+        penalties: PENALTIES_OFF,
+        graphVersion: 1,
+        showArrows: false,
+    };
+    const c: ChainRow[] = [];
+    let usedGpuC = 0;
+    try {
+        let energyBefore: number | undefined;
+        for (let k = 0; k < K; k++) {
+            const { outcome: r, usedGpu } = await drv.step(src, energyBefore);
+            if (usedGpu) usedGpuC++;
+            c.push({
+                k,
+                energy: r.energy,
+                accepted: r.accepted,
+                converged: r.converged,
+                reason: r.stats?.reason,
+            });
+            if (r.accepted) {
+                for (let i = 0; i < live.length; i++) {
+                    live[i][0] = r.vertices[i][0];
+                    live[i][1] = r.vertices[i][1];
+                    live[i][2] = r.vertices[i][2];
+                }
+                energyBefore = r.energy;
+            } else {
+                energyBefore = undefined;
+            }
+        }
+    } finally {
+        drv.dispose();
+    }
+
+    const maxRelEnergyDiff = maxRelDiff(a.rows, b.rows);
+    const monotoneA = isMonotone(a.rows, e0);
+    const monotoneB = isMonotone(b.rows, e0);
+    const monotone = monotoneA && monotoneB;
+    const count = (rows: ChainRow[]) => rows.filter((r) => r.accepted).length;
+    return {
+        gate: 'phase1DriverSmoke',
+        preview:
+            'T5 preview (K=20, one run) — NOT the spec §3 T5 gate (K=50, median of 3, Phase 2)',
+        fixture: { name: 'trefoil120', nV: start.length, nE: edges.length, K, e0 },
+        config: {
+            descentMode: 'sobolev',
+            mode: 'analytical',
+            constraints: ['barycenter', 'totalLength'],
+            projectionMode: 'frozen',
+            penalties: 'off',
+        },
+        chains: {
+            A: 'cpu dE (dispatchDescentStep computes dE)',
+            B: 'gpu dE via the dE seam (GpuTangentPoint.gradient → dispatchDescentStep({...args, dE}))',
+            C: 'GpuDriver.step (informational)',
+        },
+        energiesA: a.rows.map((r) => r.energy),
+        energiesB: b.rows.map((r) => r.energy),
+        energiesC: c.map((r) => r.energy),
+        acceptedFlagsA: a.rows.map((r) => r.accepted),
+        acceptedFlagsB: b.rows.map((r) => r.accepted),
+        acceptedFlagsC: c.map((r) => r.accepted),
+        reasons: { A: a.rows.map((r) => r.reason ?? null), B: b.rows.map((r) => r.reason ?? null) },
+        acceptedA: count(a.rows),
+        acceptedB: count(b.rows),
+        acceptedC: count(c),
+        usedGpuC,
+        maxRelEnergyDiff,
+        maxRelEnergyDiffBvsC: maxRelDiff(b.rows, c),
+        monotoneA,
+        monotoneB,
+        monotone,
+        stepsAgreeOnAccept: a.rows.every((r, k) => r.accepted === b.rows[k].accepted),
+        // Informational only — the perf gate is phase1DeGate (5 runs, medians, N=480/960).
+        dEp50Ms: { cpu: median(a.dEms), gpu: median(b.dEms) },
+        pass: maxRelEnergyDiff < 1e-2 && monotone,
     };
 };
