@@ -5,6 +5,7 @@ import {
     type ThreeElement,
     type ThreeToJSXElements,
     useFrame,
+    useThree,
 } from '@react-three/fiber';
 import { useCallback, useEffect, useRef } from 'react';
 // Task 10 (fat WebGPU edges): these live in three's addons tree, not the `three/webgpu`
@@ -14,6 +15,8 @@ import { useCallback, useEffect, useRef } from 'react';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
 import * as THREE from 'three/webgpu';
+import { GpuDriver, gpuStepSupported } from '../gpu/driver';
+import { runGpuSelfTest } from '../gpu/selfTest';
 import {
     buildStepArgs,
     type DescentStepOutcome,
@@ -103,6 +106,18 @@ function Simulation() {
     // Subscribed (not getState) so the worker-lifecycle effect re-runs when the
     // driver flips — the per-frame branch below reads the fresh getState value.
     const solverDriver = useSimStore((s) => s.solverDriver);
+    // 'gpu' driver state. gl: the Viewer's ONE WebGPURenderer — the device the solver
+    // shares with rendering, never a second adapter (R3F types state.gl as a
+    // WebGLRenderer, hence the cast; the gl factory below is what constructs it).
+    // gpuDriverRef: the live GpuDriver, non-null only while 'gpu' is selected AND the
+    // boot self-test passed. gpuAvailable is SUBSCRIBED so the GPU lifecycle effect
+    // re-runs when the boot self-test lands, or when device loss / an uncaptured
+    // error clears it mid-run (fallback gpu → worker).
+    // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "2.1 Device, thread, and library surface"
+    // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "2.6 Driver integration"
+    const gl = useThree((s) => s.gl) as unknown as THREE.WebGPURenderer;
+    const gpuDriverRef = useRef<GpuDriver | null>(null);
+    const gpuAvailable = useSimStore((s) => s.gpuAvailable);
 
     // §D8: the SINGLE result-application path shared by both drivers — in-place
     // `live` mutation, E₀ caching, target-length schedule advance on accepted
@@ -211,11 +226,27 @@ function Simulation() {
             // or foreign buffers. Safe because the E₀ cache is nulled at those same
             // boundaries, so no stale energy survives the drop. The generation is part
             // of the same drop rule (and of the message) so a dropped result says which
-            // epoch it came from.
+            // epoch it came from. The DRIVER is part of the rule too: a result landing
+            // after a programmatic flip to 'main' (e.g. from inside `onerror`, whose
+            // passive-effect teardown is not flushed synchronously) but before the
+            // effect cleanup nulls `onmessage` would otherwise pass gv+running while
+            // the main driver is already stepping `live`. Mirrors the GPU branch's
+            // `solverDriver !== 'gpu'` check; 'gpu' is NOT dropped here because the
+            // worker legitimately serves per-step fallbacks under it (spec §1).
             // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
-            if (!owned || resp.graphVersion !== st.graphVersion || !st.running) {
+            if (
+                !owned ||
+                resp.graphVersion !== st.graphVersion ||
+                !st.running ||
+                st.solverDriver === 'main'
+            ) {
+                const reason = !owned
+                    ? 'epoch'
+                    : st.solverDriver === 'main'
+                      ? 'driver'
+                      : 'gv/running';
                 console.warn(
-                    `solverDriver: dropping stale worker result (reason=${!owned ? 'epoch' : 'gv/running'}, gv ${resp.graphVersion} vs ${st.graphVersion}, running=${st.running}, token ${token?.backend ?? 'none'}/${token?.generation ?? 'none'} vs gen ${dispatchGeneration.current})`,
+                    `solverDriver: dropping stale worker result (reason=${reason}, gv ${resp.graphVersion} vs ${st.graphVersion}, running=${st.running}, driver=${st.solverDriver}, token ${token?.backend ?? 'none'}/${token?.generation ?? 'none'} vs gen ${dispatchGeneration.current})`,
                 );
                 return;
             }
@@ -290,6 +321,37 @@ function Simulation() {
         };
     }, [solverDriver, handleWorkerMessage]);
 
+    // GPU driver lifecycle (fallback chain gpu → worker → main): construct the
+    // GpuDriver on the Viewer's renderer when 'gpu' is selected and the boot
+    // self-test passed; if 'gpu' is selected while unavailable (self-test failed,
+    // device lost, uncaptured error — all of which clear gpuAvailable) fall back to
+    // 'worker' — the UI keeps the option disabled, this is the belt-and-braces path.
+    // Cleanup disposes the driver (its buffers), nulls the ref and clears the
+    // single-flight token. A step still awaiting readback then resolves or REJECTS
+    // against a dead engine (GpuDriver.step contract); both the .then and the .catch
+    // in useFrame recognise it as superseded via the token/epoch checks plus
+    // `gpuDriverRef.current !== drv`, so a dispose we initiated never flips the
+    // driver or clears gpuAvailable. The epoch itself is bumped by the worker
+    // effect above on every solverDriver change (the gpuAvailable→false path flips
+    // the driver here, so it ends up bumped too).
+    // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "2.6 Driver integration"
+    // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "6. Risks not covered by gates" (mid-run device loss)
+    // @see src/gpu/driver.ts — GpuDriver.step TSDoc (single-flight / dispose-mid-flight contract)
+    useEffect(() => {
+        if (solverDriver !== 'gpu') return;
+        if (!gpuAvailable) {
+            useSimStore.getState().setSolverDriver('worker');
+            return;
+        }
+        const drv = new GpuDriver(gl);
+        gpuDriverRef.current = drv;
+        return () => {
+            drv.dispose();
+            gpuDriverRef.current = null;
+            inFlight.current = null;
+        };
+    }, [solverDriver, gl, gpuAvailable]);
+
     useFrame((state, delta) => {
         const st = useSimStore.getState();
 
@@ -302,7 +364,82 @@ function Simulation() {
                 lastPenaltyEpoch.current = st.penaltyEpoch;
                 lastEnergy.current = null;
             }
-            if (st.solverDriver === 'worker') {
+            // Per-step routing (spec §1): 'gpu' serves sobolev + analytical +
+            // penalties-off only; any other config sends THIS step to the worker
+            // without changing the selected driver (the driver re-checks the same
+            // predicate as its last line of defense). Note `useWorker` is decided from
+            // the config at SEND time, so an unowned/stale token from the other
+            // backend is dropped by that backend's own epoch/gv rule.
+            // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "1. Scope"
+            const useWorker =
+                st.solverDriver === 'worker' ||
+                (st.solverDriver === 'gpu' && !gpuStepSupported(st));
+            if (st.solverDriver === 'gpu' && !useWorker) {
+                const drv = gpuDriverRef.current;
+                // Same single-flight latch as the worker path (§D1): `drv` may be null
+                // for a frame while the lifecycle effect (re)constructs it.
+                if (drv && !inFlight.current) {
+                    const token = {
+                        backend: 'gpu' as const,
+                        generation: dispatchGeneration.current,
+                    };
+                    inFlight.current = token;
+                    const gv = st.graphVersion;
+                    drv.step(st, lastEnergy.current ?? undefined)
+                        .then(({ outcome, usedGpu }) => {
+                            if (inFlight.current === token) inFlight.current = null;
+                            const now = useSimStore.getState();
+                            // Same §D5 drop rule as the worker path (gv + running) plus
+                            // the epoch, the driver still being 'gpu', and the driver
+                            // INSTANCE still being ours (effect cleanup disposed it ⇒ a
+                            // result that resolved against the dead engine must not
+                            // reach `live`). @see the GPU lifecycle effect above.
+                            if (
+                                token.generation !== dispatchGeneration.current ||
+                                gpuDriverRef.current !== drv ||
+                                gv !== now.graphVersion ||
+                                !now.running ||
+                                now.solverDriver !== 'gpu'
+                            )
+                                return;
+                            // usedGpu=false ⇒ the driver served this step with CPU dE:
+                            // non-finite GPU readback (plan D2) or a topology the kernel
+                            // can't build (no disjoint pairs / too many edges, spec §1).
+                            // The step is still correct; only the acceleration is lost.
+                            if (!usedGpu)
+                                console.warn(
+                                    'solverDriver: gpu step ran with CPU dE (non-finite GPU dE or unsupported topology)',
+                                );
+                            // No frame delta across the await: wall-clock elapsed since
+                            // the last applied result, same ~10 Hz throttle as the worker.
+                            const t = performance.now();
+                            const elapsed = (t - lastResultTime.current) / 1000;
+                            lastResultTime.current = t;
+                            applyStepOutcome(outcome, elapsed);
+                        })
+                        .catch((err) => {
+                            // A rejection from a driver WE disposed / superseded (effect
+                            // cleanup mid-flight: unmount, driver switch, gpuAvailable
+                            // cleared) is not a device failure — the GpuDriver.step
+                            // contract says swallow it. Detect it by epoch / instance
+                            // identity; only a rejection from the CURRENT driver in the
+                            // CURRENT epoch flips gpu → worker (spec §2.6) and marks the
+                            // GPU unavailable for the rest of the session.
+                            // @see src/gpu/driver.ts — GpuDriver.step TSDoc
+                            const superseded =
+                                token.generation !== dispatchGeneration.current ||
+                                gpuDriverRef.current !== drv;
+                            if (inFlight.current === token) inFlight.current = null;
+                            if (superseded) return;
+                            console.error(
+                                'solverDriver: gpu step failed; falling back to worker:',
+                                err,
+                            );
+                            useSimStore.getState().setGpuAvailable(false);
+                            useSimStore.getState().setSolverDriver('worker');
+                        });
+                }
+            } else if (useWorker) {
                 // §D1 single-flight: send only when the worker exists and no step is
                 // outstanding — the result's onmessage clears inFlight. One step per
                 // round-trip preserves today's step-serialized semantics (schedule
@@ -433,6 +570,46 @@ export function Viewer() {
                     trackTimestamp: true,
                 });
                 await renderer.init();
+                // Phase 1 boot gate: G2 through the production kernel, once per
+                // adapter (this renderer). `then`-ed, NOT awaited — first paint must
+                // not wait on a compute round-trip; the store default gpuAvailable=false
+                // keeps the UI option disabled until the verdict lands. runGpuSelfTest
+                // never throws (a throw is a failed gate).
+                // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "2.6 Driver integration"
+                runGpuSelfTest(renderer).then((r) => {
+                    useSimStore.getState().setGpuAvailable(r.ok);
+                    if (!r.ok)
+                        console.warn('gpu: boot self-test failed; GPU driver unavailable', r);
+                });
+                // Device loss / uncaptured error ⇒ GPU unavailable + fall back gpu → worker
+                // (spec §6 "Mid-run device loss"; the fallback chain is §2.6). Both hooks
+                // are instance properties initialised to UNBOUND prototype methods that use
+                // `this` (three r185 Renderer.js:595/606 → _onDeviceLost :1225 sets
+                // this._isDeviceLost; _onError :1247), and WebGPUBackend.js:273/283 looks
+                // them up on the renderer at fire time — so an own-property override here
+                // is what the backend calls, and the previous implementation must be chained
+                // with `.call(renderer, …)`. r185 passes an info OBJECT to onError although
+                // @types/three Renderer.d.ts:264 types it as a string; bridged without `any`.
+                // One-way: nothing re-arms gpuAvailable for the rest of the session.
+                // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "6. Risks not covered by gates"
+                // @see node_modules/three/src/renderers/webgpu/WebGPUBackend.js (device.lost / onuncapturederror)
+                const prevLost = renderer.onDeviceLost;
+                renderer.onDeviceLost = (info) => {
+                    useSimStore.getState().setGpuAvailable(false);
+                    if (useSimStore.getState().solverDriver === 'gpu')
+                        useSimStore.getState().setSolverDriver('worker');
+                    prevLost.call(renderer, info);
+                };
+                const errHooks = renderer as unknown as {
+                    onError: (info: string | { message?: string }) => void;
+                };
+                const prevErr = errHooks.onError;
+                errHooks.onError = (info) => {
+                    useSimStore.getState().setGpuAvailable(false);
+                    if (useSimStore.getState().solverDriver === 'gpu')
+                        useSimStore.getState().setSolverDriver('worker');
+                    prevErr.call(renderer, info);
+                };
                 return renderer;
             }}
         >
