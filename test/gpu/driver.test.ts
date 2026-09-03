@@ -14,7 +14,9 @@ import { useSimStore } from '../../src/store';
 // Pure routing predicates of the 'gpu' driver, plus the two `GpuDriver.step`
 // behaviours reachable without a device (the single-flight guard and the
 // predicate/constructor cross-check). A step that actually READS BACK from the
-// GPU needs a renderer and is exercised by the browser driver smoke (plan Task 8).
+// GPU needs a renderer and is exercised by the browser driver smoke (plan
+// docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md —
+// "Task 8: Driver smoke gate (T5 preview) + final verification + gate report").
 // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §1, §2.6
 
 const pen0 = useSimStore.getState().penalties; // the store's all-zero default
@@ -143,7 +145,8 @@ const CYCLE4_LIVE: Vec3[] = [
 test('gpuTopologySupported accepts a 4-cycle (predicate side of the accept case)', () => {
     // Predicate only: the constructor's ACCEPT side needs no renderer either (the
     // in-flight test below constructs this very topology), but a full accept path —
-    // dispatch + readback — needs a device and is covered by the Task 8 smoke.
+    // dispatch + readback — needs a device and is covered by the driver smoke gate
+    // (plan docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 8: Driver smoke gate (T5 preview) + final verification + gate report").
     expect(gpuTopologySupported(CYCLE4_EDGES.length, 4)).toBe(true);
 });
 

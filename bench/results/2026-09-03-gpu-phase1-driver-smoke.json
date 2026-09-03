@@ -40,7 +40,7 @@
       }
     }
   ],
-  "gitShaShort": "3f543df",
+  "gitShaShort": "6f7729f",
   "date": "2026-09-03",
   "data": {
     "gate": "phase1DriverSmoke",
@@ -208,8 +208,8 @@
     "monotone": true,
     "stepsAgreeOnAccept": true,
     "dEp50Ms": {
-      "cpu": 15.399999998509884,
-      "gpu": 3.199999999254942
+      "cpu": 15.899999998509884,
+      "gpu": 3.2000000029802322
     },
     "pass": true
   },

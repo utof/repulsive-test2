@@ -1,6 +1,6 @@
 // src/gpu/tangentPoint.ts — renderer-bound tangent-point kernels. The ONLY src/gpu file importing three/tsl.
 // TSL plumbing + wgslFn body (spec §2.1); one device; one upload + one readback per call (spec §5).
-// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3, D1–D4)
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel" / D1–D4
 // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.2, §2.5, §5 Phase 1
 import { attributeArray, instancedArray, instanceIndex, uint, wgsl, wgslFn } from 'three/tsl';
 import type { StorageBufferNode } from 'three/webgpu';
@@ -54,7 +54,7 @@ type AttributeBackend = {
  * the boot self-test only — never fed to descent (spec §2.3 never-mix).
  * New topology (graphVersion) ⇒ new instance; new (α,β,ε) ⇒ new instance
  * (α/β/ε are baked into the WGSL source at build time, `src/gpu/wgsl.ts`).
- * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3, D1–D4)
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel" / D1–D4
  * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.2, §2.3, §2.5, §5
  */
 export class GpuTangentPoint {
@@ -84,11 +84,14 @@ export class GpuTangentPoint {
         // (WebGPUAttributeUtils.js:92-96 sizes it from `array.byteLength`) and Dawn REJECTS it at bind-group
         // creation — verified on the Quadro RTX 3000, three r185.1: "Binding size for [Buffer] is zero …
         // While calling [Device].CreateBindGroup" — dropping the dispatch, so gradient()/energy() would
-        // return finite all-zero readbacks with no exception (task-3b review B #2; evidence in
-        // .superpowers/sdd/2026-08-29-webgpu-solver-phase1/reports/task3b-fix-r1.md). `edgeCount === 0`
-        // zero-sizes `slots`/`partials`/`edges`; `pairIndices.length === 0` (every edge touches every
-        // other: one edge, a 2-edge path, a triangle …) zero-sizes `pairIndices` alone. The driver
-        // (plan Task 6) treats a constructor throw as "route this step to the CPU worker".
+        // return finite all-zero readbacks with no exception. Full hardware evidence (the complete Dawn
+        // message, the all-zero readback table, the onuncapturederror path):
+        // @issue utof/repulsive-test2#25
+        // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 2: Topology packing, interleaved hi/lo writer, guard mirrors (pure)"
+        // `edgeCount === 0` zero-sizes `slots`/`partials`/`edges`; `pairIndices.length === 0` (every edge
+        // touches every other: one edge, a 2-edge path, a triangle …) zero-sizes `pairIndices` alone. The
+        // driver (plan "Task 6: Store, boot self-test, driver module") treats a constructor throw as
+        // "route this step to the CPU worker".
         if (topology.edgeCount > REDUCE_MAX_EDGES)
             throw new Error('GpuTangentPoint: edge count exceeds two-pass reduction limit');
         if (topology.edgeCount === 0) throw new Error('GpuTangentPoint: topology has no edges');
@@ -98,7 +101,8 @@ export class GpuTangentPoint {
         // One dynamic positions buffer: [hi.xyz, lo.xyz] per vertex. setUsage verified: three/src/core/BufferAttribute.js:167.
         // .toReadOnly(): the kernels declare `p: ptr<storage, array<f32>, read>` and the emitted access comes from the NODE
         // (WGSLNodeBuilder.js:2155 `getStorageAccess(bufferNode)`) — a read_write node bound to a `read` pointer param is a
-        // shader compile error (plan review r1 #2). CPU upload via needsUpdate needs no shader write access.
+        // shader compile error (plan "Task 1: WGSL source generators (pure)" — pointer access mode must match
+        // the node's). CPU upload via needsUpdate needs no shader write access.
         this.positions = attributeArray(
             new Float32Array(6 * topology.vertexCount),
             'float',
@@ -113,7 +117,7 @@ export class GpuTangentPoint {
         this.topology = [edges, pairOffsets, pairIndices, incidentOffsets, incidentSlots];
         // GPU-written buffers stay read_write (plain instancedArray) — their WGSL params are `read_write`.
         // `slots` is bound read_write in BOTH tpGradient (writer) and tpVertexGather (reader): one node, one access
-        // mode (wgsl.ts vertexGatherWgsl TSDoc, plan review r1 #2).
+        // mode (wgsl.ts vertexGatherWgsl TSDoc; plan "Task 1: WGSL source generators (pure)").
         this.slots = instancedArray(6 * topology.edgeCount, 'float');
         this.grad = instancedArray(3 * topology.vertexCount, 'float');
         this.partials = instancedArray(topology.edgeCount, 'float');
@@ -130,7 +134,7 @@ export class GpuTangentPoint {
         };
         // Shared struct+helpers go in as an INCLUDE (CodeNode.js:170 wgsl(src, includes); FunctionNode.js:168
         // wgslFn(code, includes)) — three's WGSL parser accepts exactly one bare `fn` per wgslFn
-        // (WGSLNodeFunction.js:4 `^fn name(...)` regex; plan review r1 #1).
+        // (WGSLNodeFunction.js:4 `^fn name(...)` regex; plan "Task 1: WGSL source generators (pure)").
         const shared = wgsl(pairKernelWgsl(params));
         const gradFn = wgslFn(gradientKernelWgsl(params), [shared]);
         const gatherFn = wgslFn(vertexGatherWgsl());
@@ -220,7 +224,7 @@ export class GpuTangentPoint {
      * partials buffer (`src/gpu/reduce.ts:75`, ≤128 f32 = ≤512 B per
      * instance) — it is not returned by that exported function, so it is only
      * reclaimed by GC of the node. Tracked in GitHub issue #22 (comment).
-     * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3)
+     * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel"
      * @issue utof/repulsive-test2#22
      */
     dispose(): void {
@@ -232,19 +236,24 @@ export class GpuTangentPoint {
         //    group still references a destroyed buffer.
         for (const n of [...this.gradNodes, ...this.energyNodes])
             (n as { dispose: () => void }).dispose();
-        // 2. Storage attributes. In r185.1 `BufferAttribute.dispose()` (BufferAttribute.js:683) only dispatches
-        //    'dispose' and NO renderer/backend listener is registered on a compute-only storage attribute (the sole
+        // 2. Storage attributes. In r185.1 `BufferAttribute.dispose()` (node_modules/three/src/core/
+        //    BufferAttribute.js:683-687) ONLY dispatches a 'dispose' EVENT — it frees no GPU memory — and NO
+        //    renderer/backend listener is registered on a compute-only storage attribute (the sole
         //    attribute-side 'dispose' listener, WebGPUAttributeUtils.js:443, targets a ReadbackBuffer, which this
         //    class never uses — `getArrayBufferAsync(attr)` with target=null destroys its staging buffer inline,
         //    WebGPUAttributeUtils.js:503). `Attributes.delete` (Attributes.js:46-56) is the only path that frees
         //    the GPUBuffer and it is reached solely from geometry disposal (Geometries.js:194-208). So call what
-        //    it calls: `backend.destroyAttribute` (GPUBuffer.destroy + backend.delete) and `info.destroyAttribute`
-        //    (Info.js:324-334 — removes the STRONG `memoryMap` entry that would otherwise pin the JS attribute and
-        //    its CPU array for the renderer's lifetime, and keeps `renderer.info.memory` honest). Guarded with
-        //    `has` + `buffer`: an attribute never uploaded (e.g. `partials` when `energy()` was never called) has
-        //    no backend record, and `destroyAttribute` would throw on `undefined.destroy()`.
-        //    Verified before/after on hardware: task3b-fix-r1.md (queue.writeBuffer into each buffer after dispose ⇒
-        //    "[Buffer] used in submit while destroyed" validation error; `backend.has` false; storageAttributes 11 → 1).
+        //    it calls: `backend.destroyAttribute` (node_modules/three/src/renderers/webgpu/utils/
+        //    WebGPUAttributeUtils.js:361-370 — `data.buffer.destroy()` + `backend.delete(attribute)`) and
+        //    `info.destroyAttribute` (node_modules/three/src/renderers/common/Info.js:324-334 — removes the STRONG
+        //    `memoryMap` entry that would otherwise pin the JS attribute and its CPU array for the renderer's
+        //    lifetime, and keeps `renderer.info.memory` honest). Guarded with `has` + `buffer`: an attribute never
+        //    uploaded (e.g. `partials` when `energy()` was never called) has no backend record, and
+        //    `destroyAttribute` would throw on `undefined.destroy()`.
+        //    Verified before/after on the Quadro RTX 3000 / three r0.185.1: `queue.writeBuffer` into each buffer
+        //    after dispose ⇒ "[Buffer (unlabeled)] used in submit while destroyed. - While calling
+        //    [Queue].WriteBuffer(...)"; `backend.has` false for all ten; `renderer.info.memory.storageAttributes`
+        //    11 → 1 (1504 B → 4 B, the one surviving buffer being the reduce.ts partials of issue #22).
         const backend = this.renderer.backend as THREE.Backend & AttributeBackend;
         const owned = [
             this.positions,

@@ -247,8 +247,8 @@ export interface SimStore {
     // Select the solver driver; also the §D6 auto-fallback entry point (the frame
     // loop calls this with 'main' on Worker failure). @see the SolverDriver type.
     setSolverDriver(d: SolverDriver): void;
-    // Written once by the Viewer after the boot self-test (spec §2.6); never
-    // by user input.
+    // Written by the Viewer only (spec §2.6): boot self-test verdict, cleared on
+    // device loss / uncaptured error / a failed GPU step. Never by user input.
     setGpuAvailable(b: boolean): void;
     setBarycenterConstraint(b: boolean): void;
     setLengthMode(m: LengthMode): void;

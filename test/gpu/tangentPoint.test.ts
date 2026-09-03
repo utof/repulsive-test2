@@ -21,8 +21,11 @@ test('GpuTangentPoint rejects edge counts beyond the two-pass reduction domain b
 });
 
 // Zero-length storage buffers are rejected up front: Dawn refuses a 0-byte binding at bind-group
-// creation and the dispatch is silently dropped (all-zero finite readback) — task-3b review B #2,
-// verified on hardware in .superpowers/sdd/2026-08-29-webgpu-solver-phase1/reports/task3b-fix-r1.md.
+// creation and the dispatch is silently dropped (all-zero finite readback) — "Binding size for
+// [Buffer (unlabeled)] is zero. … While calling [Device].CreateBindGroup(…)", verified on hardware
+// (Quadro RTX 3000, three r0.185.1, Chrome 152).
+// @issue utof/repulsive-test2#25
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 2: Topology packing, interleaved hi/lo writer, guard mirrors (pure)"
 const throwingRenderer = () =>
     new Proxy(
         {},

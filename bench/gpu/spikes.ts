@@ -343,6 +343,7 @@ function tangentPointKernelTermCPU(
     const cy = eIz * dx - eIx * dz;
     const cz = eIx * dy - eIy * dx;
     const c_norm = Math.sqrt(cx * cx + cy * cy + cz * cz) + epsilon; // ε after norm — tangentPointEnergy.ts:97
+    // biome-ignore lint/style/useExponentiationOperator: Why: CPU numerics reference — op order must stay bit-identical to src/core/tangentPointEnergy.ts; @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.3
     return Math.pow(c_norm, alpha) / Math.pow(d_norm, beta);
 }
 
@@ -1026,7 +1027,7 @@ spikes.toleranceSkeleton = async () => {
 };
 
 // Phase 1 gates live in phase1.ts and share this registry/harness.
-// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3)
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel"
 Object.assign(spikes, phase1Spikes);
 
 declare global {

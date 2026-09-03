@@ -21,7 +21,8 @@ import type { StorageBufferNode } from 'three/webgpu';
  * Lanes per workgroup. Every compute node in the GPU solver is INTENDED to
  * dispatch with this workgroup size, so that the reduction and the kernels
  * share one shape: the two passes below already do, and the tangent-point
- * kernels (plan Task 3, `GpuTangentPoint`) must too.
+ * kernels (`GpuTangentPoint`; plan docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md —
+ * "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel") must too.
  * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.2
  */
 export const REDUCE_LANES = 64;
@@ -30,8 +31,8 @@ export const REDUCE_LANES = 64;
  * Two 64-lane passes (each lane loads 2 values ⇒ 128 inputs per group)
  * cover ≤ 128·128 = 16,384 inputs. Pass 2 is a single group, so it can only
  * fold 128 partials — hence the hard cap. `GpuTangentPoint` rejects larger
- * edge counts before touching the renderer (D4 / Task 3).
- * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3, D4)
+ * edge counts before touching the renderer.
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel" / D4
  */
 export const REDUCE_MAX_EDGES = 128 * 128;
 

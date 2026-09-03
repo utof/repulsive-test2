@@ -51,7 +51,7 @@ already used for rendering, with pre-registered kill gates at every phase.
 - Firefox (per-dispatch overhead ~1 ms — disqualified) [IMPL §4].
 - f16 anywhere (ε=1e-10 flushes to zero in f16) [PREC Q5].
 - Touching `src/core/**` **numerics**: the CPU f64 compute path remains the
-  reference and the fallback, byte-for-byte unchanged. Two sanctioned public
+  reference and the fallback, byte-for-byte unchanged. Three sanctioned public
   type changes exist and are named here so they cannot drift in silently
   (review-3 F1): (i) the store's `SolverDriver` union widens with `'gpu'`;
   (ii) the CORE type `DescentStepOutcome` (`src/core/dispatch.ts:75-98`,

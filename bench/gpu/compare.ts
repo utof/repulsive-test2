@@ -2,7 +2,7 @@
 // spikes (spikes.ts) and the Phase 1 gates (phase1.ts). Bodies moved VERBATIM out of
 // spikes.ts (Phase 0 T11 / T6) so both files check against one definition.
 // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T1–T3)
-// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3)
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel"
 
 /**
  * Deterministic xorshift32 PRNG — no `Math.random`, so seeded data (the
@@ -26,7 +26,7 @@ export function xorshift32(seed: number): () => number {
  * generators that call `Math.random` internally (`testConfigs[*].generate`)
  * produce the same geometry on every gate run. Restored in `finally` so a
  * throwing fixture can never leak the patched PRNG into later spikes.
- * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3; T2/T3 fixtures "with Math.random seeded")
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel" (T2/T3 fixtures "with Math.random seeded")
  */
 export function withSeed<T>(seed: number, run: () => T): T {
     const orig = Math.random;
@@ -56,7 +56,7 @@ export function relErrComparator(gpu: number, cpuRef: number): number {
  * zero ⇒ −1 (GPU and CPU disagree on whether there is any gradient at all —
  * must FAIL the T3 gate, not produce NaN that `>` silently passes over).
  * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T3)
- * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3, comparators)
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel" (comparators)
  */
 export function cosineComparator(a: number[], b: number[]): number {
     if (a.length !== b.length) throw new Error('cosineComparator: length mismatch');

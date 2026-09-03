@@ -1,5 +1,5 @@
 // test/gpu/compare.test.ts — comparators + seeded Math.random helper.
-// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3, comparators)
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 3: `GpuTangentPoint` + reduction + T1/T2/T3 through the production kernel" (comparators)
 import { expect, test } from 'bun:test';
 import { cosineComparator, relErrComparator, withSeed } from '../../bench/gpu/compare';
 

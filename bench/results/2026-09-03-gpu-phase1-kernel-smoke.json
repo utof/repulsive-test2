@@ -40,7 +40,7 @@
       }
     }
   ],
-  "gitShaShort": "39d9d6f",
+  "gitShaShort": "6f7729f",
   "date": "2026-09-03",
   "data": {
     "gate": "phase1KernelSmoke",
@@ -67,8 +67,8 @@
           "allBelow1e4": true
         },
         "wallMs": {
-          "gradient": 62.5,
-          "energy": 44.70000000111759
+          "gradient": 40,
+          "energy": 29.19999999552965
         },
         "rows": [
           {
@@ -175,8 +175,8 @@
           "allBelow1e4": true
         },
         "wallMs": {
-          "gradient": 32,
-          "energy": 30.700000001117587
+          "gradient": 21.100000001490116,
+          "energy": 23.799999997019768
         },
         "rows": [
           {
@@ -255,8 +255,8 @@
           "allBelow1e4": true
         },
         "wallMs": {
-          "gradient": 26.90000000037253,
-          "energy": 23.59999999962747
+          "gradient": 20.899999998509884,
+          "energy": 25.69999999552965
         },
         "rows": [
           {

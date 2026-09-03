@@ -158,7 +158,9 @@ export class GpuDriver {
             // `buildStepArgs` passes `st.live` by REFERENCE (dispatch.ts:333) and PinControls.tsx:169-174 mutates
             // `live` in place across our `await` below — so copy ONCE here and hand the SAME copy to the kernel
             // and to the step; otherwise dE would be evaluated at different vertices than the step uses
-            // (dE seam contract, Task 5 TSDoc). Do not "simplify" this to `args.vertices`.
+            // (dE seam contract — `src/core/optimizer.ts` `dE?: Vec3[]` TSDoc; plan
+            // docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 5: The `dE` seam in core + spec amendment").
+            // Do not "simplify" this to `args.vertices`.
             const vertices = st.live.map((v) => [v[0], v[1], v[2]] as Vec3);
             const args = { ...buildStepArgs(st, energyBefore), vertices };
             const { dE, wallMs } = await this.engine.gradient(vertices);

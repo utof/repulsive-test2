@@ -41,7 +41,9 @@ const f32 = (v: number): string => (/[.e]/i.test(String(v)) ? String(v) : `${v}.
  * `FunctionNode.js:168` wgslFn(code, includes); `CodeNode.js:99-113` builds
  * includes first). It must NOT be concatenated into the entry source:
  * `WGSLNodeFunction.js:4` parses `^fn name(...)` and throws
- * "Function is not a WGSL code." on anything else (plan review r1 #1).
+ * "Function is not a WGSL code." on anything else (plan
+ * `docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md` —
+ * "Task 1: WGSL source generators (pure)": one bare `fn` per wgslFn).
  * Contents: two-float difference, manual cross (CPU component order,
  * tangentPointEnergy.ts:93-95), D3 degeneracy guards, and `kernelDerivs`
  * (CPU closure at tangentPointEnergy.ts:164-248) in the reciprocal-power
@@ -210,7 +212,9 @@ export function gradientKernelWgsl(p: KernelParams): string {
  * slots (vertex→slot CSR, stored order) into grad[3v..3v+2]. No atomics.
  * `slots` is declared read_write here although only read: it is the SAME
  * read_write node the gradient kernel writes, and the pointer mode must
- * match the node's access (review r1 #2).
+ * match the node's access (plan
+ * `docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md` —
+ * "Task 1: WGSL source generators (pure)").
  * Slot contract: `slots[3s..3s+2]` with s = 2·I + endpoint(0|1), exactly as
  * `tpGradient` writes them (i1 → 6I+0..2, i2 → 6I+3..5); the CSR builder must
  * emit s under that rule.
@@ -244,7 +248,8 @@ export function vertexGatherWgsl(): string {
  */
 export function energyKernelWgsl(p: KernelParams): string {
     const { alpha, epsilon } = p;
-    // ENTRY FUNCTION ONLY — pairKernelWgsl is attached as a wgslFn include (review r1 #1).
+    // ENTRY FUNCTION ONLY — pairKernelWgsl is attached as a wgslFn include (plan
+    // docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 1: WGSL source generators (pure)").
     return /* wgsl */ `
         fn tpEnergy(
             p: ptr<storage, array<f32>, read>,

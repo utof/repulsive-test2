@@ -269,7 +269,13 @@ already uses, with `instanceStart`/`instanceEnd` bound to
   bespoke bridge/material is real implementation work, not a Phase 0 spike).
   Ceiling per spec: Phase 3 falls back to the 1-readback/frame path (~0.5 ms
   + a frame of latency) unless a future milestone spikes option (a) or (b).
-- Full result: `bench/results/2026-08-13-gpu-g4.json`.
+- Full result: `bench/results/2026-08-13-gpu-g4.json`. Note that this file
+  records `"status": "PASS"` even though it carries `data.pass: false`: the
+  pre-Phase-1 `drive.ts` only turned a THROWN error red and did not map
+  `data.pass === false` to FAIL (fixed on the `feat/webgpu-phase1` branch, see
+  "INVALID vs FAIL semantics" above). The Phase 0 verdict for G4 was **FAIL →
+  Phase 3**, exactly as the gate table says; only the JSON's `status` field is
+  stale.
 
 ## G6 — perEdge conditioning sweep
 
@@ -408,17 +414,23 @@ iterative-refinement arm, not assume raw f32-CG). Phase 1 (dE gather kernel
 
 Final (2026-09-03, branch `feat/webgpu-phase1`). Every row is backed by a
 committed result file under `bench/results/`, and every number names the JSON
-file and field it is read from. All three files record `"status": "PASS"`,
-`adapter.vendor = "nvidia"`, `adapter.architecture = "turing"` (the Quadro RTX
-3000, a hardware Vulkan adapter, launched with the G0a recipe above) and
-`consoleLines: []`.
+file and field it is read from. All five files record `"status": "PASS"`,
+`adapter.vendor = "nvidia"`, `adapter.architecture = "turing"`,
+`attempts[0].classification = "hardware"` (the Quadro RTX 3000, a hardware
+Vulkan adapter, launched with the G0a recipe above) and `consoleLines: []`.
 
-**Provenance.** `drive.ts` records `git rev-parse --short HEAD` at run time,
-so a JSON committed in the same commit as the run necessarily records the
-PARENT sha: all three files below carry `gitShaShort: "3f543df"`, and the tree
-they were run on differs from `3f543df` only in `bench/gpu/phase1.ts`,
-`bench/gpu/README.md` and `bench/results/*` — the measured `src/` + `src/gpu`
-code IS the committed code. (Known harness limitation, no dirty-tree marker.)
+**Provenance.** `drive.ts` records `git rev-parse --short HEAD` at run time, so
+a JSON committed in the same commit as the run necessarily records the PARENT
+sha. ALL FIVE Phase 1 result files — `2026-09-03-gpu-phase1-reduce.json`,
+`…-kernel-smoke.json`, `…-tolerance.json`, `…-de-gate.json` and
+`…-driver-smoke.json` — were re-run together on the final tree and every one of
+them carries `gitShaShort: "6f7729f"`, the parent of the commit that adds them.
+The tree they were measured on differs from that commit's tree only in
+`bench/gpu/README.md` and `bench/results/*` (both written after the runs), so
+the measured `src/` + `src/gpu` code IS the committed code. Re-running the whole
+set together is deliberate: an earlier revision of this report carried two files
+keyed to commits that had been amended away and were reachable from no branch.
+(Known harness limitation, no dirty-tree marker.)
 
 | Gate | Fixture / method | Result | Threshold | Consequence |
 |---|---|---|---|---|
@@ -426,23 +438,27 @@ code IS the committed code. (Known harness limitation, no dirty-tree marker.)
 | T2 | every `testConfigs` preset at default params (`Math.random` seeded 0x5eed) + `trefoil(240)` + `trefoil(960)`; total energy vs f64 | worst relErr 2.80e-7 (`helix`) — `…-tolerance.json` `data.worst.t2`, rows `data.t23[].t2`; inside the pre-registered expected band [5e-8, 1e-6] (plan D4: not vacuous) | relErr < 1e-6 | PASS |
 | T3 | same fixtures; gradient cosine vs f64 `gradientAnalytical`, all components finite | min cosine 0.99999995 (`trefoil960`, 1 − 5.4e-8) — `…-tolerance.json` `data.worst.t3`, rows `data.t23[].t3`, `data.t23[].finite` all true | cosine > 1 − 1e-6 | PASS |
 | G2-production | `nearTouchPair(1e-6)` through the PRODUCTION hi/lo kernel (the T1 gap=1e-6 row) | relErr 1.30e-7 — `…-tolerance.json` `data.g2Production.relErr` | relErr < 1e-5 | PASS — the Phase 0 G2 spike result holds in the shipped kernel |
-| dE gate N=480 | `trefoil(480)`; wall-clock incl. pack+upload+compute+readback+Vec3[], 1 warm-up, 5 runs, medians, CPU timed in the same browser (plan D4) | cpu p50 290.3 ms / gpu p50 3.4 ms / speedup 85.4× — `2026-09-03-gpu-phase1-de-gate.json` `data.rows[0].cpuP50Ms` / `.gpuP50Ms` / `.speedup` | speedup ≥ 5 | PASS |
-| dE gate N=960 | same method | cpu p50 955.9 ms / gpu p50 5.8 ms / speedup 164.8× — `…-de-gate.json` `data.rows[1].cpuP50Ms` / `.gpuP50Ms` / `.speedup` | speedup ≥ 5 | PASS |
+| dE gate N=480 | `trefoil(480)`; wall-clock incl. pack+upload+compute+readback+Vec3[], 1 warm-up, 5 runs, medians, CPU timed in the same browser (plan D4) | cpu p50 253.4 ms / gpu p50 3.2 ms / speedup 79.2× — `2026-09-03-gpu-phase1-de-gate.json` `data.rows[0].cpuP50Ms` / `.gpuP50Ms` / `.speedup` | speedup ≥ 5 | PASS |
+| dE gate N=960 | same method | cpu p50 974.6 ms / gpu p50 5.1 ms / speedup 191.1× — `…-de-gate.json` `data.rows[1].cpuP50Ms` / `.gpuP50Ms` / `.speedup` | speedup ≥ 5 | PASS |
 | Driver smoke (T5 preview) | `trefoil(120)`, K=20 sobolev steps, barycenter + total-length, `projectionMode: 'frozen'`, penalties off, same deep-copied start; chain A = CPU dE, chain B = `GpuTangentPoint.gradient` → `dispatchDescentStep({…args, dE})`; `energyBefore` chained as the Viewer does | maxRelEnergyDiff 1.19e-7, accepted 20/20 (A/B), monotone true, `stepsAgreeOnAccept` true — `2026-09-03-gpu-phase1-driver-smoke.json` `data.maxRelEnergyDiff`, `data.acceptedA`, `data.acceptedB`, `data.monotone` | maxRelEnergyDiff < 1e-2 AND monotone | PASS (preview — NOT the spec §3 T5 gate, which is K=50, median of 3, both constraint modes, Phase 2) |
+| Reduction exactness | `phase1Reduce`: the two-pass 64-lane sum at n ∈ {1, 63, 64, 65, 128, 129, 960, 16384}, integer values whose exact sum is representable in f32 | every n exact (`2026-09-03-gpu-phase1-reduce.json` `data.rows[].exact` all true; n=16384 → 134225920) | exact integer sum at every n | PASS — a barrier or lane-guard bug in the reduction would show as a wrong integer |
 
 Informational (not gates): the shipped `GpuDriver.step` run as a third chain
 gives energies bit-identical to chain B (`data.maxRelEnergyDiffBvsC = 0`,
-`data.usedGpuC = 20`); per-step dE wall time at N=120 was cpu 15.4 ms / gpu
+`data.usedGpuC = 20`); per-step dE wall time at N=120 was cpu 15.9 ms / gpu
 3.2 ms (`data.dEp50Ms`); GPU compute-only (timestamp query) p50 was 1.55 ms at
-N=480 and 3.62 ms at N=960 (`…-de-gate.json` `data.rows[].gpuComputeOnlyP50Ms`).
-The previous de-gate run on the same day at the `90ef009` tree measured
-69.8× / 73.3× — both runs PASS by >14× at both N, so the perf verdict is not
-flaky (plan stop condition "two runs disagree" did not fire). CPU p50 moved
-with machine load (223→290 ms at N=480, 784→956 ms at N=960); GPU p50 was
-stable at N=480 (3.2→3.4 ms) but halved at N=960 (10.7→5.8 ms wall, 9.2→3.6 ms
-compute-only) with an unchanged kernel — the earlier run carried two >20 ms
-samples (21.5, 24.8 ms), so GPU timings are load/clock-sensitive too, and the
-timestamp-query compute-only time is not clock-pinned.
+N=480 and 3.87 ms at N=960 (`…-de-gate.json` `data.rows[].gpuComputeOnlyP50Ms`).
+Three de-gate runs now exist across the branch: `90ef009` measured 69.8× / 73.3×,
+`3f543df` measured 85.4× / 164.8×, and this final `6f7729f` run measured
+79.2× / 191.1×. The smallest speedup any of them produced at either N is 69.8×,
+so every run PASSes by ≥13.9× over the ≥5 threshold and the perf verdict is not
+flaky (plan stop condition "two runs disagree" did not fire). CPU p50 moves with
+machine load (223→290→253 ms at N=480, 784→956→975 ms at N=960); GPU p50 is
+stable at N=480 (3.2→3.4→3.2 ms) and dropped by half at N=960 after the first
+run (10.7→5.8→5.1 ms wall, 9.2→3.6→3.9 ms compute-only) with an unchanged kernel
+— the earliest run carried two >20 ms samples (21.5, 24.8 ms), so GPU timings
+are load/clock-sensitive too, and the timestamp-query compute-only time is not
+clock-pinned.
 
 **What Phase 1 is and is not (spec §5 Phase 1, global constraints):**
 
@@ -472,15 +488,16 @@ timestamp-query compute-only time is not clock-pinned.
 Dev server up (`bun run dev`), G0a PASSed, then:
 
 ```
+bun bench/gpu/drive.ts phase1Reduce      --out phase1-reduce         # two-pass 64-lane reduction, exact integer sum at n = 1…16384
 bun bench/gpu/drive.ts phase1KernelSmoke --out phase1-kernel-smoke   # compile + per-vertex triage (trefoil12 / crossing / nearTouch1e-6)
 bun bench/gpu/drive.ts phase1Tolerance   --out phase1-tolerance      # T1 / T2 / T3 + G2-production
 bun bench/gpu/drive.ts phase1DeGate      --out phase1-de-gate        # dE ≥5× at N=480 / N=960 (run it alone — CPU p50 is load-sensitive; GPU timestamp-query time is not clock-pinned)
 bun bench/gpu/drive.ts phase1DriverSmoke --out phase1-driver-smoke   # T5 preview through the dE seam
 ```
 
-`phase1Reduce --out phase1-reduce` is the reduction-only exactness check
-(`bench/results/2026-08-30-gpu-phase1-reduce.json`) and is not re-run per
-refresh. A software adapter makes any of these INVALID (see above); `data.pass
-=== false` makes `drive.ts` print STOP-BRANCH and exit 1 — proven falsifiable
-for the driver smoke by running it once with the GPU dE negated (every chain-B
-step `armijo_failed`, maxRelEnergyDiff 0.031, status FAIL).
+Run ALL FIVE on the same tree for any refresh, so that every committed result
+file is keyed to the same reachable parent sha (see Provenance above). A
+software adapter makes any of these INVALID (see above); `data.pass === false`
+makes `drive.ts` print STOP-BRANCH and exit 1 — proven falsifiable for the
+driver smoke by running it once with the GPU dE negated (every chain-B step
+`armijo_failed`, maxRelEnergyDiff 0.031, status FAIL).
