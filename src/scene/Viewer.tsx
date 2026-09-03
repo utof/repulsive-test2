@@ -75,17 +75,30 @@ function Simulation() {
     // the NEW config. @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
     const lastPenaltyEpoch = useRef(0);
     // Worker-driver state (§D1/§D4/§D5). workerRef: the live worker (null in main
-    // mode / before construction). inFlight: the §D1 single-flight guard — true
-    // between a step SEND and its result, so at most one step is ever outstanding.
+    // mode / before construction). inFlight: the §D1 single-flight guard — a TOKEN
+    // rather than a boolean, held between a step SEND and its result, so at most one
+    // step is ever outstanding. `null` means idle, so every `!inFlight.current` idle
+    // check reads exactly as the old `=== false` did; the token additionally records
+    // WHICH backend owns the outstanding step and the dispatchGeneration it was sent
+    // under, so a landing result can be matched against the epoch that produced it.
     // sentTopologyVersion: the graphVersion whose topology the worker already has
     // cached (§D4); -1 forces a resend on a fresh worker. lastResultTime: wall
     // clock of the last applied worker result — the worker path has no frame delta
     // so it accumulates elapsed time for the same ~10 Hz stat throttle.
     // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D1, §D4, §D5
+    // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
     const workerRef = useRef<Worker | null>(null);
-    const inFlight = useRef(false);
+    const inFlight = useRef<null | { backend: 'gpu' | 'worker'; generation: number }>(null);
     const sentTopologyVersion = useRef(-1);
     const lastResultTime = useRef(0);
+    // Monotonic dispatch epoch. Bumped by the solver-lifecycle effect below BEFORE
+    // any early return, so every driver flip / worker rebuild opens a new epoch; a
+    // result carrying an older generation is dropped instead of applied and may not
+    // clear the current token. This is what makes an in-flight step safe to abandon
+    // without cancelling it (a posted Worker message can't be recalled, and a GPU
+    // readback's `mapAsync` can't either).
+    // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
+    const dispatchGeneration = useRef(0);
 
     // Subscribed (not getState) so the worker-lifecycle effect re-runs when the
     // driver flips — the per-frame branch below reads the fresh getState value.
@@ -159,8 +172,10 @@ function Simulation() {
         }
     }, []);
 
-    // Worker→main protocol handler (§D5/§D6). Every response clears the §D1
-    // single-flight guard so the next frame may send again.
+    // Worker→main protocol handler (§D5/§D6). An `error` clears the §D1 single-flight
+    // guard unconditionally; a `result` clears it ONLY when it matches the outstanding
+    // token of the current dispatch epoch (see `owned` below) — an unowned result must
+    // leave the token alone, so do not "simplify" this back to an unconditional clear.
     // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D5, §D6
     const handleWorkerMessage = useCallback(
         (resp: SolverWorkerResponse) => {
@@ -171,7 +186,7 @@ function Simulation() {
                     'solverDriver: worker posted an error; falling back to main:',
                     resp.message,
                 );
-                inFlight.current = false;
+                inFlight.current = null;
                 useSimStore.getState().setSolverDriver('main');
                 return;
             }
@@ -179,15 +194,28 @@ function Simulation() {
             // SEPARATE worker instance in GradientArrows, §D13-c); narrow it out so
             // the union's field variant can't reach the step-application path.
             if (resp.type !== 'result') return;
-            inFlight.current = false;
+            // Token match: this response may clear the single-flight guard — and be
+            // applied — only if it IS the outstanding worker step of the CURRENT
+            // dispatch epoch. After a driver flip / worker rebuild the epoch is bumped,
+            // so a response still in flight from the old epoch must neither clear the
+            // new epoch's token nor reach `live`. During a steady worker run `owned`
+            // is always true, so the pre-token behavior is unchanged.
+            // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
+            const token = inFlight.current;
+            const owned =
+                token?.backend === 'worker' && token.generation === dispatchGeneration.current;
+            if (owned) inFlight.current = null;
             const st = useSimStore.getState();
             // §D5: DROP a result whose topology (graphVersion) no longer matches the
             // store, or that landed after a pause — applying it would mutate committed
             // or foreign buffers. Safe because the E₀ cache is nulled at those same
-            // boundaries, so no stale energy survives the drop.
-            if (resp.graphVersion !== st.graphVersion || !st.running) {
+            // boundaries, so no stale energy survives the drop. The generation is part
+            // of the same drop rule (and of the message) so a dropped result says which
+            // epoch it came from.
+            // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
+            if (!owned || resp.graphVersion !== st.graphVersion || !st.running) {
                 console.warn(
-                    `solverDriver: dropping stale worker result (gv ${resp.graphVersion} vs ${st.graphVersion}, running=${st.running})`,
+                    `solverDriver: dropping stale worker result (reason=${!owned ? 'epoch' : 'gv/running'}, gv ${resp.graphVersion} vs ${st.graphVersion}, running=${st.running}, token ${token?.backend ?? 'none'}/${token?.generation ?? 'none'} vs gen ${dispatchGeneration.current})`,
                 );
                 return;
             }
@@ -205,7 +233,24 @@ function Simulation() {
     // flip / unmount. Auto-fallback to 'main' on construction failure or an
     // uncaught worker error. @see docs/superpowers/plans/2026-07-04-worker-solver.md §D3, §D6
     useEffect(() => {
-        if (solverDriver !== 'worker') return;
+        // FIRST two statements, BEFORE any early return: the bump is what invalidates
+        // results still in flight from the previous epoch. It must precede the
+        // `needsWorker` return, because a flip to 'main' returns early and would
+        // otherwise leave an outstanding worker result free to land on the buffer the
+        // main driver is already stepping. Clearing the token also re-opens the
+        // single-flight gate for the new epoch.
+        // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
+        dispatchGeneration.current++;
+        inFlight.current = null;
+        // The worker is kept alive under 'gpu' as well: 'gpu' serves sobolev +
+        // analytical + penalties-off only, and any other config forces a PER-STEP
+        // fallback to 'worker' without changing the selected driver; only 'main'
+        // tears the worker down. (The driver-level chain gpu → worker → main is
+        // spec §2.6; the per-step fallback that keeps the worker alive is spec §1.)
+        // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "1. Scope"
+        // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "2.6 Driver integration"
+        const needsWorker = solverDriver !== 'main';
+        if (!needsWorker) return;
         let worker: Worker;
         try {
             // §D3: dev-server PATH STRING, NOT new URL(import.meta.url) — Bun.build
@@ -223,13 +268,13 @@ function Simulation() {
             handleWorkerMessage(event.data);
         worker.onerror = (event: ErrorEvent) => {
             console.error('solverDriver: worker error; falling back to main:', event.message);
-            inFlight.current = false;
+            inFlight.current = null;
             useSimStore.getState().setSolverDriver('main');
         };
         workerRef.current = worker;
         // Fresh worker: no in-flight step, no topology cached yet (force a resend
         // next frame), and seed the worker-path stat clock.
-        inFlight.current = false;
+        inFlight.current = null;
         sentTopologyVersion.current = -1;
         lastResultTime.current = performance.now();
         return () => {
@@ -241,7 +286,7 @@ function Simulation() {
             worker.onmessage = null;
             worker.terminate();
             workerRef.current = null;
-            inFlight.current = false;
+            inFlight.current = null;
         };
     }, [solverDriver, handleWorkerMessage]);
 
@@ -300,7 +345,10 @@ function Simulation() {
                         args: { ...args, collectTimings: true, collectField: st.showArrows },
                     };
                     worker.postMessage(stepReq);
-                    inFlight.current = true;
+                    inFlight.current = {
+                        backend: 'worker',
+                        generation: dispatchGeneration.current,
+                    };
                 }
             } else {
                 // Main driver: today's exact synchronous path — the SAME buildStepArgs
