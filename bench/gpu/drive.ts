@@ -386,6 +386,14 @@ async function main() {
     const gate = isAdapterGate ? 'G0a' : spikeName;
     const isHardware = winning?.outcome.classification === 'hardware';
     const hasError = winning?.outcome.error !== undefined;
+    // Why: a spike that RETURNS but reports its own red verdict (`data.pass === false`)
+    // is a FAIL, not a PASS — without this only a thrown error was ever red, so a gate
+    // that measured a failing number still wrote status: PASS and never printed the
+    // STOP-BRANCH line below. Strict `=== false` so Phase 0 spikes with no `pass` field
+    // are unaffected.
+    // @see bench/gpu/README.md — "INVALID vs FAIL semantics"
+    // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 4: Perf gate — GPU dE ≥5× CPU dE at N=480 and N=960 (readback counted)"
+    const selfReportedFail = (winning?.outcome.data as { pass?: unknown } | null)?.pass === false;
     // Distinguish adapter classification from spike-eval outcome (#18 pt.2):
     // software adapter is always INVALID; a hardware adapter with a spike
     // error is a real FAIL, not an INVALID relabeling of the adapter.
@@ -395,8 +403,8 @@ async function main() {
             : 'FAIL' // STOP-BRANCH: no flag set yielded a hardware adapter
         : !winning || !isHardware
           ? 'INVALID' // software (or undetermined) adapter is INVALID, not FAIL
-          : hasError
-            ? 'FAIL' // hardware adapter, but the spike itself failed
+          : hasError || selfReportedFail
+            ? 'FAIL' // hardware adapter, but the spike threw or reported pass: false
             : 'PASS';
 
     const result = {

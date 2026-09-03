@@ -172,6 +172,18 @@ export interface SobolevStepOptions {
      * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
      */
     factorMode?: FactorMode;
+    /**
+     * Precomputed tangent-point differential at the INPUT vertices — the
+     * WebGPU milestone's Phase 1 seam (spec §1 sanctioned delta (iii), §2.6).
+     * When present it replaces the analytical/FD computation ONLY; penalties,
+     * solve, projection, line search are untouched. MUST be dE_tpe of
+     * `vertices` under the same α/β/ε — the caller owns that (the 'gpu'
+     * driver computes it from the very vertices it passes). Absent ⇒ every
+     * path bit-identical (golden suite). Not a numeric change: selects the
+     * SOURCE of dE, not its arithmetic.
+     * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
+     */
+    dE?: Vec3[];
 }
 
 /**
@@ -223,7 +235,10 @@ export interface SobolevStepStats {
  * with `assertValidConstraintSet` at construction time (spec §3.4) — this
  * function deliberately does NOT validate per step, because it runs in the
  * frame loop and must never throw (invalid rank surfaces as the existing
- * 'singular_system' rejection instead).
+ * 'singular_system' rejection instead). Carve-out: the ONLY per-step throw is
+ * the `opts.dE` length guard below — a caller-contract violation (wrong array
+ * length), never a numeric condition, so the never-throw property still holds
+ * for every input the frame loop can produce.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
  * @see docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md §3.1, §3.4, §3.5
  * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set / line_search_step_set)
@@ -245,6 +260,10 @@ export function sobolevStepSet(
     // null when the saddle was singular so no g̃ exists). @see plan §D14 / issue #9
     descentField?: Vec3[] | null;
 } {
+    // FIRST statement, before timingsBegin(): a throw must not leave the timing collector
+    // armed. @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
+    if (opts.dE && opts.dE.length !== vertices.length)
+        throw new Error('sobolevStepSet: dE length mismatch');
     // Phase-timing collection is opt-in and provably inert when off: timingsBegin
     // arms the module collector, timed('step', …) records the whole step, and the
     // inner call-site wraps (dE / energy / lineSearch here, plus the assembleA /
@@ -275,10 +294,21 @@ export function sobolevStepSet(
             const h = opts.h ?? DEFAULTS.h;
             const pen = penaltiesActive(opts.penalties) ? opts.penalties : undefined;
 
-            const dETpe = timed('dE', () =>
-                opts.mode === 'analytical'
-                    ? gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon)
-                    : gradientFiniteDiff(vertices, edges, disjointPairs, alpha, beta, epsilon, h),
+            const dETpe = timed(
+                'dE',
+                () =>
+                    opts.dE ??
+                    (opts.mode === 'analytical'
+                        ? gradientAnalytical(vertices, edges, disjointPairs, alpha, beta, epsilon)
+                        : gradientFiniteDiff(
+                              vertices,
+                              edges,
+                              disjointPairs,
+                              alpha,
+                              beta,
+                              epsilon,
+                              h,
+                          )),
             );
             // Penalties enter the objective's differential BEFORE the solve
             // (plan §2.4): dE_total = dE_tpe + Σ w·dÊ. Inactive ⇒ dE IS dETpe

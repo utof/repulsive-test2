@@ -1,0 +1,176 @@
+{
+  "gate": "phase1Tolerance",
+  "status": "PASS",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "turing",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "flags": [
+    "--headless=new",
+    "--enable-unsafe-webgpu",
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
+    "--enable-gpu",
+    "--no-sandbox"
+  ],
+  "attempts": [
+    {
+      "flags": [
+        "--headless=new",
+        "--enable-unsafe-webgpu",
+        "--enable-features=Vulkan",
+        "--use-angle=vulkan",
+        "--enable-gpu",
+        "--no-sandbox"
+      ],
+      "classification": "hardware",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "turing",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      }
+    }
+  ],
+  "gitShaShort": "6f7729f",
+  "date": "2026-09-03",
+  "data": {
+    "gate": "phase1Tolerance",
+    "seed": 24301,
+    "t1": [
+      {
+        "gap": 0.001,
+        "gpu": 7999992832,
+        "cpu64": 7999995799.803969,
+        "relErr": 3.7097569094423304e-7,
+        "pass": true
+      },
+      {
+        "gap": 0.0001,
+        "gpu": 7999961694208,
+        "cpu64": 7999957999882.854,
+        "relErr": 4.6179306773091465e-7,
+        "pass": true
+      },
+      {
+        "gap": 0.00001,
+        "gpu": 7999578989133824,
+        "cpu64": 7999580012992458,
+        "relErr": 1.27989048467183e-7,
+        "pass": true
+      },
+      {
+        "gap": 0.000001,
+        "gpu": 7995800289791705000,
+        "cpu64": 7995801331116974000,
+        "relErr": 1.3023400980956239e-7,
+        "pass": true
+      }
+    ],
+    "t23": [
+      {
+        "name": "crossing",
+        "nV": 8,
+        "t2": 1.5127240075255887e-8,
+        "t2pass": true,
+        "t3": 0.9999999999999982,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "helix",
+        "nV": 30,
+        "t2": 2.804896389516832e-7,
+        "t2pass": true,
+        "t3": 0.9999999999987055,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "linked-rings",
+        "nV": 32,
+        "t2": 2.8223998710955955e-9,
+        "t2pass": true,
+        "t3": 0.9999999999999758,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "knot",
+        "nV": 50,
+        "t2": 1.3500607434259207e-9,
+        "t2pass": true,
+        "t3": 0.9999999999983966,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "stress",
+        "nV": 200,
+        "t2": 1.9586313400581294e-8,
+        "t2pass": true,
+        "t3": 0.9999999999984304,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "random",
+        "nV": 30,
+        "t2": 1.7566819844763474e-7,
+        "t2pass": true,
+        "t3": 0.9999999999999478,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "chain",
+        "nV": 50,
+        "t2": 9.088050212529347e-8,
+        "t2pass": true,
+        "t3": 0.9999999999999647,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "trefoil240",
+        "nV": 240,
+        "t2": 7.337568366540238e-8,
+        "t2pass": true,
+        "t3": 0.9999999997253778,
+        "t3pass": true,
+        "finite": true
+      },
+      {
+        "name": "trefoil960",
+        "nV": 960,
+        "t2": 9.535173582354423e-8,
+        "t2pass": true,
+        "t3": 0.9999999462938508,
+        "t3pass": true,
+        "finite": true
+      }
+    ],
+    "g2Production": {
+      "gap": 0.000001,
+      "gpu": 7995800289791705000,
+      "cpu64": 7995801331116974000,
+      "relErr": 1.3023400980956239e-7,
+      "pass": true
+    },
+    "worst": {
+      "t1": 4.6179306773091465e-7,
+      "t2": 2.804896389516832e-7,
+      "t3": 0.9999999462938508
+    },
+    "pass": true
+  },
+  "consoleLines": []
+}

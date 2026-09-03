@@ -40,6 +40,10 @@ export function ControlPanel() {
     const setProjectionMode = useSimStore((s) => s.setProjectionMode);
     const solverDriver = useSimStore((s) => s.solverDriver);
     const setSolverDriver = useSimStore((s) => s.setSolverDriver);
+    // Boot self-test verdict (spec §2.6): 'gpu' is selectable only after it passes;
+    // device loss / an uncaptured error clears it again (the Viewer then falls back).
+    // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "2.6 Driver integration"
+    const gpuAvailable = useSimStore((s) => s.gpuAvailable);
     const showArrows = useSimStore((s) => s.showArrows);
     const setShowArrows = useSimStore((s) => s.setShowArrows);
     const setRunning = useSimStore((s) => s.setRunning);
@@ -225,7 +229,11 @@ export function ControlPanel() {
                     fluid; 'main' is today's synchronous in-frame path. NOT a
                     constraint/sobolev-only control — it applies to both descent
                     modes (the SAME pure step runs either way), so it stays enabled
-                    in raw mode. @see docs/superpowers/plans/2026-07-04-worker-solver.md §D6 */}
+                    in raw mode. @see docs/superpowers/plans/2026-07-04-worker-solver.md §D6
+                    'gpu' (Phase 1: GPU dE, CPU everything else) is gated on the boot
+                    self-test and serves sobolev + analytical + penalties-off only —
+                    other configs step on the worker without changing the selection.
+                    @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "1. Scope", "2.6 Driver integration" */}
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span>Solver:</span>
                     <select
@@ -233,6 +241,9 @@ export function ControlPanel() {
                         onChange={(e) => setSolverDriver(e.target.value as SolverDriver)}
                         style={{ padding: 8, fontSize: 14 }}
                     >
+                        <option value="gpu" disabled={!gpuAvailable}>
+                            GPU (experimental){gpuAvailable ? '' : ' — unavailable'}
+                        </option>
                         <option value="worker">Worker</option>
                         <option value="main">Main thread</option>
                     </select>

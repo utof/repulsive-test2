@@ -103,9 +103,17 @@ function cloneVerts(v: Vec3[]): Vec3[] {
  * {@link SimStore.setSolverDriver}) if the Worker fails to construct or posts an
  * error (§D6). This is a main-thread concern, so it lives in the store, NOT in
  * worker-bundle-pure src/core/**.
+ *
+ * 'gpu' (WebGPU Phase 1): the main-thread GPU computes dE only; E₀, line search,
+ * projection and the saddle solve stay CPU f64 (`src/gpu/driver.ts`). Selectable
+ * only when {@link SimStore.gpuAvailable} (boot self-test, spec §2.6). It serves
+ * sobolev + analytical + penalties-off only (spec §1): any other config — or an
+ * unsupported topology — runs THAT step on the 'worker' path without changing
+ * the selected driver. Failure chain on a thrown GPU error: gpu → worker → main.
  * @see docs/superpowers/plans/2026-07-04-worker-solver.md §D6
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §1, §2.6, §5
  */
-export type SolverDriver = 'worker' | 'main';
+export type SolverDriver = 'gpu' | 'worker' | 'main';
 
 export interface SimStore {
     // config (React-subscribed, infrequent)
@@ -117,6 +125,11 @@ export interface SimStore {
     // Off-main-thread solver driver (default 'worker'); see the SolverDriver type
     // anchor. @see docs/superpowers/plans/2026-07-04-worker-solver.md §D6
     solverDriver: SolverDriver;
+    // Boot-gate verdict of the WebGPU self-test (default false — nothing may
+    // select 'gpu' until the Viewer's `runGpuSelfTest` passes on the live
+    // renderer; a failed gate leaves it false and the UI hides the option).
+    // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.6
+    gpuAvailable: boolean;
     running: boolean;
     // FROZEN constraint targets for the sobolev descent: x₀ (barycenter),
     // L⁰ (total length) and ℓ⁰ (per-edge lengths, spec §5.3). Lifecycle (anchor —
@@ -234,6 +247,9 @@ export interface SimStore {
     // Select the solver driver; also the §D6 auto-fallback entry point (the frame
     // loop calls this with 'main' on Worker failure). @see the SolverDriver type.
     setSolverDriver(d: SolverDriver): void;
+    // Written by the Viewer only (spec §2.6): boot self-test verdict, cleared on
+    // device loss / uncaptured error / a failed GPU step. Never by user input.
+    setGpuAvailable(b: boolean): void;
     setBarycenterConstraint(b: boolean): void;
     setLengthMode(m: LengthMode): void;
     setLengthConstraint(b: boolean): void;
@@ -344,6 +360,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
         descentMode: 'raw',
         // Default off-main-thread (§D6): smooth interaction is the milestone goal.
         solverDriver: 'worker',
+        // Off until the boot self-test passes (spec §2.6).
+        gpuAvailable: false,
         running: false,
         graph: built.graph,
         disjointPairs: built.disjointPairs,
@@ -396,6 +414,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
         // way — bit-identical, §2); the frame loop reacts by (re)creating or
         // tearing down the worker. @see …worker-solver.md §D6
         setSolverDriver: (d) => set({ solverDriver: d }),
+        // Boot-gate flag (spec §2.6). Plain field write; the driver select reads it.
+        setGpuAvailable: (b) => set({ gpuAvailable: b }),
         // Mode switch clears the other mode's stale diagnostics; x₀ needs no
         // recompute here — it re-anchors at the next run start (see lifecycle anchor).
         setDescentMode: (m) =>

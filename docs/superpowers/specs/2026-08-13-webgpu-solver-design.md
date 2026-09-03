@@ -51,13 +51,17 @@ already used for rendering, with pre-registered kill gates at every phase.
 - Firefox (per-dispatch overhead ~1 ms — disqualified) [IMPL §4].
 - f16 anywhere (ε=1e-10 flushes to zero in f16) [PREC Q5].
 - Touching `src/core/**` **numerics**: the CPU f64 compute path remains the
-  reference and the fallback, byte-for-byte unchanged. Two sanctioned public
+  reference and the fallback, byte-for-byte unchanged. Three sanctioned public
   type changes exist and are named here so they cannot drift in silently
   (review-3 F1): (i) the store's `SolverDriver` union widens with `'gpu'`;
   (ii) the CORE type `DescentStepOutcome` (`src/core/dispatch.ts:75-98`,
   re-exported by the store) gains an explicit stats-only variant in Phase 3
   (§2.8), which also touches `SolverWorkerResponse`'s carried type and
   requires a knowing update to the worker plan's §T2 deep-equality tests.
+  (iii) [Phase 1 plan D5] `SobolevStepOptions` / `DispatchDescentStepArgs`
+  gain optional `dE?: Vec3[]` — a precomputed differential at the input
+  vertices; absent ⇒ bit-identical. Non-numeric: it selects the SOURCE of dE,
+  not its arithmetic.
 - GPU support for `descentMode: 'raw'`, `mode: 'finiteDiff'`, or any nonzero
   penalty config (review-3 F4): the `'gpu'` driver serves
   **sobolev + analytical gradient + penalties-off only**; any of those
@@ -102,13 +106,14 @@ already used for rendering, with pre-registered kill gates at every phase.
   exponent is genuinely non-integer. WGSL `pow` = `exp2(y·log2 x)`, measured
   harmless at α=3/β=6 — re-verify if exponents ever change [PREC Q1].
 - **Degeneracy guards re-derived for f32.** The CPU `< 1e-14` pre-ε length
-  guards are meaningless in f32; the GPU kernel is mathematically the ε=0
-  energy (ε=1e-10 is provably inert in f32), so degeneracy protection is an
-  explicit branch with an f32-scale threshold, derived in the plan [PREC Q1].
+  guards are meaningless in f32; ε is added after every norm exactly as on the
+  CPU (it is part of the energy definition and is NOT inert at near-touch scale
+  — 5e-4 relative at gap 1e-6, Phase 1 plan D2); degeneracy protection is an
+  explicit f32-scale branch, derived in the Phase 1 plan (D3).
 - **Never mix CPU and GPU energies within one descent run** — they differ at
-  the 1e-9 level (ε-inertness); *within a run, every energy COMPARISON uses
-  energies from one source*. (Phase 1 satisfies this by keeping ALL energies
-  CPU-side — §5.) [PREC end]
+  the 1e-9 level (f32 vs f64 rounding, plan D2); *within a run, every energy
+  COMPARISON uses energies from one source*. (Phase 1 satisfies this by
+  keeping ALL energies CPU-side — §5.) [PREC end]
 
 ### 2.4 The solve (the actual bottleneck — ~45–80% of a step at N=120, O(N³))
 Two candidate paths, decided by pre-registered experiment (Gate G5):
@@ -205,8 +210,9 @@ Two candidate paths, decided by pre-registered experiment (Gate G5):
   run once per adapter at renderer init.
 - The dispatch/step-arg contract (`src/core/dispatch.ts`) is the integration
   seam, same as the worker driver used. **No `src/core` numeric changes; the
-  only public-type deltas are the two sanctioned in §1** (SolverDriver
-  widening; DescentStepOutcome stats-only variant).
+  only public-type deltas are the three sanctioned in §1** (SolverDriver
+  widening; DescentStepOutcome stats-only variant; the Phase 1 `dE?` seam,
+  (iii)).
 
 ### 2.7 Rendering integration (Phase 3, spiked in Phase 0)
 - Target: compute output written into the fat-line geometry's interleaved
@@ -428,7 +434,8 @@ default flip).
   blocked LDLᵀ/LU is the largest single deliverable in that branch and has no
   prior art in this stack; G5's estimate must include an implementation-cost
   judgment, not just projected solve times.
-- **ε-semantics drift:** the GPU energy is the ε=0 energy [PREC Q1]. All
+- **ε-semantics drift:** GPU energy/gradient use the same ε=1e-10 as the CPU
+  (Phase 1 plan D2); only the degeneracy guard scale differs (f32, plan D3). All
   fixtures with intentionally-degenerate edges must go through the explicit
   f32 degeneracy branch tests, not rely on ε.
 - **`trackTimestamp` is a Viewer change** (review-3 F8): G3/G7 need
