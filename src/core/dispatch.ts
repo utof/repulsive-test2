@@ -155,6 +155,13 @@ export interface DispatchDescentStepArgs {
     // only (energy + dE), never the constraint set — so `set` is untouched.
     // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
     penalties?: PenaltyConfig;
+    // Precomputed dE at `vertices` (WebGPU Phase 1 seam): sobolev+ConstraintSet path
+    // only; raw/legacy branches ignore it — true THROUGH dispatchDescentStep only, as
+    // the legacy `sobolevStep` forwards opts verbatim (optimizer.ts), so a DIRECT
+    // caller passing dE does get it honoured. Rides the worker `step` payload if set;
+    // `buildStepArgs` never sets it (the 'gpu' driver dispatches inline).
+    // @see SobolevStepOptions.dE (optimizer.ts)
+    dE?: Vec3[];
 }
 
 /**
@@ -258,6 +265,9 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
             // penaltiesActive, bit-identical (plan §2.4).
             // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
             penalties: args.penalties,
+            // Phase 1 GPU seam passthrough; undefined → core computes dE itself.
+            // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
+            dE: args.dE,
         });
         return {
             vertices: r.vertices,
