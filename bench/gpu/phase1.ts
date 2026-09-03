@@ -1,6 +1,6 @@
 // bench/gpu/phase1.ts — Phase 1 gates through the PRODUCTION kernel pieces.
 // Registered into the Phase 0 spike registry by spikes.ts (Object.assign).
-// @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.2, §3 (T1–T3), §5 Phase 1
+// @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §2.2, §3 (T1–T3), §4 G2, §5 Phase 1
 // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3)
 import { attributeArray } from 'three/tsl';
 import * as THREE from 'three/webgpu';
@@ -15,7 +15,7 @@ import { type Edge, testConfigs, type Vec3 } from '../../src/core/testConfigs';
 import { makeReduceSum, REDUCE_MAX_EDGES } from '../../src/gpu/reduce';
 import { GpuTangentPoint } from '../../src/gpu/tangentPoint';
 import { packTopology } from '../../src/gpu/topology';
-import { relErrComparator } from './compare';
+import { cosineComparator, relErrComparator, withSeed } from './compare';
 
 /**
  * Phase 1 spikes, merged into `spikes.ts`'s registry so `drive.ts` can run
@@ -151,5 +151,105 @@ phase1Spikes.phase1KernelSmoke = async () => {
         params: { alpha, beta, epsilon },
         fixtures: results,
         pass: results.every((r) => r.pass),
+    };
+};
+
+/**
+ * Build one `GpuTangentPoint` for a fixture, using the SAME disjoint-pair
+ * source as the CPU reference so GPU and CPU evaluate an identical (I,J)
+ * set in the same order (plan D1). The caller owns `gpu` (dispose in
+ * `finally`).
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3c, Step 5)
+ */
+const engine = (r: THREE.WebGPURenderer, vertices: Vec3[], edges: Edge[]) => {
+    const dp = calculateDisjointPairs(edges);
+    return { dp, gpu: new GpuTangentPoint(r, packTopology(vertices.length, edges, dp)) };
+};
+
+/**
+ * A preset's `params` at their declared defaults — the plan's "every
+ * `testConfigs` preset at default params" (global-constraints, Fixtures).
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3c, Step 5)
+ */
+const defaults = (c: (typeof testConfigs)[number]) =>
+    Object.fromEntries((c.params ?? []).map((q) => [q.name, q.default]));
+
+/**
+ * The pre-registered Phase 1 tolerance gate through the PRODUCTION kernel.
+ * T1 = single-pair energy on the 2-edge `nearTouchPair(gap)` graph for
+ * gap ∈ {1e-3, 1e-4, 1e-5, 1e-6}, relErr < 1e-5 vs CPU-f64 `calculateEnergy`;
+ * the gap=1e-6 row doubles as the G2-production datapoint (`g2Production`).
+ * T2 = total energy relErr < 1e-6 and T3 = gradient cosine > 1 − 1e-6 on
+ * every `testConfigs` preset at default params (Math.random seeded with
+ * 0x5eed for the whole fixture list, so `random`/`chain` are reproducible)
+ * plus `trefoil(240)` and `trefoil(960)`. Every fixture must also return an
+ * all-finite gradient (plan D3 — `crossing`'s exactly-collinear disjoint
+ * pair exercises the strict `>` guard). Tolerances, fixtures and the seed
+ * are pre-registered and NOT negotiable; a red row stops the branch.
+ * T2 error budget: the pre-registered expected band is [5e-8, 1e-6]; a
+ * value below 1e-9 is investigated as a vacuous comparison (plan D4).
+ * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3 (T1–T3), §4 G2, §5 Phase 1
+ * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (Task 3c; D1, D3, D4)
+ */
+phase1Spikes.phase1Tolerance = async () => {
+    const renderer = new THREE.WebGPURenderer();
+    await renderer.init();
+    const { alpha, beta, epsilon } = DEFAULTS;
+    const t1 = [];
+    for (const gap of [1e-3, 1e-4, 1e-5, 1e-6]) {
+        const { vertices, edges } = nearTouchPair(gap);
+        const { dp, gpu } = engine(renderer, vertices, edges);
+        try {
+            const cpu64 = calculateEnergy(vertices, edges, dp, alpha, beta, epsilon);
+            const { energy } = await gpu.energy(vertices);
+            const relErr = relErrComparator(energy, cpu64);
+            t1.push({ gap, gpu: energy, cpu64, relErr, pass: relErr < 1e-5 });
+        } finally {
+            gpu.dispose();
+        }
+    }
+    const fixtures = withSeed(0x5eed, () => [
+        ...testConfigs.map((c) => ({ name: c.id, ...c.generate(defaults(c)) })),
+        { name: 'trefoil240', ...trefoil(240) },
+        { name: 'trefoil960', ...trefoil(960) },
+    ]);
+    const t23 = [];
+    for (const f of fixtures) {
+        const { dp, gpu } = engine(renderer, f.vertices, f.edges);
+        try {
+            const e64 = calculateEnergy(f.vertices, f.edges, dp, alpha, beta, epsilon);
+            const g64 = gradientAnalytical(f.vertices, f.edges, dp, alpha, beta, epsilon);
+            const { energy } = await gpu.energy(f.vertices);
+            const { dE } = await gpu.gradient(f.vertices);
+            const t2 = relErrComparator(energy, e64);
+            const t3 = cosineComparator(dE.flat(), g64.flat());
+            // D3: a NaN anywhere (e.g. `crossing`'s collinear pair) fails the fixture.
+            const finite = dE.every((v) => v.every(Number.isFinite));
+            t23.push({
+                name: f.name,
+                nV: f.vertices.length,
+                t2,
+                t2pass: t2 < 1e-6,
+                t3,
+                t3pass: t3 > 1 - 1e-6,
+                finite,
+            });
+        } finally {
+            gpu.dispose();
+        }
+    }
+    const pass = t1.every((r) => r.pass) && t23.every((r) => r.t2pass && r.t3pass && r.finite);
+    return {
+        gate: 'phase1Tolerance',
+        seed: 0x5eed,
+        t1,
+        t23,
+        g2Production: t1.find((r) => r.gap === 1e-6),
+        worst: {
+            t1: Math.max(...t1.map((r) => r.relErr)),
+            t2: Math.max(...t23.map((r) => r.t2)),
+            t3: Math.min(...t23.map((r) => r.t3)),
+        },
+        pass,
     };
 };
