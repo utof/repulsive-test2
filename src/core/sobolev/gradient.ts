@@ -118,7 +118,7 @@ export function solveConstrainedGradientSetFrozen(
         // Source selection, never arithmetic (the Phase 1 `dE?` rule): A comes from
         // the caller instead of assembleAFlat, the factorization comes from the GPU
         // Cholesky, and the solve routes through the ALREADY-EXPORTED
-        // solveSaddleFrozen (:931-954) so the residual stays the byte-identical
+        // solveSaddleFrozen (:932-955) so the residual stays the byte-identical
         // structured matvec the goldens gate — `solveFactored` and
         // `structuredSaddleResidual` are module-private and must stay that way.
         // C is evaluated by the CORE above, never by the driver.

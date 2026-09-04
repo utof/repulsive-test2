@@ -276,13 +276,14 @@ export function sobolevStepSet(
 } {
     // FIRST statements, before timingsBegin(): a throw must not leave the timing
     // collector armed (this is the PRE-ARM path, so it needs no disarm — D1).
+    // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D1)
     // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
     if (opts.dE && opts.dE.length !== vertices.length)
         throw new Error('sobolevStepSet: dE length mismatch');
     // The saddle mirror of the line above. `saddle.A` goes straight into
-    // FrozenSaddleOperator.a, and solveSaddleFrozen (linsolve.ts:931-954) validates
+    // FrozenSaddleOperator.a, and solveSaddleFrozen (linsolve.ts:932-955) validates
     // rhsTop/rhsBottom lengths ONLY — while the path it replaces DOES validate A
-    // (solveSaddleFromA, :803-805). Without this the seam path is strictly less checked
+    // (solveSaddleFromA, :804-806). Without this the seam path is strictly less checked
     // than the CPU path, and a short A reads out of range → undefined → NaN, which
     // nothing downstream thresholds: the run would auto-pause on `armijo_failed` with
     // usedGpuSolve still true.
@@ -307,7 +308,8 @@ export function sobolevStepSet(
     // Declared here rather than inline at the call site because a try/catch cannot
     // assign to a `const`, and the disarm below needs the try. These are EXACTLY the
     // fields the previous inline annotation listed — no field added, removed or renamed.
-    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4 (D1)
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+    // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D1)
     type StepBodyOutcome = {
         vertices: Vec3[];
         energy: number;
@@ -500,7 +502,8 @@ export function sobolevStepSet(
         // path ONLY: an unconditional `finally` would null `acc` before the success
         // path reads it below and would silently drop `timings` from every collected
         // step.
-        // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4 (D1)
+        // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+        // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D1)
         if (collect) timingsEnd();
         throw e;
     }

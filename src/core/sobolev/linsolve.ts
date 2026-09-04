@@ -407,7 +407,7 @@ export type SaddleFactorization = LuFactorization | LdltFactorization | External
  * itself certified the result ([DESIGN §4.1] step 4); it throws
  * {@link ExternalSolveError} rather than returning an uncertified z.
  * Why: nothing in `src/core/` ever compares `residual` against a threshold —
- * `linsolve.ts:849`/`:952` compute it and `optimizer.ts:386,435,489` forward it
+ * `linsolve.ts:850`/`:953` compute it and `optimizer.ts:388,437,491` forward it
  * as a stat — so a solve that converged to 1e-3 is indistinguishable at every
  * call site from one that converged to 1e-12.
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1, §4.4
@@ -742,6 +742,7 @@ function solveFactored(fac: SaddleFactorization, rhs: number[]): number[] {
     // `'kind' in fac` guard is not redundant — LuFactorization (:219-223) has no
     // `kind` field, so `fac.kind === …` alone is a TS error on this union.
     // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+    // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D3)
     if ('kind' in fac && fac.kind === 'external') return fac.solve(rhs);
     return 'kind' in fac ? ldltSolveFactored(fac, rhs) : luSolveFactored(fac, rhs);
 }
