@@ -338,9 +338,18 @@ export function makePreparedSaddle(
                             // search would reject the wrong g̃ as `armijo_failed` and the
                             // run would auto-pause with usedGpuSolve still true.
                             // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 step 4, §4.5
+                            // `${it}`, the LOOP COUNTER — deliberately NOT
+                            // `${SADDLE_IR_MAX_REFINEMENTS}`. Interpolating the constant
+                            // makes the message read "4 refinements" for ANY loop bound,
+                            // so the budget assertion in `test/gpu/saddle.test.ts` cannot
+                            // tell z₀+4 from z₀+3 and an off-by-one ships green (measured:
+                            // the `it >= MAX - 1` mutant left all 9 tests passing). The
+                            // counter makes that assertion real, and reports what actually
+                            // happened rather than what was budgeted.
+                            // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 step 4
                             throw new ExternalSolveError(
                                 `saddle IR: relative residual ${rel.toExponential(3)} after ` +
-                                    `${SADDLE_IR_MAX_REFINEMENTS} refinements (bar ${SADDLE_IR_TOL})`,
+                                    `${it} refinements (bar ${SADDLE_IR_TOL})`,
                             );
                         }
                         const d = applyKinv(r);

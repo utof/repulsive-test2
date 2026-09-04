@@ -171,6 +171,71 @@ test('makePreparedSaddle with an EXACT f64 factor reproduces solveSaddleFromA', 
     expect(Math.sqrt(num / den)).toBeLessThan(1e-10);
 });
 
+test('makePreparedSaddle reproduces solveSaddleFromA on the PROJECTION rhs — the Woodbury/M path', () => {
+    // THE GRADIENT RHS CANNOT TEST THIS, which is why this case is separate rather than
+    // one more assertion above. The Woodbury correction of [DESIGN §4.1] step 3 is
+    // `W·mu` with `mu = M⁻¹(Pᵀx̂)`, so it does nothing whenever `Pᵀx̂ = 0`. Measured at
+    // n=60 (`scratch/t2-mechanism.ts`): `|Pᵀx̂|` is 3.7e-17 on the gradient rhs against
+    // 8.6e-3 here — fourteen orders apart, so on a gradient rhs the ENTIRE Woodbury/M
+    // path is multiplied by zero. Cause: `rhsBottom = 0` makes the Schur solution satisfy
+    // `C x̂ = 0`, pinning the barycenter, and the tangent-point gradient is
+    // translation-invariant (measured `|Pᵀb|/|b|` = 2.0e-16), so no null-space component
+    // is left for Woodbury to restore. A projection rhs with nonzero barycenter rows
+    // requires the barycenter to MOVE — exactly the null direction — so the term is live.
+    // (Do NOT re-state this as "C's barycenter rows are Pᵀ up to scale": they are
+    // length-weighted, with a measured relative weight spread of 1.01. It is `C·P` that
+    // is a scaled `[I₃; 0]`, not the rows themselves.)
+    // Three real defects pass every gradient-rhs test in this file and die on this one:
+    // M formed in f32, the Woodbury sign flipped, and `residualOf` measuring against A_σ
+    // instead of the unshifted A. Do not fold this into the test above and do not
+    // "simplify" its rhs to the gradient shape.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 step 3
+    const { A, C, n } = system(60);
+    const { Asigma, sigma } = shiftSobolev(A, n);
+    const L = choleskyF64(Asigma, n);
+    const traces: IrTrace[] = [];
+    const prepared = makePreparedSaddle(A, L, sigma, n, (t) => {
+        traces.push(t);
+    });
+    const zeros = new Array<number>(3 * n).fill(0);
+    const d = Array.from({ length: C.length }, (_, i) => -0.1 - 0.01 * i);
+    const z = asExternal(prepared.factor(C)).solve([...zeros, ...d]);
+    const ref = solveSaddleFromA(A, n, C, zeros, d);
+    const zref = [...ref.x, ...ref.lambda];
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < z.length; i++) {
+        num += (z[i] - zref[i]) ** 2;
+        den += zref[i] ** 2;
+    }
+    expect(Math.sqrt(num / den)).toBeLessThan(1e-10); // measured 8.9230e-15 at n=60
+
+    // z₀ ALONE must clear the tolerance — assert steps 1–3, not steps 1–4. The comparison
+    // above cannot see an M defect on its own: IR minimises the RESIDUAL, so it repairs a
+    // degraded z₀ and hands back a converged z either way. Measured with M formed in f32:
+    // the curve becomes [1.352e-8, 2.138e-15] — z₀ is six orders worse — yet the final
+    // relative error is 8.1968e-15 against the correct 8.9230e-15, i.e. INDISTINGUISHABLE.
+    // Only the refinement count separates them. This is the same steps-1–3-not-1–4
+    // distinction gate CR is pinned to, and the reason it is pinned there.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §5 (CR)
+    expect(traces).toHaveLength(1);
+    expect(traces[0].refinements).toBe(0);
+    expect(traces[0].relResiduals).toHaveLength(1); // measured [1.124e-14] at n=60
+
+    // Non-vacuity, in the shape D6 requires of CR's own projection row: assert the
+    // Woodbury term is actually EXERCISED. Without it, a later change that quietly drove
+    // `d` to zero would leave this test green while restoring the exact blindness it was
+    // added to remove.
+    // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md (## Decisions, D6)
+    let ptx = 0;
+    for (let a = 0; a < 3; a++) {
+        let s = 0;
+        for (let i = 0; i < n; i++) s += z[a * n + i] / Math.sqrt(n);
+        ptx += s * s;
+    }
+    expect(Math.sqrt(ptx)).toBeGreaterThan(1e-3); // measured 5.145e-2 at n=60
+});
+
 test('makePreparedSaddle throws ExternalSolveError when IR cannot converge', () => {
     const { A, C, rhsTop, n } = system(60);
     const { Asigma, sigma } = shiftSobolev(A, n);
@@ -187,9 +252,15 @@ test('makePreparedSaddle throws ExternalSolveError when IR cannot converge', () 
         err = e;
     }
     expect(err).toBeInstanceOf(ExternalSolveError);
-    // Pin the budget the throw reports, from the constant rather than a literal: a
-    // silent off-by-one in the loop's counting understates every bar derived from it
-    // ([CAL §E.5]/[CAL §E.6]), and a hard-coded `4` here would not catch that.
+    // Pin the number of refinements the throw REPORTS HAVING APPLIED. This discriminates
+    // an off-by-one only because `saddle.ts` interpolates the loop counter `it` into the
+    // message; while it interpolated SADDLE_IR_MAX_REFINEMENTS the message read
+    // "4 refinements" for every loop bound and this assertion was vacuous — measured, the
+    // `it >= MAX - 1` mutant (budget z₀+3) left all nine tests in this file green. If a
+    // future change moves the message back to the constant, delete this assertion rather
+    // than leaving it to imply a guarantee it no longer carries.
+    // Read from the constant, not a hard-coded `4`, so the pair stays in step if the
+    // budget is ever re-calibrated ([CAL §E.5]/[CAL §E.6]).
     expect((err as Error).message).toContain(`${SADDLE_IR_MAX_REFINEMENTS} refinements`);
 });
 
