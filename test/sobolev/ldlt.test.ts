@@ -300,7 +300,7 @@ test("solveSaddleFromA factorMode 'ldlt' vs solveSaddle (LU): crossing gradient 
     expect(fast.residual).toBeLessThanOrEqual(1e-10);
     expect(slow.residual).toBeLessThanOrEqual(1e-10);
     expect(fast.fac).toHaveProperty('kind', 'ldlt');
-    expect(fast.fac.n).toBe(3 * n + C.length);
+    expect(fast.fac).toHaveProperty('n', 3 * n + C.length);
 });
 
 test("solveSaddleFromA factorMode 'ldlt': crossing projection system (rhsBottom = −Φ) vs solveSaddle — rel ≤ 1e-9, residuals ≤ 1e-10", () => {

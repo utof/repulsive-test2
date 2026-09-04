@@ -394,9 +394,53 @@ export interface LdltFactorization {
  * Either dense factorization the saddle fast path can produce/consume —
  * selected by {@link FactorMode}, dispatched by the `kind` discriminant
  * (absent on the LU shape).
+ * Third member {@link ExternalFactorization} (`kind: 'external'`): a factorization
+ * prepared OUTSIDE the core, for the WebGPU GPU-Cholesky seam.
  * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
  */
-export type SaddleFactorization = LuFactorization | LdltFactorization;
+export type SaddleFactorization = LuFactorization | LdltFactorization | ExternalFactorization;
+
+/**
+ * A factorization supplied from OUTSIDE the core — the GPU Cholesky path.
+ * `solve(rhs)` returns z for the FULL (3n+k) saddle system K z = rhs, having
+ * itself certified the result ([DESIGN §4.1] step 4); it throws
+ * {@link ExternalSolveError} rather than returning an uncertified z.
+ * Why: nothing in `src/core/` ever compares `residual` against a threshold —
+ * `linsolve.ts:800`/`:903` compute it and `optimizer.ts:355,395,449` forward it
+ * as a stat — so a solve that converged to 1e-3 is indistinguishable at every
+ * call site from one that converged to 1e-12.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1, §4.4
+ */
+export interface ExternalFactorization {
+    kind: 'external';
+    solve(rhs: number[]): number[];
+}
+
+/**
+ * Thrown by an external solve that cannot certify its own result — iterative
+ * refinement exhausted its budget without reaching 1e-10 ([DESIGN §4.1] step 4).
+ * Typed (not a bare Error) because `optimizer.ts`'s singular-saddle catch must let
+ * exactly this one through: converting it to 'singular_system' would hide an
+ * unconverged descent direction behind a rejected step.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1, §4.4, §4.5
+ */
+export class ExternalSolveError extends Error {}
+
+/**
+ * A saddle solve prepared OUTSIDE the step, for the step's INPUT vertices.
+ * `A` MUST be the Sobolev matrix of the same vertices the step receives (the
+ * driver copies `live` once and uses that copy for dE, A and the step — the
+ * Phase 1 rule at `src/gpu/driver.ts:164`). `factor` is called at most once per
+ * step, synchronously, with the C the CORE evaluated; `solve` then runs for the
+ * gradient rhs and for each projection rhs. Carries closures ⇒ NOT
+ * structured-cloneable ⇒ it can never travel to the worker.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+ */
+export interface PreparedSaddle {
+    A: Float64Array;
+    factor(C: number[][]): SaddleFactorization;
+}
 
 /**
  * Factors a flat row-major SYMMETRIC n×n matrix as P·L·D·Lᵀ·Pᵀ by
@@ -694,6 +738,11 @@ export function ldltSolveFactored(fac: LdltFactorization, rhs: number[]): number
 // LDLᵀ shape). The 'lu' branch is the verbatim pre-existing call — default
 // path stays bit-identical. @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (decision 4)
 function solveFactored(fac: SaddleFactorization, rhs: number[]): number[] {
+    // 'external' first: the GPU path's own solve() ([DESIGN §4.1] steps 2-4). The
+    // `'kind' in fac` guard is not redundant — LuFactorization (:219-223) has no
+    // `kind` field, so `fac.kind === …` alone is a TS error on this union.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+    if ('kind' in fac && fac.kind === 'external') return fac.solve(rhs);
     return 'kind' in fac ? ldltSolveFactored(fac, rhs) : luSolveFactored(fac, rhs);
 }
 
