@@ -34,6 +34,21 @@ let topology: { graphVersion: number; edges: Edge[]; disjointPairs: number[][] }
 self.onmessage = (event: MessageEvent<SolverWorkerRequest>) => {
     const msg = event.data;
     try {
+        // Defensive: PreparedSaddle carries closures and cannot be structured-cloned,
+        // so it can only appear here if a future caller routed a 'gpu' step to the
+        // worker. The 'gpu' driver is main-thread only; fail loudly rather than solve
+        // with a silently missing factorization. Inside the try so the existing catch
+        // (:104-114) reports it as { type: 'error' } to the caller that erred. It must
+        // read `msg.args`, NOT `msg`: SolverWorkerRequest's 'step' arm is
+        // { type, graphVersion, args } (dispatch.ts:411) and DispatchStepArgs =
+        // Omit<DispatchDescentStepArgs, 'edges' | 'disjointPairs'> (:383), so `saddle`
+        // can only ever appear at msg.args.saddle — `'saddle' in msg` is false for every
+        // message the protocol can carry, i.e. a guard that can never fire while
+        // :90-94 spreads `saddle` straight through. No cast is needed: the type test
+        // has already narrowed msg.args to DispatchStepArgs.
+        // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+        if (msg.type === 'step' && 'saddle' in msg.args)
+            throw new Error('solverWorker: `saddle` cannot cross the worker boundary');
         if (msg.type === 'topology') {
             topology = {
                 graphVersion: msg.graphVersion,

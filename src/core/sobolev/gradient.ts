@@ -14,7 +14,13 @@ import type { Edge, Vec3 } from '../testConfigs';
 import { barycenterBlock, type ConstraintSet, evaluateConstraintSet } from './constraintSet';
 import { assembleAFlat } from './innerProduct';
 import { flatten, unflatten } from './layout';
-import { type FactorMode, type FrozenSaddleOperator, solveSaddleFromA } from './linsolve';
+import {
+    type FactorMode,
+    type FrozenSaddleOperator,
+    type PreparedSaddle,
+    solveSaddleFromA,
+    solveSaddleFrozen,
+} from './linsolve';
 import { timed } from './phaseTimings';
 
 /**
@@ -77,6 +83,16 @@ export function solveConstrainedGradientSet(
  * → solveSaddleFromA's default, 'ldlt' since the 2026-07-06 gate verdict;
  * 'lu' is bit-identical to the pre-option path) and rides into the returned
  * frozen operator's `fac`, so reuse solves inherit the choice for free.
+ *
+ * `saddle` is the WebGPU Phase 2a seam: when present, `A` and the factorization
+ * come from the caller (the GPU Cholesky) instead of `assembleAFlat` +
+ * `solveSaddleFromA`, and the solve routes through {@link solveSaddleFrozen} so
+ * the returned `residual` stays the same structured matvec. It selects the SOURCE
+ * of A and of the factorization, never the arithmetic — absent ⇒ bit-identical
+ * (the golden suites are the backstop), exactly like `dE` one level up. `C` is
+ * always evaluated by the CORE and handed to `saddle.factor`, never supplied by
+ * the caller.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
  * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
  * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set_frozen)
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
@@ -91,18 +107,39 @@ export function solveConstrainedGradientSetFrozen(
     dE: Vec3[],
     set: ConstraintSet,
     factorMode?: FactorMode,
+    saddle?: PreparedSaddle,
 ): { gTilde: Vec3[]; lambda: number[]; residual: number; frozen: FrozenSaddleOperator } {
+    // Only the Jacobian C enters the gradient solve. Φ itself does NOT: the
+    // saddle RHS bottom block is 0 (solveSaddleFromA's default), unlike the
+    // constraint-projection solve which passes −Φ there.
+    // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
+    const { C } = evaluateConstraintSet(set, vertices, edges);
+    if (saddle) {
+        // Source selection, never arithmetic (the Phase 1 `dE?` rule): A comes from
+        // the caller instead of assembleAFlat, the factorization comes from the GPU
+        // Cholesky, and the solve routes through the ALREADY-EXPORTED
+        // solveSaddleFrozen (:931-954) so the residual stays the byte-identical
+        // structured matvec the goldens gate — `solveFactored` and
+        // `structuredSaddleResidual` are module-private and must stay that way.
+        // C is evaluated by the CORE above, never by the driver.
+        // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+        const frozen: FrozenSaddleOperator = {
+            a: saddle.A,
+            n: vertices.length,
+            C,
+            fac: saddle.factor(C),
+        };
+        const { x, lambda, residual } = timed('saddle', () =>
+            solveSaddleFrozen(frozen, flatten(dE)),
+        );
+        return { gTilde: unflatten(x), lambda, residual, frozen };
+    }
     // Typed-array fast path (solver-perf Task 5): flat scalar A straight into
     // solveSaddleFromA, which writes Ā's diagonal blocks itself — the 'expand'
     // phase (expandBlockDiag) intentionally no longer fires here. 'saddle'
     // wraps the whole solve, same key as before; 'factor' fires inside it.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Tasks 1, 5)
     const A = assembleAFlat(vertices, edges, disjointPairs, alpha, beta, epsilon);
-    // Only the Jacobian C enters the gradient solve. Φ itself does NOT: the
-    // saddle RHS bottom block is 0 (solveSaddleFromA's default), unlike the
-    // constraint-projection solve which passes −Φ there.
-    // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
-    const { C } = evaluateConstraintSet(set, vertices, edges);
     const { x, lambda, residual, fac } = timed('saddle', () =>
         solveSaddleFromA(A, vertices.length, C, flatten(dE), undefined, factorMode),
     );

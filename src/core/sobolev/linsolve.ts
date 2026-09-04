@@ -407,7 +407,7 @@ export type SaddleFactorization = LuFactorization | LdltFactorization | External
  * itself certified the result ([DESIGN §4.1] step 4); it throws
  * {@link ExternalSolveError} rather than returning an uncertified z.
  * Why: nothing in `src/core/` ever compares `residual` against a threshold —
- * `linsolve.ts:800`/`:903` compute it and `optimizer.ts:355,395,449` forward it
+ * `linsolve.ts:849`/`:952` compute it and `optimizer.ts:386,435,489` forward it
  * as a stat — so a solve that converged to 1e-3 is indistinguishable at every
  * call site from one that converged to 1e-12.
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1, §4.4
