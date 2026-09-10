@@ -420,3 +420,125 @@ test('penaltiesActive: zero/absent/degenerate-X configs are inactive', () => {
     expect(penaltiesActive({ lengthDiff: 2 })).toBe(true);
     expect(penaltiesActive({ field: { weight: 0.5, X: [0, 0, 1] } })).toBe(true);
 });
+
+// --- generic-direction field cases -----------------------------------------
+// Every field case above uses an X whose y-component is 0 ([1,0,0], [0,0,1],
+// [1,0,1]) and a tangent that is axis-aligned or z-free, so each of the three
+// cross-product components and the T·X dot product has a term that is
+// identically zero. That leaves the SIGNS inside |T×X|² and inside
+// u = T·X unpinned, and it leaves the ‖X‖ normalisation only half-exercised.
+// The cases below use T = (2,3,6)/7 and X̂ = (1,2,2)/3 — every component of
+// both vectors is non-zero — so every term of every sign contributes.
+// @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.3
+
+// ℓ = 7, T = (2,3,6)/7; X = [1,2,2] has ‖X‖ = 3 ⇒ X̂ = (1,2,2)/3.
+const GENERIC_V: Vec3[] = [
+    [0, 0, 0],
+    [2, 3, 6],
+];
+const GENERIC_E: Edge[] = [[0, 1]];
+// u = T·X̂ = (2·1 + 3·2 + 6·2)/21 = 20/21.
+const GENERIC_U = 20 / 21;
+
+test('field: X is normalized once — generic X and tangent pin |T×X̂|²', () => {
+    // For unit T and unit X̂, |T×X̂|² = 1 − (T·X̂)² = 1 − (20/21)² = 41/441.
+    // This identity is an INDEPENDENT oracle here: penaltyEnergy deliberately
+    // evaluates the explicit cross product instead (the identity is wrong at
+    // T = 0), so agreement pins the cross product's component signs.
+    // E = w·ℓ·|T×X̂|² = 1·7·41/441 = 41/63.
+    const e = penaltyEnergy(GENERIC_V, GENERIC_E, { field: { weight: 1, X: [1, 2, 2] } });
+    expect(e).toBeCloseTo(41 / 63, 12);
+    expect(1 - GENERIC_U * GENERIC_U).toBeCloseTo(41 / 441, 15);
+
+    // Normalize-ONCE contract (plan §3 ledger, "X handling"): the energy
+    // depends only on X's direction, never on its magnitude.
+    const scaled = penaltyEnergy(GENERIC_V, GENERIC_E, { field: { weight: 1, X: [10, 20, 20] } });
+    expect(scaled).toBeCloseTo(41 / 63, 12);
+});
+
+test('field gradient: generic X pins (1+u²)·T − 2u·X̂ component by component', () => {
+    // c = 1 + u² = 841/441; g_I = c·T − 2u·X̂ with T = (2,3,6)/7, X̂ = (1,2,2)/3:
+    //   gx = (841/441)(2/7) − 2(20/21)(1/3) = (1682 − 1960)/3087 = −278/3087
+    //   gy = (841/441)(3/7) − 2(20/21)(2/3) = (2523 − 3920)/3087 = −1397/3087
+    //   gz = (841/441)(6/7) − 2(20/21)(2/3) = (5046 − 3920)/3087 = +1126/3087
+    // Stencil is −w·g_I at a, +w·g_I at b (plan §2.3).
+    const g = penaltyGradient(GENERIC_V, GENERIC_E, { field: { weight: 1, X: [1, 2, 2] } });
+    const gI = [-278 / 3087, -1397 / 3087, 1126 / 3087];
+    for (let k = 0; k < 3; k++) {
+        expect(g[0][k]).toBeCloseTo(-gI[k], 12);
+        expect(g[1][k]).toBeCloseTo(gI[k], 12);
+    }
+    // Cross-check the ascent orientation: g_I·T = 1 − u² = 41/441 > 0.
+    const t = [2 / 7, 3 / 7, 6 / 7];
+    expect(gI[0] * t[0] + gI[1] * t[1] + gI[2] * t[2]).toBeCloseTo(41 / 441, 12);
+});
+
+test('totalLength gradient: z-component sign is pinned at BOTH edge ends', () => {
+    // The `crossing` fixture that carries the totalLength FD/golden gates is
+    // planar in z, so t[2] = 0 there and the z row of the ∓w·T stencil is
+    // sign-blind. This edge has t[2] = 6/7 ≠ 0.
+    // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.1
+    const w = 0.5;
+    const g = penaltyGradient(GENERIC_V, GENERIC_E, { totalLength: w });
+    const t = [2 / 7, 3 / 7, 6 / 7];
+    for (let k = 0; k < 3; k++) {
+        expect(g[0][k]).toBeCloseTo(-w * t[k], 12);
+        expect(g[1][k]).toBeCloseTo(w * t[k], 12);
+    }
+});
+
+// --- guard boundaries: the 1e-14 thresholds are STRICT `<` ------------------
+// Plan §2 and the §3 ledger both spell the guards `ℓ_I < 1e-14` and
+// `‖X‖ < 1e-14`, i.e. a quantity EQUAL to 1e-14 is still live. Nothing above
+// pins that: every existing degenerate case sits at exactly 0. The boundary is
+// exactly representable — Math.sqrt(1e-14 * 1e-14) === 1e-14 and
+// 1e-14 / 1e-14 === 1 — so it is reachable by a legal input, and relaxing any
+// of these three guards to `<=` silently drops a real contribution.
+// @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2, §3
+
+test('field: ‖X‖ exactly 1e-14 is still an active field', () => {
+    const vertices: Vec3[] = [
+        [0, 0, 0],
+        [0, 3, 0],
+    ];
+    const edges: Edge[] = [[0, 1]];
+    // ‖X‖ = 1e-14 exactly ⇒ X̂ = [1,0,0] with no division blow-up.
+    const atBoundary: PenaltyConfig = { field: { weight: 0.5, X: [1e-14, 0, 0] } };
+    expect(penaltiesActive(atBoundary)).toBe(true);
+    // T = ŷ ⊥ X̂ ⇒ |T×X̂|² = 1 ⇒ E = w·ℓ = 0.5·3.
+    expect(penaltyEnergy(vertices, edges, atBoundary)).toBe(1.5);
+    // Just below the boundary the field IS deactivated.
+    const belowBoundary: PenaltyConfig = { field: { weight: 0.5, X: [9e-15, 0, 0] } };
+    expect(penaltiesActive(belowBoundary)).toBe(false);
+    expect(penaltyEnergy(vertices, edges, belowBoundary)).toBe(0);
+});
+
+// ℓ = 1e-14 exactly ⇒ T = [1e-14/1e-14, 0, 0] = [1,0,0], an exact unit vector.
+const BOUNDARY_V: Vec3[] = [
+    [0, 0, 0],
+    [1e-14, 0, 0],
+];
+const BOUNDARY_E: Edge[] = [[0, 1]];
+
+test('edge of length exactly 1e-14 keeps its unit tangent', () => {
+    const g = penaltyGradient(BOUNDARY_V, BOUNDARY_E, { totalLength: 1 });
+    expect(g[0][0]).toBe(-1);
+    expect(g[1][0]).toBe(1);
+    for (const k of [1, 2]) {
+        expect(g[0][k]).toBe(0);
+        expect(g[1][k]).toBe(0);
+    }
+});
+
+test('field gradient: an edge of length exactly 1e-14 is NOT skipped', () => {
+    // penalties.ts guards the tangent at `len < 1e-14` and the field-gradient
+    // skip at `ell[r] < 1e-14`. The two constants must agree AND both be
+    // strict: relaxing only the skip to `<=` would drop an edge that still
+    // carries a genuine unit tangent. u = T·X̂ = 0 ⇒ c = 1 ⇒ g_I = T = x̂.
+    const g = penaltyGradient(BOUNDARY_V, BOUNDARY_E, { field: { weight: 1, X: [0, 0, 1] } });
+    expect(g[0][0]).toBe(-1);
+    expect(g[1][0]).toBe(1);
+    expect(penaltyEnergy(BOUNDARY_V, BOUNDARY_E, { field: { weight: 1, X: [0, 0, 1] } })).toBe(
+        1e-14,
+    );
+});
