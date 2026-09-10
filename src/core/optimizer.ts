@@ -1,7 +1,12 @@
 import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
 import { solveConstrainedGradientSetFrozen } from './sobolev/gradient';
 import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
-import type { FactorMode, FrozenSaddleOperator } from './sobolev/linsolve';
+import {
+    ExternalSolveError,
+    type FactorMode,
+    type FrozenSaddleOperator,
+    type PreparedSaddle,
+} from './sobolev/linsolve';
 import {
     type PenaltyConfig,
     penaltiesActive,
@@ -184,6 +189,15 @@ export interface SobolevStepOptions {
      * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
      */
     dE?: Vec3[];
+    /**
+     * A saddle solve prepared OUTSIDE this step for THESE vertices (WebGPU Phase 2a
+     * seam). Selects the SOURCE of A and of the factorization, never the arithmetic;
+     * absent ⇒ every path below is bit-identical (the golden suites are the backstop),
+     * exactly like `dE?`. Its `solve` self-certifies or throws ExternalSolveError,
+     * which this function deliberately does NOT convert to 'singular_system'.
+     * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+     */
+    saddle?: PreparedSaddle;
 }
 
 /**
@@ -260,10 +274,22 @@ export function sobolevStepSet(
     // null when the saddle was singular so no g̃ exists). @see plan §D14 / issue #9
     descentField?: Vec3[] | null;
 } {
-    // FIRST statement, before timingsBegin(): a throw must not leave the timing collector
-    // armed. @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
+    // FIRST statements, before timingsBegin(): a throw must not leave the timing
+    // collector armed (this is the PRE-ARM path, so it needs no disarm — D1).
+    // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D1)
+    // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
     if (opts.dE && opts.dE.length !== vertices.length)
         throw new Error('sobolevStepSet: dE length mismatch');
+    // The saddle mirror of the line above. `saddle.A` goes straight into
+    // FrozenSaddleOperator.a, and solveSaddleFrozen (linsolve.ts:932-955) validates
+    // rhsTop/rhsBottom lengths ONLY — while the path it replaces DOES validate A
+    // (solveSaddleFromA, :804-806). Without this the seam path is strictly less checked
+    // than the CPU path, and a short A reads out of range → undefined → NaN, which
+    // nothing downstream thresholds: the run would auto-pause on `armijo_failed` with
+    // usedGpuSolve still true.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+    if (opts.saddle && opts.saddle.A.length !== vertices.length ** 2)
+        throw new Error('sobolevStepSet: saddle.A length mismatch');
     // Phase-timing collection is opt-in and provably inert when off: timingsBegin
     // arms the module collector, timed('step', …) records the whole step, and the
     // inner call-site wraps (dE / energy / lineSearch here, plus the assembleA /
@@ -279,15 +305,21 @@ export function sobolevStepSet(
     const collectField = opts.collectField ?? false;
     let capturedField: Vec3[] | null = null;
     if (collect) timingsBegin();
-    const outcome = timed(
-        'step',
-        (): {
-            vertices: Vec3[];
-            energy: number;
-            accepted: boolean;
-            converged: boolean;
-            stats: SobolevStepStats;
-        } => {
+    // Declared here rather than inline at the call site because a try/catch cannot
+    // assign to a `const`, and the disarm below needs the try. These are EXACTLY the
+    // fields the previous inline annotation listed — no field added, removed or renamed.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+    // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D1)
+    type StepBodyOutcome = {
+        vertices: Vec3[];
+        energy: number;
+        accepted: boolean;
+        converged: boolean;
+        stats: SobolevStepStats;
+    };
+    let outcome: StepBodyOutcome;
+    try {
+        outcome = timed('step', (): StepBodyOutcome => {
             const alpha = opts.alpha ?? DEFAULTS.alpha;
             const beta = opts.beta ?? DEFAULTS.beta;
             const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
@@ -350,6 +382,7 @@ export function sobolevStepSet(
                     dE,
                     set,
                     opts.factorMode,
+                    opts.saddle,
                 );
                 gTilde = solved.gTilde;
                 residual = solved.residual;
@@ -358,7 +391,16 @@ export function sobolevStepSet(
                 // rejected, or accepted all carry it). The singular catch below leaves
                 // capturedField null. @see plan §D14 / issue #9.
                 if (collectField) capturedField = gTilde;
-            } catch {
+            } catch (e) {
+                // The ONE throw this catch must not swallow: an external solve that
+                // could not certify its result ([DESIGN §4.1] step 4). Converting it to
+                // 'singular_system' would present an unconverged descent direction as
+                // a rejected step, with usedGpuSolve still true — the driver has to see
+                // it to re-run this step on the CPU path ([DESIGN §4.5] trigger 3).
+                // Unreachable when `saddle` is absent; test/gpu/saddleSeam.test.ts
+                // proves the absent path is still deterministic WITH this branch here.
+                // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+                if (e instanceof ExternalSolveError) throw e;
                 // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
                 // Fold into the spec §C step 10 contract: reject, echo the input, report —
                 // the frame loop auto-pauses on accepted:false instead of crashing.
@@ -452,8 +494,19 @@ export function sobolevStepSet(
                     ...(result.reason !== undefined ? { reason: result.reason } : {}),
                 },
             };
-        },
-    );
+        });
+    } catch (e) {
+        // The collector is module-scoped and only timingsEnd() disarms it
+        // (sobolev/phaseTimings.ts:57-61), so a throw out of timed('step', …) would
+        // leak THIS step's partial ledger into the NEXT step. Disarm on the throw
+        // path ONLY: an unconditional `finally` would null `acc` before the success
+        // path reads it below and would silently drop `timings` from every collected
+        // step.
+        // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+        // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D1)
+        if (collect) timingsEnd();
+        throw e;
+    }
     // §D14: append the captured g̃ (or null on singular) ONLY when requested — same
     // opt-in append pattern as `timings`. Both absent ⇒ `return outcome` unchanged
     // (no extra allocation). @see plan §D14 / issue #9.

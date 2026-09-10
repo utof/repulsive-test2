@@ -1,0 +1,296 @@
+{
+  "betaSeeds": [0, 1, 2, 3, 4],
+  "constraintMode": "total",
+  "date": "2026-09-04",
+  "fixture": "trefoil",
+  "gate": "phase2aK1Calibration",
+  "gitShaNote": "parent of the (amended) Phase 2 spec commit that adds this script; the measured inputs (oracle/, src/core/fixtures.ts) are unchanged from that tree",
+  "gitShaShort": "bf0abcf",
+  "rows": [
+    {
+      "alpha": 4.298583223055344e-8,
+      "assembleSeconds": 0.6984517574310303,
+      "betaMax": 0.0006053916198000189,
+      "betaMedian": 0.0005612553283385869,
+      "betaMin": 0.000525041047281786,
+      "betaPerSeed": [
+        0.0005612553283385869, 0.000525041047281786, 0.0005592667743836737, 0.0006053916198000189,
+        0.0005756744063346634
+      ],
+      "betaSeeds": [0, 1, 2, 3, 4],
+      "betaSpread": 1.15303674433498,
+      "betaTimesKappaKMedian": 0.1093531459454689,
+      "betaTimesKappaKMin": 0.10229727429176487,
+      "bootMetric": 9.039928866671271e-8,
+      "cgIters": {
+        "cgMax": 32,
+        "cgMedian": 30.0,
+        "cgMin": 28,
+        "cgPerSeed": [31, 32, 30, 29, 28],
+        "jacobiPcgMedian": 31.0,
+        "jacobiPcgMin": 27,
+        "jacobiPcgPerSeed": [31, 31, 31, 29, 27],
+        "seeds": [0, 1, 2, 3, 4],
+        "textbookBound": 52.51652830994462,
+        "tol": 0.001
+      },
+      "irModel": {
+        "gradient": {
+          "r0": 8.906953072451754e-7,
+          "residualCurve": [1.0, 8.906953072451754e-7, 4.522230978720422e-13],
+          "rho": 5.077191876880091e-7,
+          "solvesTo1e10": 2
+        },
+        "projection": {
+          "r0": 1.0331014680283044e-6,
+          "residualCurve": [1.0, 1.0331014680283044e-6, 5.063716957343142e-13],
+          "rho": 4.90147106944621e-7,
+          "solvesTo1e10": 2
+        }
+      },
+      "k": 4,
+      "k1Bar": 4.750718511194799e-6,
+      "k1SlackAboveAlpha": 110.51823972406626,
+      "k1SlackBelowBetaMin": 110.51823972406626,
+      "kappaASigma": 190.95089128290715,
+      "kappaK": 194.83671766497642,
+      "kappaKTimesUf32": 1.1612268372832593e-5,
+      "kappaRatioASigmaOverK": 0.9800559851929399,
+      "minDiagL": 3.1916891076587923,
+      "n": 64,
+      "sigma": 50.9195929336386
+    },
+    {
+      "alpha": 4.740941897103019e-8,
+      "assembleSeconds": 3.187594175338745,
+      "betaMax": 0.00019276515608510853,
+      "betaMedian": 0.00014165905328340447,
+      "betaMin": 0.00010788379751764762,
+      "betaPerSeed": [
+        0.00017082085141255395, 0.00019276515608510853, 0.00010788379751764762,
+        0.00014165905328340447, 0.00014085457637599908
+      ],
+      "betaSeeds": [0, 1, 2, 3, 4],
+      "betaSpread": 1.7867850457671925,
+      "betaTimesKappaKMedian": 0.2018722728783453,
+      "betaTimesKappaKMin": 0.1537405969250969,
+      "bootMetric": 3.7638163385661584e-7,
+      "cgIters": {
+        "cgMax": 68,
+        "cgMedian": 64.0,
+        "cgMin": 61,
+        "cgPerSeed": [64, 61, 64, 64, 68],
+        "jacobiPcgMedian": 63.0,
+        "jacobiPcgMin": 60,
+        "jacobiPcgPerSeed": [63, 60, 60, 63, 63],
+        "seeds": [0, 1, 2, 3, 4],
+        "textbookBound": 142.12037062955025,
+        "tol": 0.001
+      },
+      "irModel": {
+        "gradient": {
+          "r0": 3.4948685932024672e-6,
+          "residualCurve": [1.0, 3.4948685932024672e-6, 3.269715453339419e-11],
+          "rho": 9.355760785109426e-6,
+          "solvesTo1e10": 2
+        },
+        "projection": {
+          "r0": 3.105082512867931e-6,
+          "residualCurve": [1.0, 3.105082512867931e-6, 7.718334942486376e-12],
+          "rho": 2.4857100932102224e-6,
+          "solvesTo1e10": 2
+        }
+      },
+      "k": 4,
+      "k1Bar": 2.26157205427993e-6,
+      "k1SlackAboveAlpha": 47.70301141344671,
+      "k1SlackBelowBetaMin": 47.70301141344671,
+      "kappaASigma": 1398.4351623790776,
+      "kappaK": 1425.0573344894356,
+      "kappaKTimesUf32": 8.493341713557036e-5,
+      "kappaRatioASigmaOverK": 0.9813185256017113,
+      "minDiagL": 3.3473508260935887,
+      "n": 120,
+      "sigma": 179.2711937568847
+    },
+    {
+      "alpha": 4.255080423617028e-8,
+      "assembleSeconds": 10.461528301239014,
+      "betaMax": 4.096539216395291e-5,
+      "betaMedian": 3.691617088135718e-5,
+      "betaMin": 2.332963709048429e-5,
+      "betaPerSeed": [
+        3.691617088135718e-5, 3.747380663482319e-5, 4.096539216395291e-5, 2.332963709048429e-5,
+        2.6138761416551018e-5
+      ],
+      "betaSeeds": [0, 1, 2, 3, 4],
+      "betaSpread": 1.755937822996051,
+      "betaTimesKappaKMedian": 0.5160231228462991,
+      "betaTimesKappaKMin": 0.32610728303845055,
+      "bootMetric": 1.3977842931450763e-6,
+      "cgIters": {
+        "cgMax": 153,
+        "cgMedian": 153.0,
+        "cgMin": 143,
+        "cgPerSeed": [153, 143, 144, 153, 153],
+        "jacobiPcgMedian": 141.0,
+        "jacobiPcgMin": 133,
+        "jacobiPcgPerSeed": [141, 133, 141, 141, 141],
+        "seeds": [0, 1, 2, 3, 4],
+        "textbookBound": 445.24022142961206,
+        "tol": 0.001
+      },
+      "irModel": {
+        "gradient": {
+          "r0": 2.8312869782725088e-5,
+          "residualCurve": [
+            1.0, 2.8312869782725088e-5, 1.6944965288617988e-9, 3.9598885609585906e-13
+          ],
+          "rho": 5.984898535067204e-5,
+          "solvesTo1e10": 3
+        },
+        "projection": {
+          "r0": 2.2273462248184373e-5,
+          "residualCurve": [
+            1.0, 2.2273462248184373e-5, 3.3818067562992856e-10, 2.7402446008761744e-13
+          ],
+          "rho": 1.5183121144872547e-5,
+          "solvesTo1e10": 3
+        }
+      },
+      "k": 4,
+      "k1Bar": 9.963407151863736e-7,
+      "k1SlackAboveAlpha": 23.415320416892023,
+      "k1SlackBelowBetaMin": 23.41532041689202,
+      "kappaASigma": 13725.192766319044,
+      "kappaK": 13978.240714745769,
+      "kappaKTimesUf32": 0.0008331031465988478,
+      "kappaRatioASigmaOverK": 0.9818970102468058,
+      "minDiagL": 3.4274613143899098,
+      "n": 240,
+      "sigma": 807.8461972560433
+    },
+    {
+      "alpha": 4.540145149419003e-8,
+      "assembleSeconds": 47.47001791000366,
+      "betaMax": 4.649839767155731e-6,
+      "betaMedian": 3.7354883147787306e-6,
+      "betaMin": 3.2892609459708256e-6,
+      "betaPerSeed": [
+        3.7354883147787306e-6, 3.2892609459708256e-6, 4.649839767155731e-6, 3.3577063820318757e-6,
+        4.438018708590122e-6
+      ],
+      "betaSeeds": [0, 1, 2, 3, 4],
+      "betaSpread": 1.4136427129174851,
+      "betaTimesKappaKMedian": 0.5246804082542821,
+      "betaTimesKappaKMin": 0.46200406226918317,
+      "bootMetric": 2.374000006319677e-6,
+      "cgIters": {
+        "cgMax": 411,
+        "cgMedian": 388.0,
+        "cgMin": 387,
+        "cgPerSeed": [391, 388, 387, 388, 411],
+        "jacobiPcgMedian": 376.0,
+        "jacobiPcgMin": 371,
+        "jacobiPcgPerSeed": [376, 371, 371, 376, 376],
+        "seeds": [0, 1, 2, 3, 4],
+        "textbookBound": 1411.5687179372278,
+        "tol": 0.001
+      },
+      "irModel": {
+        "gradient": {
+          "r0": 0.00022945651773356092,
+          "residualCurve": [
+            1.0, 0.00022945651773356092, 5.688831301434559e-8, 1.6519556787405766e-11
+          ],
+          "rho": 0.0002479263329551739,
+          "solvesTo1e10": 3
+        },
+        "projection": {
+          "r0": 0.0002411397232400355,
+          "residualCurve": [
+            1.0, 0.0002411397232400355, 2.8584896316808018e-8, 4.961835303084619e-12
+          ],
+          "rho": 0.00011854080253859301,
+          "solvesTo1e10": 3
+        }
+      },
+      "k": 4,
+      "k1Bar": 3.864417437211307e-7,
+      "k1SlackAboveAlpha": 8.511660552759711,
+      "k1SlackBelowBetaMin": 8.511660552759711,
+      "kappaASigma": 137953.81758739764,
+      "kappaK": 140458.31870989568,
+      "kappaKTimesUf32": 0.008371315795109783,
+      "kappaRatioASigmaOverK": 0.9821690794429139,
+      "minDiagL": 3.459091787529886,
+      "n": 480,
+      "sigma": 3879.762750979584
+    },
+    {
+      "alpha": 4.074849680764508e-8,
+      "assembleSeconds": 210.82464241981506,
+      "betaMax": 6.785539532673422e-7,
+      "betaMedian": 5.057223257599159e-7,
+      "betaMin": 4.528408667055282e-7,
+      "betaPerSeed": [
+        6.773502258526426e-7, 5.002618118852386e-7, 4.528408667055282e-7, 5.057223257599159e-7,
+        6.785539532673422e-7
+      ],
+      "betaSeeds": [0, 1, 2, 3, 4],
+      "betaSpread": 1.4984379793367677,
+      "betaTimesKappaKMedian": 0.7169772542052261,
+      "betaTimesKappaKMin": 0.6420056712239747,
+      "bootMetric": 1.3462631315622428e-5,
+      "cgIters": {
+        "cgMax": 1229,
+        "cgMedian": 1217.0,
+        "cgMin": 1138,
+        "cgPerSeed": [1217, 1227, 1138, 1142, 1229],
+        "jacobiPcgMedian": 1100.0,
+        "jacobiPcgMin": 1023,
+        "jacobiPcgPerSeed": [1100, 1102, 1023, 1100, 1103],
+        "seeds": [0, 1, 2, 3, 4],
+        "textbookBound": 4484.941919245698,
+        "tol": 0.001
+      },
+      "irModel": {
+        "gradient": {
+          "r0": 0.0010870557134191447,
+          "residualCurve": [
+            1.0, 0.0010870557134191447, 1.8816191139488744e-6, 3.817632916865933e-9,
+            1.80794346516025e-11
+          ],
+          "rho": 0.0017309316263382387,
+          "solvesTo1e10": 4
+        },
+        "projection": {
+          "r0": 0.001489968013660475,
+          "residualCurve": [
+            1.0, 0.001489968013660475, 1.0764379352820394e-6, 1.3180748665995887e-9,
+            1.514422298919038e-11
+          ],
+          "rho": 0.0007224570765364978,
+          "solvesTo1e10": 4
+        }
+      },
+      "k": 4,
+      "k1Bar": 1.3584029082463512e-7,
+      "k1SlackAboveAlpha": 3.333627040670351,
+      "k1SlackBelowBetaMin": 3.333627040670351,
+      "kappaASigma": 1392654.2826659072,
+      "kappaK": 1417729.0929916357,
+      "kappaKTimesUf32": 0.08449665394230148,
+      "kappaRatioASigmaOverK": 0.9823133979194737,
+      "minDiagL": 3.4716803925208106,
+      "n": 960,
+      "sigma": 19168.87280619951
+    }
+  ],
+  "t4": {
+    "maxIters": 4,
+    "tol": 1e-10
+  },
+  "tool": "numpy 2.5.2 / scipy 1.18.1",
+  "uF32": 5.96e-8
+}

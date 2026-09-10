@@ -13,6 +13,7 @@ import {
     pointBlock,
     totalLengthBlock,
 } from './sobolev/constraintSet';
+import type { PreparedSaddle } from './sobolev/linsolve';
 import type { PenaltyConfig } from './sobolev/penalties';
 import type { SobolevStepTimings } from './sobolev/phaseTimings';
 import type { Edge, Vec3 } from './testConfigs';
@@ -162,6 +163,13 @@ export interface DispatchDescentStepArgs {
     // `buildStepArgs` never sets it (the 'gpu' driver dispatches inline).
     // @see SobolevStepOptions.dE (optimizer.ts)
     dE?: Vec3[];
+    /**
+     * A saddle solve prepared for `vertices` (WebGPU Phase 2a seam). Forwarded to
+     * `sobolevStepSet` exactly like `dE`. Carries closures ⇒ never cloneable ⇒ it
+     * must not ride the worker payload.
+     * @see SobolevStepOptions.saddle (optimizer.ts)
+     */
+    saddle?: PreparedSaddle;
 }
 
 /**
@@ -268,6 +276,10 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
             // Phase 1 GPU seam passthrough; undefined → core computes dE itself.
             // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
             dE: args.dE,
+            // Phase 2a GPU saddle seam passthrough; undefined → core assembles A and
+            // factors it itself.
+            // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+            saddle: args.saddle,
         });
         return {
             vertices: r.vertices,

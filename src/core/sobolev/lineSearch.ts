@@ -29,6 +29,7 @@ import { barycenterBlock, type ConstraintSet } from './constraintSet';
 import { assembleAFlat } from './innerProduct';
 import { flatten, unflatten } from './layout';
 import {
+    ExternalSolveError,
     type FactorMode,
     type FrozenSaddleOperator,
     solveSaddleFromA,
@@ -190,7 +191,12 @@ export type ProjectBarycenterResult = ProjectConstraintSetResult;
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Constraint projection after a step")
  *
  * A non-finite correction step or a solver throw returns `ok: false` with the
- * current iterate, mirroring the oracle's failure semantics.
+ * current iterate, mirroring the oracle's failure semantics — with ONE exception:
+ * an {@link ExternalSolveError} from a GPU-supplied factorization PROPAGATES instead,
+ * because an uncertified solve is a contract violation rather than an unconverged
+ * projection (see the anchor on the catch below). Unreachable without the WebGPU
+ * `saddle` seam, so the CPU path's failure semantics are unchanged.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4, §4.5
  * @see oracle/tpe_constraints_oracle.py (project_constraint_set)
  */
 export function projectOntoConstraintSet(
@@ -287,7 +293,22 @@ export function projectOntoConstraintSet(
                 }
             }
             cur = cur.map((p, i) => [p[0] + step[i][0], p[1] + step[i][1], p[2] + step[i][2]]);
-        } catch {
+        } catch (e) {
+            // The ONE throw this catch must not swallow, for the same reason the
+            // gradient solve's catch cannot (optimizer.ts:403): an external solve that
+            // could not certify its result is a contract violation, NOT a degraded mode
+            // ([DESIGN §4.4]), and the driver has to see it to re-run the step on the
+            // CPU path ([DESIGN §4.5] trigger 3). Swallowing it into `ok: false` reports
+            // a FAILED GPU solve as a merely-unconverged projection: the line search
+            // backtracks and the step is ACCEPTED at a smaller τ with `reason` undefined
+            // and usedGpuSolve still true. Measured on trefoil(24): τ 0.5 → 0.0625 with
+            // nothing surfaced. Three of the four solves in a normal step arrive here,
+            // so without this the seam propagates from the gradient solve only.
+            // Inert when `saddle` is absent: ExternalSolveError can only originate in a
+            // PreparedSaddle.solve, so with no seam this branch is unreachable and every
+            // path below is bit-identical.
+            // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4, §4.5
+            if (e instanceof ExternalSolveError) throw e;
             return { vertices: cur, ok: false, iterations: it, phiNorm: finalPhiNorm };
         }
     }

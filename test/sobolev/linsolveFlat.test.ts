@@ -171,7 +171,7 @@ test('solveSaddleFromA vs solveSaddle: crossing gradient system — x/λ rel ≤
     expect(slow.residual).toBeLessThanOrEqual(1e-10);
     // Task 6 consumes the returned factorization — it must describe the full
     // (3n+k)×(3n+k) saddle system.
-    expect(fast.fac.n).toBe(3 * n + C.length);
+    expect(fast.fac).toHaveProperty('n', 3 * n + C.length);
 });
 
 test('solveSaddleFromA vs solveSaddle: crossing projection system (rhsBottom = −Φ) — x/λ rel ≤ 1e-12, residuals ≤ 1e-10', () => {
