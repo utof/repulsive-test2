@@ -147,6 +147,177 @@ function applyAhatInv(L: Float64Array, n: number, v: ArrayLike<number>): Float64
     return out;
 }
 
+/**
+ * The factor-dependent setup of [DESIGN §4.1] steps 2–3, computed ONCE per step because
+ * the factor is frozen ([P §2.5]): Z = Â⁻¹Cᵀ (3k n-backsolves), S = C Z (k×k SPD), and
+ * W = K̂⁻¹U (3 columns, ONE extra n-backsolve of 𝟙/√n reused across all three
+ * coordinates, because each column of P = I₃⊗(𝟙/√n) is supported on one contiguous
+ * n-block). Exported so gate CR forms W the one way production does — one implementation,
+ * two consumers; a second copy in the test would drift and the recorded margin would then
+ * describe nothing.
+ * Cost: 3k+1 n-backsolves; with P pins k = 4+3P ⇒ 13+9P ([DESIGN §7]).
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 steps 2–3, §5 (CR)
+ */
+export function saddleSetup(
+    L: Float64Array,
+    n: number,
+    C: number[][],
+): { Z: Float64Array[]; S: number[][]; W: Float64Array[] } {
+    const m = 3 * n;
+    const k = C.length;
+    const invSqrtN = 1 / Math.sqrt(n);
+    // Z = Â⁻¹Cᵀ — 3k n-backsolves.
+    const Z: Float64Array[] = C.map((row) => applyAhatInv(L, n, row));
+    // S = C Z, k×k, SPD. κ(S) = 5.06…5.28 across N=120…960 ([DESIGN §4.1]), so a
+    // plain LU is ample; luSolve is the core's own, already gated.
+    const S: number[][] = Array.from({ length: k }, (_, r) =>
+        Array.from({ length: k }, (_, c) => {
+            let s = 0;
+            for (let i = 0; i < m; i++) s += C[r][i] * Z[c][i];
+            return s;
+        }),
+    );
+    // W = K̂⁻¹U, three columns. Each column of P = I₃⊗(𝟙/√n) is supported on ONE
+    // contiguous n-block, so Â⁻¹p_b needs exactly ONE n-backsolve of 𝟙/√n —
+    // computed here and reused for all three coordinates ([DESIGN §4.1] step 3).
+    const onesRhs = new Float64Array(n).fill(invSqrtN);
+    const u = new Float64Array(n);
+    solveWithL(L, n, onesRhs, u);
+    const W: Float64Array[] = [];
+    for (let b = 0; b < 3; b++) {
+        const y = new Float64Array(m);
+        for (let i = 0; i < n; i++) y[b * n + i] = u[i];
+        // K̂⁻¹[p_b; 0] through the same Schur machinery: λ = S⁻¹(C y), x = y − Zλ.
+        const Cy = C.map((row) => {
+            let s = 0;
+            for (let i = 0; i < m; i++) s += row[i] * y[i];
+            return s;
+        });
+        const lam = luSolve(S, Cy);
+        const w = new Float64Array(m + k);
+        for (let i = 0; i < m; i++) {
+            let s = y[i];
+            for (let r = 0; r < k; r++) s -= Z[r][i] * lam[r];
+            w[i] = s;
+        }
+        for (let r = 0; r < k; r++) w[m + r] = lam[r];
+        W.push(w);
+    }
+    return { Z, S, W };
+}
+
+/**
+ * M = σ⁻¹I₃ − UᵀW, the 3×3 Woodbury correction matrix of [DESIGN §4.1] step 3.
+ * Exported so gate CR records the SAME matrix production inverts — a second
+ * implementation in the test would drift and its recorded margin would describe
+ * nothing. HEAVILY CANCELLING: measured diag(M) is 9.2e4× smaller than σ⁻¹ at N=960
+ * ([DESIGN §7]), so its formation destroys ~5 decimal digits and the loss grows ∝ κ.
+ * Form and invert it in f64 ONLY, never f32 and never on the GPU — a hard constraint
+ * that also binds slice 2c ([DESIGN §4.7]). CR records diag(M) and κ₁(M) so this margin
+ * is a number rather than a pass/fail.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 step 3, §4.7, §7
+ */
+export function woodburyM(W: Float64Array[], sigma: number, n: number): number[][] {
+    const invSqrtN = 1 / Math.sqrt(n);
+    return Array.from({ length: 3 }, (_, a) =>
+        Array.from({ length: 3 }, (_, b) => {
+            let s = 0;
+            for (let i = 0; i < n; i++) s += invSqrtN * W[b][a * n + i];
+            return (a === b ? 1 / sigma : 0) - s;
+        }),
+    );
+}
+
+/**
+ * [DESIGN §4.1] steps 2–3 on a supplied factor and setup: ẑ = K̂⁻¹r through the Schur
+ * complement (λ = S⁻¹(Cy − d), x̂ = y − Zλ), then Woodbury back to K⁻¹r
+ * (z = ẑ + W M⁻¹ Pᵀx̂). **This — NOT {@link makePreparedSaddle}'s `solve` — is gate CR's
+ * quantity.** `solve` is steps 2–**4**: it applies step 4's iterative refinement on top,
+ * so a defect in steps 1–3 that leaves the relative residual anywhere below
+ * {@link SADDLE_IR_TOL} is repaired before it can be measured. CR exists to gate the
+ * REFORMULATION before any WGSL exists, and step 4 is the part that will later run on a
+ * wrong f32 factor, so it must sit OUTSIDE the measurement. Exported for that reason,
+ * and called by `makePreparedSaddle`'s `factor()` as its z₀ and as its per-iteration
+ * correction solve — one implementation, two consumers.
+ * `UᵀK̂⁻¹r = Uᵀẑ = Pᵀx̂` because U = [P; 0].
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 steps 2–3, §5 (CR)
+ */
+export function schurWoodburySolve(
+    L: Float64Array,
+    n: number,
+    C: number[][],
+    setup: { Z: Float64Array[]; S: number[][]; W: Float64Array[] },
+    M: number[][],
+    rhs: ArrayLike<number>,
+): Float64Array {
+    const { Z, S, W } = setup;
+    const m = 3 * n;
+    const k = C.length;
+    const invSqrtN = 1 / Math.sqrt(n);
+    const y = applyAhatInv(L, n, rhs);
+    const rhsBottom = new Array<number>(k);
+    for (let r = 0; r < k; r++) rhsBottom[r] = rhs[m + r];
+    const Cy = C.map((row, r) => {
+        let s = 0;
+        for (let i = 0; i < m; i++) s += row[i] * y[i];
+        return s - rhsBottom[r];
+    });
+    const lam = luSolve(S, Cy);
+    const xh = new Float64Array(m);
+    for (let i = 0; i < m; i++) {
+        let s = y[i];
+        for (let r = 0; r < k; r++) s -= Z[r][i] * lam[r];
+        xh[i] = s;
+    }
+    // Woodbury: z = ẑ + W M⁻¹ (Pᵀx̂). UᵀK̂⁻¹r = Uᵀẑ = Pᵀx̂ because U = [P; 0].
+    const Ptx = [0, 0, 0];
+    for (let a = 0; a < 3; a++) {
+        let s = 0;
+        for (let i = 0; i < n; i++) s += invSqrtN * xh[a * n + i];
+        Ptx[a] = s;
+    }
+    const mu = luSolve(M, Ptx);
+    const z = new Float64Array(m + k);
+    for (let i = 0; i < m; i++) {
+        let s = xh[i];
+        for (let a = 0; a < 3; a++) s += W[a][i] * mu[a];
+        z[i] = s;
+    }
+    for (let r = 0; r < k; r++) {
+        let s = lam[r];
+        for (let a = 0; a < 3; a++) s += W[a][m + r] * mu[a];
+        z[m + r] = s;
+    }
+    return z;
+}
+
+/**
+ * Exact 1-norm condition number of a 3×3, via the adjugate inverse.
+ * Why κ₁ and not κ₂: κ₂ needs an SVD, and for a 3×3 the two differ by at most 3× — far
+ * inside the 9.2e4× margin [DESIGN §7] reports — so κ₁ answers the question ("how much of
+ * M's formation survived the cancellation?") without a hand-rolled eigensolver in a gate
+ * whose whole point is that it is checkable by inspection. A singular or non-finite
+ * determinant returns +∞ rather than throwing: CR must still emit the row that reports it.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §7
+ */
+export function kappa1of3(M: number[][]): number {
+    const [[a, b, c], [d, e, f], [g, h, i]] = M;
+    const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (det === 0 || !Number.isFinite(det)) return Number.POSITIVE_INFINITY;
+    const inv = [
+        [(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+        [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+        [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det],
+    ];
+    const norm1 = (X: number[][]): number =>
+        Math.max(
+            ...[0, 1, 2].map(
+                (col) => Math.abs(X[0][col]) + Math.abs(X[1][col]) + Math.abs(X[2][col]),
+            ),
+        );
+    return norm1(M) * norm1(inv);
+}
+
 /** IR diagnostics for one solve — the convergence curve CR and (in 2a-2) T4 record. */
 export interface IrTrace {
     refinements: number;
@@ -176,97 +347,16 @@ export function makePreparedSaddle(
         factor(C: number[][]): SaddleFactorization {
             const m = 3 * n;
             const k = C.length;
-            const invSqrtN = 1 / Math.sqrt(n);
-
-            // Setup, ONCE per step (the factor is frozen, [P §2.5]).
-            // Z = Â⁻¹Cᵀ — 3k n-backsolves.
-            const Z: Float64Array[] = C.map((row) => applyAhatInv(L, n, row));
-            // S = C Z, k×k, SPD. κ(S) = 5.06…5.28 across N=120…960 ([DESIGN §4.1]), so a
-            // plain LU is ample; luSolve is the core's own, already gated.
-            const S: number[][] = Array.from({ length: k }, (_, r) =>
-                Array.from({ length: k }, (_, c) => {
-                    let s = 0;
-                    for (let i = 0; i < m; i++) s += C[r][i] * Z[c][i];
-                    return s;
-                }),
-            );
-            // W = K̂⁻¹U, three columns. Each column of P = I₃⊗(𝟙/√n) is supported on ONE
-            // contiguous n-block, so Â⁻¹p_b needs exactly ONE n-backsolve of 𝟙/√n —
-            // computed here and reused for all three coordinates ([DESIGN §4.1] step 3).
-            const onesRhs = new Float64Array(n).fill(invSqrtN);
-            const u = new Float64Array(n);
-            solveWithL(L, n, onesRhs, u);
-            const W: Float64Array[] = [];
-            for (let b = 0; b < 3; b++) {
-                const y = new Float64Array(m);
-                for (let i = 0; i < n; i++) y[b * n + i] = u[i];
-                // K̂⁻¹[p_b; 0] through the same Schur machinery: λ = S⁻¹(C y), x = y − Zλ.
-                const Cy = C.map((row) => {
-                    let s = 0;
-                    for (let i = 0; i < m; i++) s += row[i] * y[i];
-                    return s;
-                });
-                const lam = luSolve(S, Cy);
-                const w = new Float64Array(m + k);
-                for (let i = 0; i < m; i++) {
-                    let s = y[i];
-                    for (let r = 0; r < k; r++) s -= Z[r][i] * lam[r];
-                    w[i] = s;
-                }
-                for (let r = 0; r < k; r++) w[m + r] = lam[r];
-                W.push(w);
-            }
-            // M = σ⁻¹I₃ − UᵀW, 3×3. HEAVILY CANCELLING: measured diag(M) is 9.2e4×
-            // smaller than σ⁻¹ at N=960 ([DESIGN §7]), so its formation destroys ~5
-            // decimal digits and the loss grows ∝ κ. Form and invert it in f64, NEVER
-            // f32 and NEVER on the GPU — a hard constraint that also binds slice 2c
-            // ([DESIGN §4.7]). CR records diag(M) and κ(M) so this margin is a number.
-            const M: number[][] = Array.from({ length: 3 }, (_, a) =>
-                Array.from({ length: 3 }, (_, b) => {
-                    let s = 0;
-                    for (let i = 0; i < n; i++) s += invSqrtN * W[b][a * n + i];
-                    return (a === b ? 1 / sigma : 0) - s;
-                }),
-            );
+            // Setup + M, ONCE per step (the factor is frozen, [P §2.5]). These are the
+            // EXPORTED helpers, not a private copy: gate CR calls the same three, so the
+            // gated vector and the recorded diag(M)/κ₁(M) are production's own values.
+            // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §5 (CR)
+            const setup = saddleSetup(L, n, C);
+            const M = woodburyM(setup.W, sigma, n);
 
             /** ẑ = K̂⁻¹r via Schur, then Woodbury back to K⁻¹r. [DESIGN §4.1] steps 2–3. */
-            const applyKinv = (rhs: ArrayLike<number>): Float64Array => {
-                const y = applyAhatInv(L, n, rhs);
-                const rhsBottom = new Array<number>(k);
-                for (let r = 0; r < k; r++) rhsBottom[r] = rhs[m + r];
-                const Cy = C.map((row, r) => {
-                    let s = 0;
-                    for (let i = 0; i < m; i++) s += row[i] * y[i];
-                    return s - rhsBottom[r];
-                });
-                const lam = luSolve(S, Cy);
-                const xh = new Float64Array(m);
-                for (let i = 0; i < m; i++) {
-                    let s = y[i];
-                    for (let r = 0; r < k; r++) s -= Z[r][i] * lam[r];
-                    xh[i] = s;
-                }
-                // Woodbury: z = ẑ + W M⁻¹ (Pᵀx̂). UᵀK̂⁻¹r = Uᵀẑ = Pᵀx̂ because U = [P; 0].
-                const Ptx = [0, 0, 0];
-                for (let a = 0; a < 3; a++) {
-                    let s = 0;
-                    for (let i = 0; i < n; i++) s += invSqrtN * xh[a * n + i];
-                    Ptx[a] = s;
-                }
-                const mu = luSolve(M, Ptx);
-                const z = new Float64Array(m + k);
-                for (let i = 0; i < m; i++) {
-                    let s = xh[i];
-                    for (let a = 0; a < 3; a++) s += W[a][i] * mu[a];
-                    z[i] = s;
-                }
-                for (let r = 0; r < k; r++) {
-                    let s = lam[r];
-                    for (let a = 0; a < 3; a++) s += W[a][m + r] * mu[a];
-                    z[m + r] = s;
-                }
-                return z;
-            };
+            const applyKinv = (rhs: ArrayLike<number>): Float64Array =>
+                schurWoodburySolve(L, n, C, setup, M, rhs);
 
             /** r = rhs − K z against the f64 A and C — K is never materialized. */
             const residualOf = (rhs: ArrayLike<number>, z: Float64Array): Float64Array => {
