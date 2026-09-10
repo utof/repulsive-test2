@@ -37,6 +37,16 @@ import {
 } from '../../src/gpu/saddle';
 
 const U_F64 = 2 ** -53;
+/**
+ * The two constants of [CAL §F]'s bar, named because the artifact's `barFormula` string is
+ * DERIVED from them below rather than spelt a second time. A literal formula string would
+ * decouple silently: changing the headroom here to 100 would still publish
+ * `10*kappaK*uF64` in the committed provenance record, which is the one thing an artifact
+ * whose purpose is checkable gate numbers must never do.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-gate-calibration.md §F
+ */
+const CR_BAR_FLOOR = 1e-12;
+const CR_BAR_HEADROOM = 10;
 /** Repo-relative, for the `kappaArtifact` provenance key in the emitted JSON. */
 const K1CAL = 'bench/results/2026-09-04-gpu-phase2a-k1-calibration.json';
 /**
@@ -47,10 +57,13 @@ const K1CAL = 'bench/results/2026-09-04-gpu-phase2a-k1-calibration.json';
  */
 const K1CAL_URL = new URL(`../../${K1CAL}`, import.meta.url);
 
-let kappaCache: Record<number, number> | null = null;
+let kappaCache: { byN: Record<number, number>; measuredK: number } | null = null;
 
 /**
- * κ₂(K) per N, READ from the committed [K1CAL] artifact — never transcribed.
+ * κ₂(K) per N, plus the k of the constraint set [K1CAL] measured it ON, both READ from
+ * the committed artifact — never transcribed. `measuredK` is read rather than assumed for
+ * the same reason `barFormula` is derived: it is published in every row's `kappaSource`,
+ * and a hardcoded `k=4` there would be a provenance claim that nothing binds.
  * [CAL]'s binding rule is that no gate number lives in prose unless a committed script
  * emitted it into a committed JSON; a literal table here would be that same failure one
  * level down, going stale silently if the calibration is ever re-run.
@@ -62,7 +75,7 @@ let kappaCache: Record<number, number> | null = null;
  * asserted to exist" actually true.
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-gate-calibration.md §F, §A
  */
-function kappaByN(): Record<number, number> {
+function kappaArtifact(): { byN: Record<number, number>; measuredK: number } {
     if (kappaCache) return kappaCache;
     if (!existsSync(K1CAL_URL))
         throw new Error(
@@ -70,12 +83,12 @@ function kappaByN(): Record<number, number> {
                 'bar would silently fall back to the 1e-12 floor and CR would gate at the wrong level',
         );
     const parsed = JSON.parse(readFileSync(K1CAL_URL, 'utf8')) as {
-        rows: { n: number; kappaK: number }[];
+        rows: { n: number; kappaK: number; k: number }[];
     };
-    const out: Record<number, number> = {};
-    for (const r of parsed.rows) out[r.n] = r.kappaK;
-    kappaCache = out;
-    return out;
+    const byN: Record<number, number> = {};
+    for (const r of parsed.rows) byN[r.n] = r.kappaK;
+    kappaCache = { byN, measuredK: parsed.rows[0].k };
+    return kappaCache;
 }
 
 // Fail loudly if the artifact moved or its schema changed: without this, every bar
@@ -83,9 +96,12 @@ function kappaByN(): Record<number, number> {
 // This test is the FIRST in the file, so a missing artifact reports as this named test
 // failing with the message above rather than as twelve unexplained fixture failures.
 test('CR: the [K1CAL] κ₂(K) artifact is present and populated', () => {
-    const kappa = kappaByN();
-    expect(Object.keys(kappa).length).toBeGreaterThanOrEqual(5);
-    expect(kappa[960]).toBeGreaterThan(1e6);
+    const { byN, measuredK } = kappaArtifact();
+    expect(Object.keys(byN).length).toBeGreaterThanOrEqual(5);
+    expect(byN[960]).toBeGreaterThan(1e6);
+    // Every row's `kappaSource` publishes this; a missing or non-numeric `k` would make
+    // that provenance string read `k=undefined` in the committed artifact.
+    expect(measuredK).toBeGreaterThan(0);
 });
 
 /**
@@ -96,8 +112,10 @@ test('CR: the [K1CAL] κ₂(K) artifact is present and populated', () => {
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-gate-calibration.md §F
  */
 function crBar(n: number): number {
-    const kappa = kappaByN()[n];
-    return kappa === undefined ? 1e-12 : Math.max(1e-12, 10 * kappa * U_F64);
+    const kappa = kappaArtifact().byN[n];
+    return kappa === undefined
+        ? CR_BAR_FLOOR
+        : Math.max(CR_BAR_FLOOR, CR_BAR_HEADROOM * kappa * U_F64);
 }
 
 /**
@@ -195,6 +213,14 @@ interface CrRow {
     /** SADDLE_IR_TOL, i.e. relErr and relErrWithIr are the same vector. */
     irRefinements: number;
     irRelResiduals: number[];
+    /**
+     * Which κ the row's bar came from, and on WHICH K it was measured. [K1CAL]'s κ₂(K) is
+     * measured on the k=4 `barycenter+totalLength` set only, so a `+pin` row (k=7) is
+     * gated by κ of a DIFFERENT matrix — disclosed per row rather than asserted away.
+     * Changing which κ the bar uses would amend a pre-registered bar, which a plan may not
+     * do; the label is what gets corrected.
+     * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-gate-calibration.md §F
+     */
     kappaSource: string;
     verdict: 'PASS' | 'FAIL';
     diagM: number[];
@@ -396,7 +422,10 @@ function measure(name: string, vertices: Vec3[], edges: Edge[], withPin: boolean
             slack: bar / relErr,
             irRefinements: trace.refinements,
             irRelResiduals: trace.relResiduals,
-            kappaSource: 'K1CAL:rows[].kappaK (k=4)',
+            // `crBar(n)` above has already populated the cache, so `measuredK` is read,
+            // not assumed. On a k=4 row the two halves agree; on a `+pin` row they do not,
+            // and saying so is the point — see the field's TSDoc.
+            kappaSource: `K1CAL:rows[].kappaK (κ₂ measured at k=${kappaArtifact().measuredK}; this row's K is k=${k})`,
             // Computed for EVERY row, but only the `gated: true` rows' verdicts bind —
             // the fixture tests assert on those three alone. A FAIL on an ungated row at
             // n=960 is the EXPECTED, measured behaviour of a generic rhs against a correct
@@ -474,20 +503,38 @@ for (const f of FIXTURES)
     }
 
 test('CR: write the committed results JSON', () => {
+    // HEAD at run time, so an artifact committed alongside its own run necessarily
+    // records the PARENT sha. That is the repo-wide convention, not a defect here.
+    // @see bench/gpu/README.md ("Provenance")
     const sha = execSync('git rev-parse --short HEAD').toString().trim();
+    // Computed before the write so the summary below ships inside the artifact.
+    const irFired = rows.filter((r) => r.irRefinements > 0);
     // FIXED filename, deliberately not date-derived. A `${date}-…` name writes a SECOND
     // artifact on any later calendar day instead of refreshing the committed one, and the
     // `git add` would then stage both — leaving [CAL §J.3]'s deliverable with two
     // candidate sources and no rule for which is current. Provenance is `gitShaShort`
     // INSIDE the file, where it can be read without parsing a filename.
     //
-    // NO TIMESTAMP, deliberately. Every `bun test` rewrites this file, so a timestamp
-    // would make it dirty the worktree on every run and force a diff that carries no
-    // information. With none, the output is BYTE-STABLE: re-running changes the file only
-    // when the NUMBERS change, which is exactly what a committed gate artifact should do.
-    // Do not add `emittedAt`, and do not gate the write behind an env var either — an
-    // env var is a flag an executor can forget to set, and then the artifact silently
-    // goes stale instead of being regenerated.
+    // NO TIMESTAMP, deliberately. A timestamp would dirty the worktree on every run with
+    // a diff that carries no information. Do not add `emittedAt`, and do not gate the
+    // write behind an env var either — an env var is a flag an executor can forget to set,
+    // and then the artifact silently goes stale instead of being regenerated.
+    //
+    // WHAT IS AND IS NOT STABLE, stated precisely because an earlier version of this
+    // comment claimed byte-stability that the repo's own tooling falsifies — and a comment
+    // asserting a guarantee that does not hold is worse than none, because it tells the
+    // next reader a regression is guarded when it is not.
+    //   NUMBERS: bit-reproducible. Re-running produces all 156 rows identical, so any
+    //     numeric diff here is a real numeric change and is worth reading.
+    //   BYTES: NOT reproducible. `JSON.stringify(…, null, 2)` expands the short arrays
+    //     (`diagM`, `irRelResiduals`); biome's JSON formatter collapses them, and
+    //     `lefthook.yml`'s pre-commit job reformats and re-stages every staged `*.json`.
+    //     So the COMMITTED bytes are biome's, the bytes written here are not, and a plain
+    //     re-run leaves ~1577 lines of whitespace diff plus `gitShaShort`.
+    // Do NOT try to fix that by hand-matching biome's line-breaking in this call; the fix
+    // is a generated-artifact exclusion in `biome.json`, which is a config schema and
+    // therefore out of reach of an inline fix.
+    // @issue utof/repulsive-test2#47
     writeFileSync(
         'bench/results/gpu-phase2a-cr.json',
         `${JSON.stringify(
@@ -495,7 +542,9 @@ test('CR: write the committed results JSON', () => {
                 gate: 'CR',
                 gitShaShort: sha,
                 uF64: U_F64,
-                barFormula: 'max(1e-12, 10*kappaK*uF64)',
+                // DERIVED from the constants `crBar` actually uses, never spelt twice —
+                // see CR_BAR_FLOOR / CR_BAR_HEADROOM.
+                barFormula: `max(${CR_BAR_FLOOR}, ${CR_BAR_HEADROOM}*kappaK*uF64)`,
                 quantity: '[DESIGN §4.1] steps 1-3 (schurWoodburySolve) vs solveSaddleFromA',
                 // The verdict rests on `gated: true` rows only. Stated in the artifact so
                 // a reader who has never seen the plan cannot mistake an expected ungated
@@ -504,6 +553,19 @@ test('CR: write the committed results JSON', () => {
                 ensemblePrng:
                     'splitmix32 uniforms on [-1,1); seeds 1000+s (gradient), 2000+s (projection), s=0..4; displacement seed 7777',
                 kappaArtifact: K1CAL,
+                // [DESIGN §8]'s IR curve, SUMMARISED. Every row already carries its own
+                // `irRefinements`, but one row flipping is a single line inside a diff that
+                // issue #47 fills with ~1577 lines of formatter churn, so it would be read
+                // by nobody. Pre-registered: 9 rows fire, all at n=960, 4 of them gated. A
+                // change here is the signal [DESIGN §5] wants surfaced — z₀ no longer
+                // clearing SADDLE_IR_TOL — and it is RECORDED rather than asserted because
+                // the tightest firing row (`trefoil960+pin/projection:rand3`, ungated) sits
+                // only 1.131× above the threshold. The GATED half of the same signal IS
+                // hard-asserted below — see invariant (a), which fires at 4 vs 6.
+                irFiringRows: {
+                    total: irFired.length,
+                    gated: irFired.filter((r) => r.gated).length,
+                },
                 fixtures: rows,
             },
             null,
@@ -512,4 +574,37 @@ test('CR: write the committed results JSON', () => {
     );
     expect(rows.length).toBe(FIXTURES.length * 2 * 13); // 6 fixtures × 2 sets × 13 rhs = 156
     expect(rows.filter((r) => r.gated).length).toBe(FIXTURES.length * 2 * 3); // 36
+
+    // [DESIGN §5] pins the bar to the steps-1–3 vector, and until these two invariants
+    // existed NOTHING in this file noticed if `relErr` stopped being that vector. Measured:
+    // re-pointing `relErr` at `ext.solve` (steps 1–4) WHILE `woodburyM` forms M in f32
+    // ships `14 pass / 0 fail` — and the recorded `relErr` comes out BETTER than the
+    // correct code's, because step 4 repairs the defect it was supposed to expose. The two
+    // invariants below are two-sided on purpose: (a) catches the certified vector drifting
+    // forward past refinement, (b) catches `measure` and `factor()` ceasing to compute it
+    // the same way.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §5 (CR), §8
+    // (a) Where step 4 applied a correction, z₁₃ and z₁₄ are DIFFERENT vectors, so their
+    // relative errors cannot be the same number.
+    //
+    // The non-vacuity pin is on the GATED firing rows, not on the total of nine, and it
+    // does double duty as the drift detector for [DESIGN §8]'s IR curve. Both halves are
+    // measured. As a pin it is well placed: the four gated firing rows sit at ~2.0× the
+    // SADDLE_IR_TOL firing threshold and the nearest non-firing gated rows (the two n=960
+    // `projection:production`) at 0.766× / 0.760×, so it takes a ~31% z₀ degradation to
+    // add a fifth or a ~2× improvement to lose one — and a 31% z₀ degradation ON A GATED
+    // ROW is exactly the "z₀ no longer clears SADDLE_IR_TOL" signal worth failing on.
+    // Pinning the TOTAL instead would hold the file hostage to a 13% shift in
+    // `trefoil960+pin/projection:rand3` (1.131×), an UNGATED row the gate never asserts
+    // on; that drift is recorded in `irFiringRows` above rather than asserted.
+    // Measured: tightening SADDLE_IR_TOL to 2e-11 and to 2.1e-11 both fail HERE, 4 vs 6.
+    expect(irFired.filter((r) => r.gated).length).toBe(4);
+    for (const r of irFired) expect(r.relErr).not.toBe(r.relErrWithIr);
+    // (b) Where step 4 applied none, z₁₄ IS z₁₃ — bit for bit, because `measure` and
+    // `factor()` call the SAME exported helpers on the same inputs. A drifted second
+    // implementation in this file (exactly what the one-implementation-two-consumers
+    // extraction exists to prevent) breaks this while staying orders under the bar, so no
+    // other assertion here would see it.
+    for (const r of rows.filter((r) => r.irRefinements === 0))
+        expect(r.relErr).toBe(r.relErrWithIr);
 });
