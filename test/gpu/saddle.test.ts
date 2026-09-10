@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { existsSync, readFileSync } from 'node:fs';
 import { trefoil } from '../../src/core/fixtures';
 import { DEFAULTS } from '../../src/core/optimizer';
 import {
@@ -291,4 +292,175 @@ test('the IR trace records the convergence curve', () => {
     expect(traces[0].refinements).toBe(0);
     expect(traces[0].relResiduals).toHaveLength(1);
     expect(traces[0].relResiduals[0]).toBeLessThanOrEqual(SADDLE_IR_TOL);
+});
+
+/** Repo-relative, for the failure messages below. */
+const K1CAL = 'bench/results/2026-09-04-gpu-phase2a-k1-calibration.json';
+/**
+ * The same artifact resolved relative to THIS FILE, for reading. Not the bare
+ * repo-relative string: `readFileSync` resolves that against the CWD, so it would only
+ * work when `bun test` is invoked from the repo root. Same idiom `test/gpu/cr.test.ts:58`
+ * uses for the same artifact.
+ */
+const K1CAL_URL = new URL(`../../${K1CAL}`, import.meta.url);
+
+/**
+ * `t4` — the pre-registered IR tolerance and budget — READ from the committed [K1CAL]
+ * artifact, never transcribed. [CAL §A]'s binding rule is that no gate number lives in
+ * prose unless a committed script emitted it into a committed JSON; a literal table here
+ * would be that same failure one level down.
+ *
+ * LAZY, and that is load-bearing, for the reason `test/gpu/cr.test.ts:71` gives: read at
+ * module scope, a missing or moved artifact throws during IMPORT and aborts the whole file
+ * before any `test()` registers, so the failure would surface as an unrelated import error
+ * rather than as the named test below.
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-gate-calibration.md §A, §E.5
+ */
+function calibrationT4(): { tol: number; maxIters: number } {
+    if (!existsSync(K1CAL_URL))
+        throw new Error(
+            `the [K1CAL] artifact is missing at ${K1CAL_URL.pathname} — the IR budget and ` +
+                'tolerance cannot be checked against the calibration that pre-registered them',
+        );
+    const parsed = JSON.parse(readFileSync(K1CAL_URL, 'utf8')) as {
+        t4?: { tol: number; maxIters: number };
+    };
+    if (!parsed.t4)
+        throw new Error(
+            `the [K1CAL] artifact at ${K1CAL} has no t4 block — [CAL §E.5]'s pre-registered ` +
+                'IR budget has no committed source and this pin would be vacuous',
+        );
+    return parsed.t4;
+}
+
+test("SADDLE_IR_MAX_REFINEMENTS and SADDLE_IR_TOL ARE [CAL]'s committed t4 block", () => {
+    // WHAT BREAKS IF EITHER NUMBER MOVES, and why nothing else in the suite notices.
+    // [CAL §E.5] measures that an f32 factor sitting exactly AT gate K1's green bar
+    // (f = k1Bar/alpha = 3.334) needs all four refinements with ZERO spare at n=960. So a
+    // silent 4 -> 3 makes every legitimate GPU factor throw ExternalSolveError at n=960,
+    // sending every step down the CPU fallback with `usedGpuSolve: false`: the P2a speedup
+    // evaporates and NOTHING goes red. Measured on this branch: the 4 -> 3 mutant left all
+    // 325 tests passing. `makePreparedSaddle throws ExternalSolveError when IR cannot
+    // converge` cannot pin it either — that assertion READS the constant (deliberately;
+    // that is what makes it discriminate the loop-condition off-by-one), so it moves with
+    // the value. Changing either number is a spec change, not a tuning knob.
+    //
+    // BOTH halves are load-bearing. The literals catch a silent edit to `src/gpu/saddle.ts`.
+    // The equality against the artifact catches the other direction — [CAL] re-run with a
+    // different `T4_MAX_ITERS` (`bench/gpu/k1-calibration.py:104`, emitted into the JSON at
+    // `bench/gpu/k1-calibration.py:471`) while the TypeScript keeps the old number, a
+    // divergence a transcribed literal cannot see.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-gate-calibration.md §E.5, §E.6, §A
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 step 4, §4.2
+    expect(SADDLE_IR_MAX_REFINEMENTS).toBe(4);
+    expect(SADDLE_IR_TOL).toBe(1e-10);
+    const t4 = calibrationT4();
+    expect(SADDLE_IR_MAX_REFINEMENTS).toBe(t4.maxIters);
+    expect(SADDLE_IR_TOL).toBe(t4.tol);
+});
+
+/**
+ * An EXACT rescale: a power of two, so `v * IR_SCALE` is exact in binary floating point at
+ * every magnitude here and the whole solve — which is linear in the rhs with rhs-independent
+ * coefficients — scales bit-for-bit. Do NOT "simplify" this to 1e-6: an inexact factor
+ * perturbs the last bits of a residual already sitting at its own cancellation floor, and
+ * the two curves then differ in the 4th significant digit on CORRECT code. Measured: 1.0008
+ * against an expected 1.
+ */
+const IR_SCALE = 2 ** -20;
+/** As above, driven far enough down that the ABSOLUTE residual falls under the tolerance. */
+const IR_DEEP_SCALE = 2 ** -60;
+
+test('the IR criterion is scale-free: the residual curve is BIT-IDENTICAL under an exact rhs rescale', () => {
+    // The criterion at `src/gpu/saddle.ts:412` is the PURE relative residual
+    // `||r_i||/||r||`, and `||r_i||/max(1, ||r||)` — the spelling [DESIGN §4.1] step 4
+    // forbids in bold and §4.4 forbids again — is scale-DEPENDENT below ||r|| = 1, which
+    // the projection rhs `[0; -Phi]` always is. Nothing in the suite bound that before this
+    // test: measured, the `max(1, ||r||)` mutant left all 325 tests passing, because every
+    // GATED CR row that exercises IR is gradient-shaped (||r|| >> 1, where the two
+    // spellings agree) and the projection-shaped rows that would move are ungated.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 step 4, §4.4
+    const { A, C, n } = system(60);
+    const { Asigma, sigma } = shiftSobolev(A, n);
+    const L = choleskyF64(Asigma, n);
+    // Degrade the factor so z0 does NOT already clear the tolerance and IR walks a real
+    // curve. With an exact f64 factor the curve is ONE entry long at every scale and this
+    // test would exercise a single evaluation of the criterion. 1e-5 is measured to give 2
+    // refinements at n=60 — a three-entry curve, two spare against the budget of 4.
+    for (let i = 0; i < n; i++) L[i * n + i] *= 1 + 1e-5 * ((i % 5) - 2);
+    const traces: IrTrace[] = [];
+    const prepared = makePreparedSaddle(A, L, sigma, n, (t) => {
+        traces.push(t);
+    });
+    const fac = asExternal(prepared.factor(C));
+    const zeros = new Array<number>(3 * n).fill(0);
+    // The PROJECTION rhs shape, not the gradient one: `||rhs||` must be < 1 for
+    // `max(1, ||rhs||)` to differ from `||rhs||` at all. Measured 2.3108e-1 at n=60.
+    const d = Array.from({ length: C.length }, (_, i) => -0.1 - 0.01 * i);
+    let rhsNorm = 0;
+    for (const v of d) rhsNorm += v * v;
+    expect(Math.sqrt(rhsNorm)).toBeLessThan(1);
+
+    fac.solve([...zeros, ...d]);
+    fac.solve([...zeros, ...d.map((v) => v * IR_SCALE)]);
+
+    expect(traces).toHaveLength(2);
+    // Non-vacuity: IR must actually fire, or the "curve" is one entry and the comparison
+    // below says nothing about the criterion's later evaluations. Measured 2 at n=60.
+    expect(traces[0].refinements).toBeGreaterThan(0);
+    expect(traces[1].refinements).toBe(traces[0].refinements);
+    // BIT-identical, not a tolerance band: the rescale is exact (see IR_SCALE), so under
+    // the pure relative criterion every entry is the SAME f64. Measured green at HEAD. On
+    // the `max(1, ||rhs||)` mutant the run goes red one line earlier, at the refinement
+    // count: the rescaled solve's ABSOLUTE residual (measured 6.2144e-11) is already under
+    // the 1e-10 tolerance, so IR converges at iteration 0 and returns a z that has had NO
+    // refinement applied — 0 against the unscaled run's 2.
+    expect(traces[1].relResiduals).toEqual(traces[0].relResiduals);
+});
+
+test('the IR criterion rejects an unconvergeable factor at EVERY rhs scale', () => {
+    // The consequence [DESIGN §4.1] step 4 actually needs: "an unconverged z must never
+    // reach the line search", at any rhs magnitude. Under `max(1, ||rhs||)` the criterion
+    // is ABSOLUTE for `||rhs|| <= 1`, so shrinking the projection rhs far enough makes a
+    // factor with a relative residual of 3.06e+16 look converged at iteration 0 and
+    // `solve()` RETURNS that garbage instead of throwing. That is the permissive direction
+    // the TSDoc at `src/gpu/saddle.ts:35-40` calls "~1e4x worse than this criterion claims",
+    // exhibited as a contract breach rather than as a number.
+    // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1 step 4, §4.4
+    const { A, C, n } = system(60);
+    const { Asigma, sigma } = shiftSobolev(A, n);
+    const L = choleskyF64(Asigma, n);
+    // The same corruption `makePreparedSaddle throws ExternalSolveError when IR cannot
+    // converge` uses: IR's contraction exceeds 1, so no budget can rescue it.
+    for (let i = 0; i < n; i++) L[i * n + i] *= 1 + 0.3 * ((i % 7) - 3);
+    const traces: IrTrace[] = [];
+    const prepared = makePreparedSaddle(A, L, sigma, n, (t) => {
+        traces.push(t);
+    });
+    const fac = asExternal(prepared.factor(C));
+    const zeros = new Array<number>(3 * n).fill(0);
+    const d = Array.from({ length: C.length }, (_, i) => -0.1 - 0.01 * i);
+
+    const messages = [1, IR_DEEP_SCALE].map((s) => {
+        try {
+            fac.solve([...zeros, ...d.map((v) => v * s)]);
+            return '(returned — the solve was ACCEPTED)';
+        } catch (e) {
+            expect(e).toBeInstanceOf(ExternalSolveError);
+            return (e as Error).message;
+        }
+    });
+    // Non-vacuity in BOTH directions. First: the unscaled solve must already throw, or the
+    // corruption has stopped being hopeless and the scaled case proves nothing.
+    expect(messages[0]).toContain('saddle IR: relative residual');
+    // Second: at IR_DEEP_SCALE the ABSOLUTE residual — `rel * ||rhs||`, which is exactly
+    // what `max(1, ||rhs||)` would compare against the tolerance at iteration 0 — must sit
+    // BELOW the tolerance, or the mutant would throw here too and the test would be green
+    // for the wrong reason. Measured 8.3e-18 against a bar of 1e-10.
+    let deepNorm = 0;
+    for (const v of d) deepNorm += (v * IR_DEEP_SCALE) ** 2;
+    expect(traces[1].relResiduals[0] * Math.sqrt(deepNorm)).toBeLessThan(SADDLE_IR_TOL);
+    // The criterion is scale-free, so the rejection is bit-for-bit the same event: same
+    // relative residual to every printed digit, same refinement count.
+    expect(messages[1]).toBe(messages[0]);
 });
