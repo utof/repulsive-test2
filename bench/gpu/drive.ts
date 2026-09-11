@@ -17,6 +17,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { classifyAdapter } from './adapterClass';
+
 const CHROME = process.env.CHROME_BIN ?? 'google-chrome';
 const PORT = 9223;
 const DEV_SERVER = process.env.DEV_SERVER_URL ?? 'http://localhost:3000';
@@ -65,18 +67,6 @@ type AdapterInfo = {
     device: string;
     description: string;
 };
-
-/**
- * PASS/FAIL classification of an adapter, per spec §3: any result obtained
- * against a software rasterizer is INVALID, never a passing (or failing) gate
- * measurement. @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3
- */
-function classifyAdapter(info: { vendor: string; description: string }): 'hardware' | 'software' {
-    const d = `${info.vendor} ${info.description}`.toLowerCase();
-    return d.includes('swiftshader') || d.includes('llvmpipe') || d.includes('software')
-        ? 'software'
-        : 'hardware';
-}
 
 function isNoise(line: string): boolean {
     return CONSOLE_NOISE.some((re) => re.test(line));
