@@ -1,5 +1,48 @@
 # WebGPU Solver — Phase 2a-2 (the f32 GPU Cholesky kernel + gates K1, T4, Boot) Implementation Plan
 
+> ## CORRECTION (2026-09-11, utof/repulsive-test2#51): SUPERSEDED — do not implement this plan
+>
+> **This plan specifies a dense f32 GPU Cholesky of `A_σ`, and #51 retires that
+> architecture: in Yu–Schumacher–Crane the block cluster tree is how the Sobolev inner
+> product `A` is *applied*, never assembled (arXiv:2006.07859 §6.2, App. B.2/B.3.4; §6.3:
+> *"Since the hierarchical matrix-vector multiply does not build an explicit matrix, we use
+> an iterative method to solve our linear systems."*), so under Phase 2H there is no `A` to
+> factor and no `L` for K1 to measure.**
+>
+> **Nothing below is withdrawn, edited or deleted**, and the file must not be removed —
+> `CLAUDE.md` keeps SDD / review-loop records as the auditable account of *why* the dense
+> path was chosen and what it cost to find out it could not scale. Read it as a process
+> record, not as an instruction.
+>
+> The specs this plan cites carry their own CORRECTION markers against #51 (commit
+> `2a01332`): [DESIGN] §1 (`:121`), §4.2 (`:452`) and §4.3 (`:514`, `:572`); [CAL] §E
+> (`:351`).
+>
+> **Implementation status at supersession: ZERO tasks executed.** None of the twelve
+> deliverable files exist on `feat/webgpu-phase2a-2`; the branch's only code commit
+> (`5233624`) is issue #53's `classifyAdapter` fix, which this plan does not own. Working
+> drafts of Tasks 1, 2 (pure parts) and 4 do exist, untracked, in
+> `.superpowers/sdd/2026-09-11-webgpu-phase2a-2/scratch/fold-verify/` (11 files, 1 353
+> lines) — written by the round-1 fold agent to verify the plan was executable.
+>
+> ### Salvage verdict per task (full census with line cites in utof/repulsive-test2#55)
+>
+> Line numbers below are this file's CURRENT numbering. #55's own task table was
+> written before this banner and its numbers are 43 lower throughout.
+>
+> | Task | Line | Verdict | One-line salvage note |
+> |---|---|---|---|
+> | 1 | `:312` | **MIXED** | `checksum.ts` and `phase2aFixtures.ts` survive; `phase2aMetrics.ts` and `choleskyEmulate.ts` die with the factor — but the **method** (pre-gate a GPU kernel's numerics in CPU f32 before any WGSL exists) is the single highest-value item in the plan and transfers verbatim to the BCT matvec + GMRES. |
+> | 2 | `:1113` | **DENSE-ONLY** | Three WGSL Cholesky sources + `triIndex`'s lower-triangle packing die. Salvage only `gpuSolveMaxN`'s pattern: read the device limit at boot, never assert it. |
+> | 3 | `:1514` | **DENSE-ONLY** | `GpuCholesky` dies, its **plumbing does not**: D6 (two readbacks, timed separately), D8 (the whole constructor is `bun test`-able because `three/tsl` + `three/webgpu` import with no device), the reused `ReadbackBuffer`, the GPU-side counter in one `renderer.compute([…])` batch, and the status-flag meta buffer are what 2H's matvec engine needs too. |
+> | 4 | `:1767` | **ARCHITECTURE-INDEPENDENT** | Highest-value survivor. The *pattern* — every bar read from a committed calibration JSON at run time (D2), one exported verdict function per gate, the bar travelling with the verdict, `readFileSync` so the path is a test parameter — is exactly what 2H's replacement gates (#59) need. The signatures (`k1Verdict`, `t4Verdict`, `K1CalibrationRow`) are Cholesky-shaped and get replaced. |
+> | 5 | `:2067` | **DENSE-ONLY** | The K1 / factor-wall / Boot spike dies with `GpuCholesky`. The spike **contract** survives: records values and never classifies, `pass` means only "ran cleanly", registration by one `Object.assign` in `bench/gpu/spikes.ts`, hardware-adapter-or-INVALID. |
+> | 6 | `:2243` | **DENSE-ONLY** | T4-after-IR-on-a-factor dies. **D7 survives and gets more important, not less**: `onTrace` fires before the throw, so a budget-blowing N still yields its convergence curve — wrap every solve in `try`/`catch` and continue the sweep. Under 2H every solve is iterative and that curve is the primary artifact. |
+> | 7 | `:2402` | **ARCHITECTURE-INDEPENDENT** | The emitter + CLI + gate-report format, on [CAL §J.2]'s rationale: *"a level that only exists as prose is a level that goes stale silently, three times in a row."* Its Step 8 handoff also carries live debts that outlive the architecture — the unpaid CR headroom finding, [CAL §J.4], and `SimStore.gpuSolveAvailable`'s four sites including the `poisoned` latch. |
+>
+> Also re-read before authoring the 2H plan: the `## Decisions` block at `:241` — D2, D4,
+> D5, D6, D7 and D8 are about how to *run* a GPU numerics milestone, not about Cholesky.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Land `src/gpu/cholesky.ts` — the unblocked right-looking f32 GPU Cholesky of the shifted Sobolev block `A_σ` — and measure the three gates that need it and nothing else: **K1** (backward error of the read-back factor), **T4** (pure relative residual after iterative refinement on that factor), and **Boot** (the forward self-test metric on `trefoil(64)`).
