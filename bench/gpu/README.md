@@ -1,10 +1,148 @@
 # bench/gpu — GPU gate harness
 
-CDP-driven headless-Chrome harness for the WebGPU solver Phase 0 kill gates.
+Headless-browser harness for the WebGPU solver kill gates. The browser is a
+**variant, not a constant**: `GPU_HOST=firefox` (default) drives Firefox over
+WebDriver BiDi, `GPU_HOST=chrome` drives Chrome over CDP.
 @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3–§5
 @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md
+@issue utof/repulsive-test2#54
+
+## Hosts: Chrome/Dawn vs Firefox/naga
+
+| | `GPU_HOST=chrome` | `GPU_HOST=firefox` (default) |
+|---|---|---|
+| Transport | CDP (`/json` targets + `Runtime.evaluate`) | WebDriver BiDi (`ws://127.0.0.1:PORT/session`) |
+| WGSL backend | Dawn | naga |
+| `GPUAdapterInfo` | names the adapter | **all four fields blank** |
+| Certification route | `adapter-info` | `fallback-flag+device-pin` |
+| Installed on the dev box (2026-09-11) | no | yes, 155.0.1 |
+
+Firefox 155 serves **no CDP at all** — `--remote-debugging-port` starts the
+BiDi remote agent and `/json`, `/json/list`, `/json/version` all 404. There is
+no shim to fall back on; the transports are genuinely separate, which is why
+`bench/gpu/hosts/` exists.
+
+### Which gates transfer between hosts, and which do not
+
+**NOT host-portable — never read a Firefox number as evidence about Chrome:**
+
+- Anything whose metric depends on **compensated summation** (Dekker/Kahan
+  two-float accumulation): K1, T4, the G2 reassociation spike, and every Phase
+  2H precision gate. WGSL permits reassociation and fusion with **no portable
+  opt-out** ([gpuweb/gpuweb#2076](https://github.com/gpuweb/gpuweb/issues/2076),
+  open since 2021), and naga is *measured* to delete compensation terms Dawn
+  preserves. Phase 2H's whole precision argument lives in exactly the
+  arithmetic naga rewrites.
+- Anything derived from `requiredLimits`. Firefox advertises
+  `maxStorageBuffersPerShaderStage: 64`, `maxBindGroups: 8` and
+  `maxStorageBufferBindingSize: 2147483644` (~2 GiB) where Chrome/Dawn's
+  default binding size is 128 MiB. A kernel authored against Firefox's limits
+  can be **structurally impossible** on Chrome. Re-validate against Dawn before
+  treating any Firefox-observed limit as a design constraint.
+
+**Host-portable (structural):** did the shader compile, did the dispatch
+happen, what shape/values came back, and wall-clock *ratios* compared within a
+single host (G1's batching ratio, the reduce-exactness rows).
+
+Every result JSON records `host: { id, version, shaderBackend }` so this
+distinction is checkable after the fact, never inferred.
+
+### Known Firefox-155 harness caveat
+
+`timestamp-query` is advertised in the adapter's feature list, but the G0t
+spike measured **all-zero** GPU timestamp totals (`fmaTotalsMs: [0,0,0,0,0]`)
+on this host. Any timing gate on Firefox must use the CPU wall-clock fallback
+until that is diagnosed; do not read a zero as "infinitely fast".
+
+## Hardware certification without adapterInfo
+
+Firefox reports a **blank `GPUAdapterInfo`** — measured 2026-09-11 on 155.0.1,
+`vendor`/`architecture`/`device`/`description` are all `""`. `classifyAdapter`
+deliberately rules a blank record `'software'` (`adapterClass.ts:39-47`: an
+adapter we cannot name is one we cannot certify), so under that predicate alone
+*every* Firefox gate would be INVALID — a harness that runs and certifies
+nothing.
+
+The blank guard is **not** relaxed. `bench/gpu/adapterCert.ts` adds a second,
+narrower route that demands positive evidence from two independent channels and
+records which route was taken:
+
+1. **`adapter-info`** — the four fields named the adapter. Chrome's route, and
+   the only self-describing one. A record that positively says `swiftshader`
+   stays software no matter what any pin says.
+2. **`fallback-flag+device-pin`** — the fields were blank, **and** the page
+   reported `GPUAdapterInfo.isFallbackAdapter === false`, **and** the browser
+   process was pinned to a single Vulkan ICD that `vulkaninfo` independently
+   names as a non-CPU device. Both conjuncts are required.
+3. **`undetermined`** — anything else. Always `'software'` → INVALID.
+
+Why the pin is mandatory rather than cosmetic: **unpinned Firefox 155 on this
+box runs WebGPU on the Intel UHD 630 iGPU and never touches the NVIDIA Quadro
+RTX 3000.** `nvidia-smi --query-compute-apps` lists no firefox process during a
+compute spike without the pin, and lists `/usr/lib/firefox/firefox` holding
+device memory with it. Because `GPUAdapterInfo` is blank, an unpinned run
+leaves no trace of which GPU produced the numbers.
+
+### Falsifying the guard
+
+`GPU_VK_ICD=<name>` forces one ICD. It exists so the guard can be *observed
+failing* — a guard never seen to fail is not a verified guard:
+
+```
+GPU_HOST=firefox                   bun bench/gpu/drive.ts phase1Reduce  # PASS
+GPU_HOST=firefox GPU_VK_ICD=lvp    bun bench/gpu/drive.ts phase1Reduce  # INVALID
+```
+
+Under `lvp` the spike still runs and still returns *passing numbers*, and the
+gate is still ruled INVALID — which is the point: a software run must not yield
+a passing gate even when its measurements look fine. The override applies to
+replayed G0a recipes too, so it cannot be dodged by a later gate.
 
 ## Winning launch recipe (G0a)
+
+### Firefox (`GPU_HOST=firefox`, verified 2026-09-11, `git 538c398`)
+
+**Headless succeeded on the first recipe.** Certified hardware: `Quadro RTX
+3000` (`PHYSICAL_DEVICE_TYPE_DISCRETE_GPU`), via
+`fallback-flag+device-pin`. Raw result: `bench/results/2026-09-11-gpu-g0a.json`.
+
+```
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+firefox \
+  --headless \
+  --no-remote \
+  --profile <fresh temp dir with user.js below> \
+  --remote-debugging-port=9223 \
+  http://localhost:3000/bench/gpu/harness.html
+```
+
+with `user.js`:
+
+```
+user_pref("dom.webgpu.enabled", true);
+```
+
+`dom.webgpu.enabled` is **required** on Linux — WebGPU shipped on Windows in FF
+141 and macOS in FF 145, but is still pref-gated on Linux in 155, and without
+it `navigator.gpu` is `undefined`. It is a WebIDL pref, not a static pref, so it
+does not appear in `greprefs.js` and shows as absent in a default `about:config`
+— do not "clean it up" on that basis.
+
+Two further Firefox-specific requirements, both measured:
+
+- **A secure context is required.** `navigator.gpu` is `undefined` on
+  `about:blank`; the harness must be reached over `http://localhost:…`. The host
+  navigates explicitly and waits for `complete` rather than relying on the URL
+  passed on argv.
+- **`127.0.0.1`, not `localhost`,** for the BiDi socket — Firefox binds the
+  literal v4 loopback, and on a dual-stack box `localhost` can resolve to `::1`
+  and never connect.
+
+A **fresh `--profile` per launch** is used (same reasoning as Chrome's
+`--user-data-dir`), and the user's daily profile is never touched.
+
+### Chrome (`GPU_HOST=chrome`)
 
 Verified 2026-08-13 against the real NVIDIA Quadro RTX 3000 in this machine
 (`git a1f6022`). **Headless succeeded on the first flag set** — no headed
@@ -25,9 +163,10 @@ google-chrome \
 
 Result: `vendor: "nvidia"`, `architecture: "turing"` (Quadro RTX 3000 is a
 Turing-class part) — a genuine hardware adapter, not SwiftShader/llvmpipe.
-`bench/gpu/drive.ts` tries `FLAG_SETS` in this order automatically and
-records whichever one first classifies as `hardware`; the raw result lives at
-`bench/results/2026-08-13-gpu-g0a.json`.
+The driver tries `chromeHost.launchVariants` in this order automatically and
+records whichever one first certifies as `hardware`; the raw result lives at
+`bench/results/2026-08-13-gpu-g0a.json`. (These flag sets now live in
+`bench/gpu/hosts/chrome.ts`, moved verbatim from `drive.ts`'s old `FLAG_SETS`.)
 
 A **fresh `--user-data-dir` per Chrome launch is required** — reusing the
 default profile can make `google-chrome` hand off to an already-running
@@ -39,8 +178,11 @@ instance and silently ignore the new process's flags (including
 - **FAIL** — a gate ran against a confirmed hardware adapter and the
   measurement itself did not meet its threshold (e.g. G1's batching ratio,
   G3's CV). This is real, recordable evidence.
-- **INVALID** — a gate ran against a software adapter (SwiftShader, llvmpipe,
-  or anything `classifyAdapter()` in `drive.ts` calls `'software'`). Software
+- **INVALID** — a gate ran against a software adapter, or against one that
+  could not be *certified* as hardware at all (SwiftShader, llvmpipe, or
+  anything `certifyAdapter()` in `bench/gpu/adapterCert.ts` calls
+  `'software'` — including a blank `GPUAdapterInfo` with no corroborating
+  device pin). Software
   rasterizers do not exercise real GPU dispatch/timing/precision behavior, so
   *any* number from such a run is worthless for a gate decision — per spec §3
   it must be **rerun with the recipe above**, never recorded as a gate
@@ -63,19 +205,25 @@ bun bench/gpu/drive.ts adapterInfo --out g0a   # G0a — must be run first
 bun bench/gpu/drive.ts <spike> --out <label>   # any later spike, once G0a has PASSed
 ```
 
-- `adapterInfo` (gate `G0a`) tries every entry in `FLAG_SETS` until one
-  classifies as hardware, recording every attempt.
-- Every other spike reads the flags from the most recent **PASSing**
-  `bench/results/*-gpu-g0a*.json` and launches Chrome once with those flags —
-  it does not re-search `FLAG_SETS`. If no passing G0a result file exists,
-  the driver refuses to run and exits non-zero.
+- `adapterInfo` (gate `G0a`) tries every entry in the selected host's
+  `launchVariants` until one certifies as hardware, recording every attempt.
+- Every other spike replays the launch recipe from the most recent **PASSing**
+  `bench/results/*-gpu-g0a*.json` **for the same host**, and launches once with
+  it — it does not re-search the variants. A Chrome recipe is never replayed
+  under Firefox or vice versa (a recipe carrying no `VK_DRIVER_FILES` would
+  silently drop the pin the Firefox certification depends on). If no passing
+  G0a result exists for the selected host, the driver refuses to run and exits
+  non-zero.
 - Results are written to `bench/results/<date>-gpu-<label>.json`:
-  `{ gate, status, adapter, flags, attempts, gitShaShort, date, data, consoleLines }`.
+  `{ gate, status, host, adapter, certification, launch, flags, attempts,
+  gitShaShort, date, data, consoleLines }`. `flags` is retained under its
+  historical name (it is `launch.argv`) so existing readers keep working;
+  `host` and `certification` are the fields to read before believing `status`.
 
 ## Console noise to ignore
 
 These lines can appear even on a genuine hardware adapter and are not
-evidence of software fallback; `drive.ts`'s `CONSOLE_NOISE` filters them out
+evidence of software fallback; `bench/gpu/consoleNoise.ts` filters them out
 of `consoleLines` automatically:
 
 - `RangeError: createBuffer failed, size (144) is too large` (~60/s from

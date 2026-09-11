@@ -1,65 +1,25 @@
 // bench/gpu/drive.ts — bun bench/gpu/drive.ts <spike> [--out label]
-// Launches Chrome headless (or headed, as a fallback) against the dev server,
-// asserts a hardware WebGPU adapter (G0a), runs the named spike, and writes
-// bench/results/<date>-gpu-<label>.json.
-// INVALID (software adapter) is a distinct outcome from FAIL — see README.md.
+// Launches a browser host against the dev server, certifies the WebGPU adapter
+// (G0a), runs the named spike, and writes bench/results/<date>-gpu-<label>.json.
+// INVALID (software / uncertifiable adapter) is a distinct outcome from FAIL —
+// see README.md.
+//
+// The browser is a variant, not a constant: `GPU_HOST=firefox|chrome` picks.
+// Firefox is the default because it is the browser installed on the dev box;
+// hardcoding `google-chrome` here is what made every GPU kill gate unrunnable.
+// @issue utof/repulsive-test2#54
 // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §3, §4 G0a
 // @see docs/superpowers/plans/2026-08-13-webgpu-solver-phase0.md Task 1
-import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
-import {
-    existsSync,
-    mkdirSync,
-    mkdtempSync,
-    readdirSync,
-    readFileSync,
-    writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { classifyAdapter } from './adapterClass';
+import { type AdapterCertification, certifyAdapter } from './adapterCert';
+import { selectHost } from './hosts';
+import type { BrowserHost, HostSession, LaunchVariant } from './hosts/types';
 
-const CHROME = process.env.CHROME_BIN ?? 'google-chrome';
-const PORT = 9223;
+const PORT = Number(process.env.GPU_HOST_PORT ?? 9223);
 const DEV_SERVER = process.env.DEV_SERVER_URL ?? 'http://localhost:3000';
 const RESULTS_DIR = join(import.meta.dir, '..', 'results');
-
-/**
- * Candidate flag sets, tried in order until `adapterInfo` reports NVIDIA
- * hardware. The third set is a headed fallback — spec G0a explicitly allows
- * a headed pass after an honest headless attempt.
- * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §4 G0a
- */
-const FLAG_SETS: string[][] = [
-    [
-        '--headless=new',
-        '--enable-unsafe-webgpu',
-        '--enable-features=Vulkan',
-        '--use-angle=vulkan',
-        '--enable-gpu',
-        '--no-sandbox',
-    ],
-    [
-        '--headless=new',
-        '--enable-unsafe-webgpu',
-        '--enable-features=Vulkan',
-        '--ignore-gpu-blocklist',
-        '--no-sandbox',
-    ],
-    // headed fallback (spec G0a: allowed after honest headless effort)
-    ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--no-sandbox'],
-];
-
-/**
- * Known SwiftShader/software-fallback console noise lines to filter out of
- * captured console output (they fire even on a hardware adapter and are not
- * evidence of anything). @see bench/gpu/README.md
- */
-const CONSOLE_NOISE = [
-    /RangeError: createBuffer failed, size \(144\) is too large/,
-    /Instance dropped in popErrorScope/,
-    /Warning: Encountered two children with the same key, `0`/,
-];
 
 type AdapterInfo = {
     vendor: string;
@@ -68,233 +28,93 @@ type AdapterInfo = {
     description: string;
 };
 
-function isNoise(line: string): boolean {
-    return CONSOLE_NOISE.some((re) => re.test(line));
-}
-
-/** Poll the CDP HTTP endpoint until a target for `harness.html` appears. */
-async function waitForTarget(
-    port: number,
-    timeoutMs = 10_000,
-): Promise<{ webSocketDebuggerUrl: string }> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        try {
-            const res = await fetch(`http://localhost:${port}/json`);
-            if (res.ok) {
-                const targets = (await res.json()) as Array<{
-                    url: string;
-                    webSocketDebuggerUrl: string;
-                }>;
-                const target = targets.find((t) => t.url.endsWith('harness.html'));
-                if (target) return target;
-            }
-        } catch {
-            // Chrome's debug HTTP endpoint isn't up yet; keep polling.
-        }
-        await new Promise((r) => setTimeout(r, 200));
-    }
-    throw new Error(`No harness.html target on CDP port ${port} within ${timeoutMs}ms`);
-}
-
-/**
- * Minimal raw CDP client over Bun's native WebSocket — id-keyed pending-promise
- * map, no library, per plan Task 1 Step 2 transport spec.
- */
-class CDPClient {
-    private ws: WebSocket;
-    private nextId = 1;
-    private pending = new Map<
-        number,
-        { resolve: (v: unknown) => void; reject: (e: unknown) => void }
-    >();
-    private closed = false;
-    consoleLines: string[] = [];
-
-    constructor(url: string) {
-        this.ws = new WebSocket(url);
-    }
-
-    /**
-     * Reject every outstanding `send()` promise and mark the client closed so
-     * later `send()` calls fail fast. Without this, a Chrome crash or GPU
-     * device-loss mid-spike (realistic for the long G0t/G1/G3 compute
-     * workloads) leaves an awaited `Runtime.evaluate` pending forever and the
-     * driver hangs. @see https://github.com/utof/repulsive-test2/issues/18 pt.1
-     */
-    private failPending(err: Error): void {
-        this.closed = true;
-        for (const { reject } of this.pending.values()) reject(err);
-        this.pending.clear();
-    }
-
-    async connect(): Promise<void> {
-        await new Promise<void>((resolve, reject) => {
-            this.ws.addEventListener('open', () => resolve());
-            this.ws.addEventListener('error', (e) => reject(e));
-        });
-        this.ws.addEventListener('message', (ev) => {
-            const msg = JSON.parse(ev.data as string);
-            const entry = msg.id !== undefined ? this.pending.get(msg.id) : undefined;
-            if (entry !== undefined) {
-                const { resolve, reject } = entry;
-                this.pending.delete(msg.id);
-                if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-                else resolve(msg.result);
-            } else if (msg.method === 'Runtime.consoleAPICalled') {
-                const line = (msg.params.args ?? [])
-                    .map(
-                        (a: { value?: unknown; description?: string }) =>
-                            a.value ?? a.description ?? '',
-                    )
-                    .join(' ');
-                if (!isNoise(line)) this.consoleLines.push(line);
-            }
-        });
-        // Persistent (post-handshake) close/error listeners, distinct from
-        // the one-shot pair above that only guards the initial handshake.
-        this.ws.addEventListener('close', () =>
-            this.failPending(new Error('CDP WebSocket closed unexpectedly')),
-        );
-        this.ws.addEventListener('error', () => this.failPending(new Error('CDP WebSocket error')));
-    }
-
-    send(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-        if (this.closed) {
-            return Promise.reject(new Error(`CDP WebSocket already closed, cannot send ${method}`));
-        }
-        const id = this.nextId++;
-        return new Promise((resolve, reject) => {
-            this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-            this.ws.send(JSON.stringify({ id, method, params }));
-        });
-    }
-
-    close(): void {
-        this.ws.close();
-    }
-}
+const BLANK_ADAPTER: AdapterInfo = { vendor: '', architecture: '', device: '', description: '' };
 
 type RunOutcome = {
-    classification: 'hardware' | 'software';
+    certification: AdapterCertification;
     adapter: AdapterInfo;
     data: Record<string, unknown> | null;
     consoleLines: string[];
     error?: string;
 };
 
+/** `'hardware'` iff the run's adapter was certified. @see bench/gpu/adapterCert.ts */
+function isHardware(outcome: RunOutcome | undefined): boolean {
+    return outcome?.certification.classification === 'hardware';
+}
+
 /**
- * Poll `typeof window.__runSpike` until the harness page's module script has
- * executed and registered it (Bun bundles bench/gpu/spikes.ts on every
- * request, which is not instant, and the CDP target exists before the page
- * has finished loading it).
+ * Launch `host` with `variant`, run `spikeName` through the harness, tear down.
+ *
+ * The adapter is certified on every run regardless of the spike's own return
+ * shape — previously `(data.adapter ?? data)` silently disarmed the
+ * software-adapter INVALID guard for any spike that doesn't embed adapter
+ * fields (every spike but adapterInfo itself).
+ * @see https://github.com/utof/repulsive-test2/issues/18 pt.2
  */
-async function waitForRunSpikeReady(client: CDPClient, timeoutMs = 15_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        const res = (await client.send('Runtime.evaluate', {
-            expression: 'typeof window.__runSpike',
-            returnByValue: true,
-        })) as { result: { value: string } };
-        if (res.result.value === 'function') return;
-        await new Promise((r) => setTimeout(r, 200));
-    }
-    throw new Error(`window.__runSpike not ready within ${timeoutMs}ms`);
-}
-
-/** Evaluate `window.__runSpike(name)` in the page and parse its JSON result. */
-async function evalSpike(client: CDPClient, name: string): Promise<Record<string, unknown>> {
-    const evalResult = (await client.send('Runtime.evaluate', {
-        expression: `window.__runSpike('${name}')`,
-        awaitPromise: true,
-        returnByValue: true,
-    })) as { exceptionDetails?: unknown; result: { value: string } };
-    if (evalResult.exceptionDetails) {
-        throw new Error(`Spike '${name}' threw: ${JSON.stringify(evalResult.exceptionDetails)}`);
-    }
-    return JSON.parse(evalResult.result.value) as Record<string, unknown>;
-}
-
-/** Launch Chrome with `flags`, run `spikeName` via the harness, tear down. */
-async function runOnce(flags: string[], spikeName: string): Promise<RunOutcome> {
-    const profileDir = mkdtempSync(join(tmpdir(), 'gpu-gate-chrome-'));
-    const args = [
-        ...flags,
-        `--remote-debugging-port=${PORT}`,
-        `--user-data-dir=${profileDir}`,
-        `${DEV_SERVER}/bench/gpu/harness.html`,
-    ];
-    const proc: ChildProcessWithoutNullStreams = spawn(CHROME, args, { stdio: 'pipe' });
-    let stderr = '';
-    proc.stderr.on('data', (d) => {
-        stderr += d.toString();
-    });
-
-    let client: CDPClient | undefined;
+async function runOnce(
+    host: BrowserHost,
+    variant: LaunchVariant,
+    spikeName: string,
+): Promise<RunOutcome> {
+    let session: HostSession | undefined;
     try {
-        const target = await waitForTarget(PORT);
-        client = new CDPClient(target.webSocketDebuggerUrl);
-        await client.connect();
-        await client.send('Runtime.enable');
-        // The CDP target for harness.html exists as soon as the tab is created,
-        // well before the page has navigated/loaded and spikes.ts has run (which
-        // is what defines window.__runSpike) — poll for readiness instead of
-        // racing straight into Runtime.evaluate.
-        await waitForRunSpikeReady(client);
+        session = await host.launch(variant, `${DEV_SERVER}/bench/gpu/harness.html`, PORT);
+    } catch (e) {
+        // Failure before we could even determine the adapter (launch/connect/
+        // ready-poll timeout) — genuinely unknown, and `certifyAdapter` rules a
+        // blank record with no evidence 'software', so it never masquerades as
+        // a passing hardware run.
+        return {
+            certification: certifyAdapter(BLANK_ADAPTER, { devicePin: null }),
+            adapter: BLANK_ADAPTER,
+            data: null,
+            consoleLines: [],
+            error: e instanceof Error ? e.message : String(e),
+        };
+    }
 
-        // Explicit adapter classification, run for every spike regardless of
-        // its own return shape. Previously `(data.adapter ?? data)` silently
-        // disarmed the software-adapter INVALID guard for any spike that
-        // doesn't embed adapter fields (every spike but adapterInfo itself).
-        // @see https://github.com/utof/repulsive-test2/issues/18 pt.2
-        const adapterData = (await evalSpike(client, 'adapterInfo')) as unknown as AdapterInfo;
-        const classification = classifyAdapter(adapterData);
+    const live = session;
+    try {
+        const adapterData = (await live.evalSpike('adapterInfo')) as unknown as AdapterInfo;
+        const certification = certifyAdapter(adapterData, await live.hostEvidence());
 
         if (spikeName === 'adapterInfo') {
             return {
-                classification,
+                certification,
                 adapter: adapterData,
                 data: adapterData,
-                consoleLines: client.consoleLines,
+                consoleLines: live.consoleLines,
             };
         }
 
         try {
-            const data = await evalSpike(client, spikeName);
-            return {
-                classification,
-                adapter: adapterData,
-                data,
-                consoleLines: client.consoleLines,
-            };
+            const data = await live.evalSpike(spikeName);
+            return { certification, adapter: adapterData, data, consoleLines: live.consoleLines };
         } catch (e) {
-            // The adapter classification above is already established and
-            // real; a failure evaluating the requested spike is a genuine
-            // FAIL against known-hardware (or known-software), never a
-            // reason to relabel the adapter itself as INVALID/software.
+            // The adapter certification above is already established and real;
+            // a failure evaluating the requested spike is a genuine FAIL
+            // against known-hardware (or known-software), never a reason to
+            // relabel the adapter itself as INVALID/software.
             // @see https://github.com/utof/repulsive-test2/issues/18 pt.2
             return {
-                classification,
+                certification,
                 adapter: adapterData,
                 data: null,
-                consoleLines: client.consoleLines,
-                error: `${e instanceof Error ? e.message : String(e)}\nstderr: ${stderr}`,
+                consoleLines: live.consoleLines,
+                error: e instanceof Error ? e.message : String(e),
             };
         }
     } catch (e) {
-        // Failure before we could even determine the adapter (target/connect/
-        // ready-poll timeout) — genuinely unknown, treated as 'software' so
-        // it never masquerades as a passing hardware run.
         return {
-            classification: 'software',
-            adapter: { vendor: '', architecture: '', device: '', description: '' },
+            certification: certifyAdapter(BLANK_ADAPTER, { devicePin: null }),
+            adapter: BLANK_ADAPTER,
             data: null,
-            consoleLines: client?.consoleLines ?? [],
-            error: `${e instanceof Error ? e.message : String(e)}\nstderr: ${stderr}`,
+            consoleLines: live.consoleLines,
+            error: e instanceof Error ? e.message : String(e),
         };
     } finally {
-        client?.close();
-        proc.kill();
+        live.close();
     }
 }
 
@@ -303,7 +123,18 @@ function gitShaShort(): string {
     return proc.stdout.toString().trim();
 }
 
-function latestG0aFlags(): string[] | null {
+/**
+ * The launch recipe from the most recent PASSing G0a run **on this host**.
+ *
+ * Why the host filter: a Chrome flag set replayed under Firefox (or a Firefox
+ * ICD pin replayed under Chrome) launches nothing usable, and — worse — a
+ * recipe carrying no `VK_DRIVER_FILES` would silently drop the pin that the
+ * Firefox certification depends on. Legacy records (pre-#54) carry a bare
+ * `flags` array and no `host`; they are read only when the requested host is
+ * `chrome`, which is what wrote them.
+ * @issue utof/repulsive-test2#54
+ */
+function latestG0aVariant(hostId: BrowserHost['id']): LaunchVariant | null {
     if (!existsSync(RESULTS_DIR)) return null;
     const g0aFiles = readdirSync(RESULTS_DIR)
         .filter((f) => f.includes('gpu-g0a'))
@@ -311,7 +142,11 @@ function latestG0aFlags(): string[] | null {
         .reverse();
     for (const f of g0aFiles) {
         const parsed = JSON.parse(readFileSync(join(RESULTS_DIR, f), 'utf-8'));
-        if (parsed.status === 'PASS') return parsed.flags;
+        if (parsed.status !== 'PASS') continue;
+        if (parsed.launch && parsed.host?.id === hostId) return parsed.launch as LaunchVariant;
+        if (!parsed.host && parsed.flags && hostId === 'chrome') {
+            return { label: 'legacy-g0a-flags', argv: parsed.flags, prefs: {}, env: {} };
+        }
     }
     return null;
 }
@@ -325,56 +160,65 @@ async function main() {
     const outIdx = rest.indexOf('--out');
     const label = outIdx >= 0 ? rest[outIdx + 1] : spikeName;
 
+    const host = selectHost(process.env.GPU_HOST);
+    const hostRecord = {
+        id: host.id,
+        version: host.version(),
+        shaderBackend: host.shaderBackend,
+    };
+    console.error(
+        `[drive] host=${hostRecord.id} (${hostRecord.version}) backend=${hostRecord.shaderBackend}`,
+    );
+
     const isAdapterGate = spikeName === 'adapterInfo';
     const attempts: Array<{
-        flags: string[];
-        classification: string;
-        adapter: AdapterInfo;
+        launch: LaunchVariant;
+        certification: AdapterCertification;
         error?: string;
     }> = [];
 
-    let winning: { flags: string[]; outcome: RunOutcome } | undefined;
+    let winning: { variant: LaunchVariant; outcome: RunOutcome } | undefined;
 
     if (isAdapterGate) {
-        for (const flags of FLAG_SETS) {
-            console.error(`[drive] trying flags: ${flags.join(' ')}`);
-            const outcome = await runOnce(flags, spikeName);
+        for (const candidate of host.launchVariants) {
+            const variant = host.resolveVariant(candidate);
+            console.error(`[drive] trying ${variant.label}: ${variant.argv.join(' ')}`);
+            const outcome = await runOnce(host, variant, spikeName);
             attempts.push({
-                flags,
-                classification: outcome.classification,
-                adapter: outcome.adapter,
+                launch: variant,
+                certification: outcome.certification,
                 error: outcome.error,
             });
             console.error(
-                `[drive]   -> ${outcome.classification}${outcome.error ? ` (error: ${outcome.error})` : ''} ${JSON.stringify(outcome.adapter)}`,
+                `[drive]   -> ${outcome.certification.classification} via ${outcome.certification.method}: ${outcome.certification.rationale}${outcome.error ? ` (error: ${outcome.error})` : ''}`,
             );
-            if (outcome.classification === 'hardware') {
-                winning = { flags, outcome };
+            if (isHardware(outcome)) {
+                winning = { variant, outcome };
                 break;
             }
         }
     } else {
-        const flags = latestG0aFlags();
-        if (!flags) {
+        const stored = latestG0aVariant(host.id);
+        if (!stored) {
             console.error(
-                '[drive] no passing G0a result found — run `adapterInfo --out g0a` first.',
+                `[drive] no passing G0a result for host '${host.id}' — run \`adapterInfo --out g0a\` first.`,
             );
             process.exit(1);
         }
-        const outcome = await runOnce(flags, spikeName);
+        const variant = host.resolveVariant(stored);
+        const outcome = await runOnce(host, variant, spikeName);
         attempts.push({
-            flags,
-            classification: outcome.classification,
-            adapter: outcome.adapter,
+            launch: variant,
+            certification: outcome.certification,
             error: outcome.error,
         });
-        winning = { flags, outcome };
+        winning = { variant, outcome };
     }
 
     mkdirSync(RESULTS_DIR, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
     const gate = isAdapterGate ? 'G0a' : spikeName;
-    const isHardware = winning?.outcome.classification === 'hardware';
+    const hardware = isHardware(winning?.outcome);
     const hasError = winning?.outcome.error !== undefined;
     // Why: a spike that RETURNS but reports its own red verdict (`data.pass === false`)
     // is a FAIL, not a PASS — without this only a thrown error was ever red, so a gate
@@ -384,15 +228,15 @@ async function main() {
     // @see bench/gpu/README.md — "INVALID vs FAIL semantics"
     // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 4: Perf gate — GPU dE ≥5× CPU dE at N=480 and N=960 (readback counted)"
     const selfReportedFail = (winning?.outcome.data as { pass?: unknown } | null)?.pass === false;
-    // Distinguish adapter classification from spike-eval outcome (#18 pt.2):
-    // software adapter is always INVALID; a hardware adapter with a spike
-    // error is a real FAIL, not an INVALID relabeling of the adapter.
+    // Distinguish adapter certification from spike-eval outcome (#18 pt.2):
+    // an uncertified adapter is always INVALID; a certified-hardware adapter
+    // with a spike error is a real FAIL, not an INVALID relabeling.
     const status = isAdapterGate
-        ? isHardware && !hasError
+        ? hardware && !hasError
             ? 'PASS'
-            : 'FAIL' // STOP-BRANCH: no flag set yielded a hardware adapter
-        : !winning || !isHardware
-          ? 'INVALID' // software (or undetermined) adapter is INVALID, not FAIL
+            : 'FAIL' // STOP-BRANCH: no launch recipe yielded a certified hardware adapter
+        : !winning || !hardware
+          ? 'INVALID' // software (or uncertifiable) adapter is INVALID, not FAIL
           : hasError || selfReportedFail
             ? 'FAIL' // hardware adapter, but the spike threw or reported pass: false
             : 'PASS';
@@ -400,8 +244,22 @@ async function main() {
     const result = {
         gate,
         status,
+        // The host that produced this measurement. A compensated-arithmetic
+        // metric measured under `shaderBackend: 'naga'` is NOT evidence about
+        // Dawn and vice versa — WGSL permits reassociation and fusion with no
+        // portable opt-out, and naga is measured to delete Dekker compensation
+        // terms Dawn preserves.
+        // @see https://github.com/gpuweb/gpuweb/issues/2076
+        // @issue utof/repulsive-test2#51 trap 3
+        host: hostRecord,
         adapter: winning?.outcome.adapter ?? null,
-        flags: winning?.flags ?? null,
+        // How that adapter was certified — read this before believing `status`.
+        // @see bench/gpu/adapterCert.ts
+        certification: winning?.outcome.certification ?? null,
+        launch: winning?.variant ?? null,
+        // Retained under its historical name so existing readers of
+        // `bench/results/*.json` keep working.
+        flags: winning?.variant.argv ?? null,
         attempts,
         gitShaShort: gitShaShort(),
         date,
@@ -422,4 +280,10 @@ async function main() {
     console.log(JSON.stringify(result, null, 2));
 }
 
-main();
+// A configuration error (unknown `GPU_HOST`, missing browser binary) is an
+// operator mistake, not a gate result — report it as one line and exit 1
+// rather than dumping a module-load stack trace that reads like a crash.
+main().catch((e) => {
+    console.error(`[drive] ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+});
