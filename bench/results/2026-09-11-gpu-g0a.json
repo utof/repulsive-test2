@@ -1,0 +1,111 @@
+{
+  "gate": "G0a",
+  "status": "PASS",
+  "host": {
+    "id": "firefox",
+    "version": "Mozilla Firefox 155.0.1",
+    "shaderBackend": "naga"
+  },
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "certification": {
+    "classification": "hardware",
+    "method": "fallback-flag+device-pin",
+    "rationale": "GPUAdapterInfo was blank, but isFallbackAdapter=false and the browser was pinned to /usr/share/vulkan/icd.d/nvidia_icd.json, which vulkaninfo names 'Quadro RTX 3000' (PHYSICAL_DEVICE_TYPE_DISCRETE_GPU).",
+    "evidence": {
+      "adapterInfo": {
+        "vendor": "",
+        "architecture": "",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      },
+      "adapterInfoVerdict": "software",
+      "isFallbackAdapter": false,
+      "devicePin": {
+        "icdPath": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+        "deviceName": "Quadro RTX 3000",
+        "deviceType": "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU"
+      }
+    }
+  },
+  "launch": {
+    "label": "headless-vk-nvidia",
+    "argv": ["--headless"],
+    "prefs": {
+      "dom.webgpu.enabled": true,
+      "browser.shell.checkDefaultBrowser": false,
+      "datareporting.policy.dataSubmissionEnabled": false,
+      "toolkit.telemetry.enabled": false,
+      "browser.aboutwelcome.enabled": false
+    },
+    "env": {
+      "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/nvidia_icd.json"
+    }
+  },
+  "flags": ["--headless"],
+  "attempts": [
+    {
+      "launch": {
+        "label": "headless-vk-nvidia",
+        "argv": ["--headless"],
+        "prefs": {
+          "dom.webgpu.enabled": true,
+          "browser.shell.checkDefaultBrowser": false,
+          "datareporting.policy.dataSubmissionEnabled": false,
+          "toolkit.telemetry.enabled": false,
+          "browser.aboutwelcome.enabled": false
+        },
+        "env": {
+          "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+          "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/nvidia_icd.json"
+        }
+      },
+      "certification": {
+        "classification": "hardware",
+        "method": "fallback-flag+device-pin",
+        "rationale": "GPUAdapterInfo was blank, but isFallbackAdapter=false and the browser was pinned to /usr/share/vulkan/icd.d/nvidia_icd.json, which vulkaninfo names 'Quadro RTX 3000' (PHYSICAL_DEVICE_TYPE_DISCRETE_GPU).",
+        "evidence": {
+          "adapterInfo": {
+            "vendor": "",
+            "architecture": "",
+            "device": "",
+            "description": "",
+            "limits": {
+              "maxComputeWorkgroupSizeX": 256
+            }
+          },
+          "adapterInfoVerdict": "software",
+          "isFallbackAdapter": false,
+          "devicePin": {
+            "icdPath": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+            "deviceName": "Quadro RTX 3000",
+            "deviceType": "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU"
+          }
+        }
+      }
+    }
+  ],
+  "gitShaShort": "538c398",
+  "date": "2026-09-11",
+  "data": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "consoleLines": []
+}

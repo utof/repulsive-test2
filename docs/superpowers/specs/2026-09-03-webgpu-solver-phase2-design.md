@@ -117,6 +117,15 @@ the store bit and the boot self-test — not the seam.
   stays CPU permanently.
 - Multigrid / BCT preconditioning [P §1]; Bunch–Kaufman on the GPU (§3);
   df64 emulation [PREC Q3]; f16.
+
+  > **CORRECTION (2026-09-11, utof/repulsive-test2#51):** the BCT non-goal is
+  > contradicted by the 1,000–30,000-vertex scale target — #51 adopts exactly
+  > BCT + preconditioned GMRES (Phase 2H). This is **not an addition to** this
+  > spec's architecture: BCT and dense Cholesky are **mutually exclusive**,
+  > because the hierarchical operator is never assembled (arXiv:2006.07859 §6.3:
+  > *"Since the hierarchical matrix-vector multiply does not build an explicit
+  > matrix, we use an iterative method to solve our linear systems."*). The
+  > `df64`/`f16` non-goals are untouched by this.
 - Phase 3 items: position-authority flip, zero-readback rendering, G7.
 
 ## 2. Where a step's time goes (why the factor first)
@@ -440,6 +449,16 @@ IR-budget arithmetic are there; the model and its consequences are here.
   the Cholesky needs it — plain f32 sums, for the reason given in §4.3 (the
   pivot floor is set by λ₂(A), not by the shift).
 
+  > **CORRECTION (2026-09-11, utof/repulsive-test2#51):** "nothing in the
+  > Cholesky needs it" is **measurably false**. §4.3's unblocked kernel measures
+  > K1 = 1.3552e-07 / 7.4865e-07 / 9.5080e-07 (amber) / 8.2120e-07 at
+  > n = 64/240/480/960 — the n=960 value is **1.81× over `e_max` = `betaMin`,
+  > i.e. K1 RED**, and T4 throws `ExternalSolveError` at 4 refinements at both
+  > n=480 and n=960. An extended (two-float) accumulator reaches 3.826e-08,
+  > matching LAPACK `spotrf`'s `alpha` = 4.075e-08. The pivot-floor reasoning
+  > below is unaffected and still correct; what fails is the accumulation WIDTH.
+  > Evidence: `.superpowers/sdd/2026-09-11-webgpu-phase2a-2/reports/C1-kernel-precision-KILL.md`.
+
 ### 4.3 The GPU Cholesky kernel (`src/gpu/cholesky.ts`)
 
 - **Layout:** A_σ row-major f32 in one storage buffer (N×N, no padding).
@@ -491,6 +510,15 @@ IR-budget arithmetic are there; the model and its consequences are here.
   be lower still — one more reason to read the number at boot rather than
   assert it. Neither bound binds in Phase 2 (N ≤ 1000, §1); the constant exists
   so that the routing predicate degrades gracefully rather than throwing.
+
+  > **CORRECTION (2026-09-11, utof/repulsive-test2#51):** correct as written for
+  > Phase 2, but do NOT read `GPU_SOLVE_MAX_N` as the dense path's ceiling at the
+  > 30k scale target. The memory bound is **liftable** (5,792 by default, 23,170
+  > via `requiredLimits` at the 2 GiB NVIDIA clamp); the f32-**storage** numerics
+  > wall at **n ≈ 6,900** is not, and it binds ~3.4× below 23,170 — beyond it,
+  > two-float storage is mandatory (`research-precision-r1.md:559-609`). Note
+  > also that K1 goes **vacuous** at n ≈ 2,340, where `betaMin < alpha`
+  > (ibid. :575-580). The binding constraint is numerics, not memory.
 - **Algorithm, first implementation: unblocked right-looking Cholesky** —
   three kernels per column j = 0..N−1, in this order: `colFactor` (thread per
   row i > j): A_ij /= √A_jj — the diagonal is still the raw pivot d_j here;
@@ -540,6 +568,16 @@ IR-budget arithmetic are there; the model and its consequences are here.
   gate [P §4 G7 is Phase 3]. A blocked
   (panel/TRSM/SYRK) variant is pre-registered as the optimization if P2a's
   factor-time bar (§5) fails; not before.
+
+  > **CORRECTION (2026-09-11, utof/repulsive-test2#51):** "the smallest kernel
+  > that can pass K1" is **measurably false** — this kernel does not pass K1 at
+  > n=960 (8.2120e-07, RED; see the §4.2 correction). The pre-registered blocked
+  > variant is **not** the escape hatch for it: a left-looking kernel with a
+  > single f32 register accumulator — the limit a fully blocked/panel kernel
+  > approaches — measures **bit-identically** at every n (7.4865e-07 /
+  > 9.5080e-07 / 8.2120e-07). Loop order and store count were never the
+  > variable; accumulator precision is. Evidence:
+  > `.superpowers/sdd/2026-09-11-webgpu-phase2a-2/reports/C1-kernel-precision-KILL.md`.
 - **Status flag:** shares the small u32 meta buffer with the column counter
   (`[counter, status]`); `finalize` writes `status = 1 + j` on a non-positive or
   non-finite pivot at column j — encoding the failing column, so a K1 failure is

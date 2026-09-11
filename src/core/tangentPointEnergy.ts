@@ -16,6 +16,17 @@
  * gradient's z-components are identically 0. Do NOT re-introduce a 2D branch.
  * @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md — "3D-only; 2D embeds as z=0"
  */
+// The `Math.pow` calls in calculateEnergy/gradientAnalytical below are INTENTIONAL and must not be
+// "modernized" to `**`. Per-exponent `pow` is a design decision of this kernel, and the op order in
+// this hot path is bit-identity-critical — the golden suites are its only backstop.
+// `bun run check` (= `biome check --write`) silently rewrote all 9 sites repo-wide inside an
+// unrelated commit's lint step; this file-level suppression is what stops that recurring. It is
+// deliberately file-level, not per-site, so a `Math.pow` added here later is covered too.
+// @issue utof/repulsive-test2#52
+// @see docs/superpowers/specs/2026-07-01-tangent-point-hotpath-optimization-design.md
+//   — "Optimizations (#1-3)" item 3 (integer-ness detected per exponent, not one global switch)
+//     and "Invariants the inlined kernel must preserve" (op order stays bit-identical).
+// biome-ignore-all lint/style/useExponentiationOperator: intentional per-exponent Math.pow; see the #52 note above
 import type { Edge, Vec3 } from './testConfigs';
 
 // Vector math helpers.
