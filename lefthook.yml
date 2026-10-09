@@ -3,12 +3,19 @@
 pre-commit:
   parallel: true
   jobs:
-    # Format + organize imports on staged files, then re-stage the fixes.
-    # Linter is disabled here so commits are never blocked on style nits;
-    # run `bun run lint` (or `bun run check`) manually for full linting.
+    # Format, organize imports AND lint staged files, then re-stage the fixes.
+    # The linter is ENABLED on purpose: it was disabled here until 2026-10-09, and
+    # lint errors reached main while two code reviewers read this hook's green tick
+    # as evidence the branch was lint-clean. A check that cannot fail is
+    # indistinguishable from one that passed.
+    # @issue utof/repulsive-test2#70
+    # Scope note: `{staged_files}` keeps `--write` from autofixing files the current
+    # task never touched (the repo-wide `bun run check` footgun, #52). The
+    # bit-identity-critical `Math.pow` sites in tangentPointEnergy.ts are protected
+    # by a file-level biome-ignore-all there, not by this flag.
     - name: biome
       glob: "*.{js,jsx,ts,tsx,json,jsonc,css}"
-      run: bunx biome check --write --linter-enabled=false --no-errors-on-unmatched {staged_files}
+      run: bunx biome check --write --no-errors-on-unmatched {staged_files}
       stage_fixed: true
 
     # Report unused files / deps / exports. Non-blocking (informational only).
