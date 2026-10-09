@@ -224,9 +224,13 @@ export function precomputeFar(
 /**
  * THE one block walker. `onFar(k, A, B)` / `onNear(k, A, B)` with `k` the block's index in its
  * list (the index into `far[]` / `near.offsets`), in the traversal's order for both sources.
+ * EXPORTED because `lowOrder.ts` (`L_{2−s}`, spec §11.2 task 6) walks the SAME block lists with a
+ * different kernel and different (vertex-side) node data; §5.6's "ONE block walker" is a module
+ * invariant, so a second copy of this loop there would violate it.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6 ("ONE traversal"), §7.1
+ * @see src/core/sobolev/hierarchical/lowOrder.ts (the second consumer)
  */
-function forEachBlock(
+export function forEachBlock(
     bvh: Bvh,
     source: BlockSource,
     onFar: (k: number, A: number, B: number) => void,
