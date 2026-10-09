@@ -68,16 +68,31 @@ import type { Bvh } from './bvh';
 /**
  * Default spatial separation parameter `theta` of Eq. 28.
  *
- * The VALUE is decided by gate H6 (spec §7.9, task 0c — the adversarial-rhs measurement, in
- * flight while this module was written): GREEN keeps 0.5 (the authors' own default; Repulsor
- * `far_theta2 = 0.25`), RED flips it to the pre-registered fallback **0.25** and amends §4.1/§4.4.
+ * The VALUE is decided by gate H6 (spec §7.9, task 0c — the adversarial-rhs measurement): GREEN
+ * keeps 0.5 (the authors' own default; Repulsor `far_theta2 = 0.25`), RED flips it to the
+ * pre-registered fallback **0.25**.
+ *
+ * **H6 read RED (measured 2026-10-09), so this is 0.25.** `min cos∠_A` over the sub-0.9
+ * generalized-eigenmode rhs is 0.8585 at n=2000, below the 0.9 bar and equal to the analytic
+ * Kantorovich bound `2√(c₁c₂)/(c₁+c₂)` to zero difference; at theta=0.25 the bad-mode set is
+ * EMPTY at every n tested, so no adversarial direction exists. §7.9's pre-registered rule is "RED
+ * ⇒ the default flips to 0.25; it does not kill the phase".
+ *
+ * The flip is NOT free and the cost is recorded rather than hidden: near-field work rises 2.09x
+ * (nearPairs 3 245 868 → 6 785 670 at n=30 000) and the 12-column apply 1.98x (128.65 → 254.87 ms,
+ * MEASURED), which §4.4 extrapolates to a 0.20–1.07 s GPU solve — above the top of the 0.05–0.5 s
+ * band claimed in utof/repulsive-test2#51. §4.5 separately measures that theta buys no step-quality
+ * improvement (end-to-end ΔE spread ≤0.0008 across all theta, non-monotone). Both facts are why the
+ * decision rests on H6's pre-registration and not on a post-hoc reading.
+ *
  * Flipping it is this one line by design (CLAUDE.md: prefer swappable strategies over one hardcoded
  * kernel). Nothing else in `src/` or `test/` may hardcode the default: tests that pin theta=0.5
  * oracles pass `theta: 0.5` explicitly, because those are theta=0.5 measurements regardless of
  * what the default becomes.
- * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §4.1, §7.9, §11.2 task 0c
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §4.1, §4.4, §4.5, §7.9, §11.2 task 0c
+ * @issue utof/repulsive-test2#51
  */
-export const DEFAULT_THETA = 0.5;
+export const DEFAULT_THETA = 0.25;
 
 /**
  * Default tangential bound `theta_T` of Eq. 28: `Infinity` = OFF, the convention every oracle was

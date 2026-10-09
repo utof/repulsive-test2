@@ -497,7 +497,7 @@ test('determinism: identical input gives bit-identical lists', () => {
     expect(a.stats).toEqual(b.stats);
 });
 
-test('defaults: omitted theta/thetaT resolve to the named constants (value NOT pinned here — gate H6 decides it)', () => {
+test('defaults: omitted theta/thetaT resolve to the named constants, and theta is 0.25 (gate H6 RED)', () => {
     const bvh = tree('torusKnot', 960);
     const dflt = buildBct(bvh, {});
     const explicit = buildBct(bvh, { theta: DEFAULT_THETA, thetaT: DEFAULT_THETA_T });
@@ -506,6 +506,12 @@ test('defaults: omitted theta/thetaT resolve to the named constants (value NOT p
     expect(dflt.params.adjacencyCertificate).toBe(true);
     expect(dflt.params.invertAdmissibility).toBe(false);
     expect(DEFAULT_THETA_T).toBe(Number.POSITIVE_INFINITY); // theta_T off (spec §5.5)
+    // The value WAS deliberately unpinned while gate H6 was in flight. H6 read RED on 2026-10-09
+    // (min cos∠_A = 0.8585 < 0.9 at n=2000), and §7.9's pre-registered rule flips the default to
+    // the fallback 0.25 — so the value is now decided and pinned. A silent drift back to 0.5
+    // would restore an operator with a measured sub-0.9 adversarial direction.
+    // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §4.1, §7.9
+    expect(DEFAULT_THETA).toBe(0.25);
 });
 
 test('thetaT bound is live: tangle n=960 theta=0.5 thetaT=0.5 (out-accuracy.json)', () => {
