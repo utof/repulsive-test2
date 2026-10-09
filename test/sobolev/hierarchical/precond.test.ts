@@ -42,6 +42,12 @@
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.2, §5.3, §7.8, §11.2 task 6
  * @see .superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-6-brief.md
  * @issue utof/repulsive-test2#59
+ *
+ * REVIEW PROVENANCE. Comments below that cite a measured counter-example come from this task's
+ * two blind reviews and the scoped re-review, kept at
+ * `.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/` as `task-6-review-gates.md`,
+ * `task-6-review-math.md` and `task-6-rereview.md`. Cited here once rather than inline, so the
+ * individual comments carry the measurement and not an ephemeral finding label.
  */
 import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -450,8 +456,18 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
         // the corpus computes) catches BOTH knock-outs — each drives `min|λ|` to ~1e-14, so
         // `κ_incl` ~ 1e15-1e16. `κ_excl = λ_max/λ₂` catches only the `rs-identity` one (2425 vs
         // 8.87, 273x): knock-out (2) is RANK-1 ON THE CONSTANTS, which are below `λ₂`, so it leaves
-        // `λ₂` and `λ_max` untouched to 1e-15 and `κ_excl` cannot see it AT ALL. Hence H5 must gate
-        // `κ_incl`; `κ_excl` is reported as the number GMRES experiences, not as the gate.
+        // `λ₂` and `λ_max` untouched to 1e-15 and `κ_excl` cannot see it AT ALL.
+        //
+        // But `κ_incl`'s power HERE is only "`λ₁` left 1" — the same thing `nullDim` and
+        // `|λ₁| < rankTol` assert directly above — and for a GROWTH EXPONENT `κ_incl` has its own
+        // blind spot: with `λ₁` pinned at 1 it equals `λ_max`, so it cannot see `λ₂` decaying
+        // (MEASURED `λ₂` 6.655 → 3.914 ≈ n^-0.26 while `λ_max` 59.0 → 71.9, giving
+        // `p(κ_incl) = 0.0988` against `p(κ_excl) = 0.361`), which is what GMRES iteration counts
+        // depend on once the pinned mode is spent in one iteration. So: the KNOCK-OUT gate is
+        // `nullDim`/`λ₁`; the GROWTH EXPONENT belongs on `κ_excl`. Note also that
+        // `κ_incl = λ_max/min(1, λ₂)` and `λ₂` extrapolates to ≈1.3 at n=30 000, so near the scale
+        // target `κ_incl` silently BECOMES `κ_excl` — a gate on it must state its regime.
+        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8
         const dropped = kappaOf(
             densify(n, (u, o) => prep(n, { dropConstantMode: true }).P.applyScalar(u, o)),
             Asig,
@@ -462,6 +478,10 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
             densifyASigma(prep(n, { variant: 'rs-identity' }).H, base.op.sigma, n),
             n,
         );
+        // Every κ is conditional on the fixture's extent (module TSDoc): the same operator's κ
+        // moves 53-62x between extent 5.4716 and 1.0, so a κ without its extent is not a
+        // measurement. @see utof/repulsive-test2#72
+        expect(extentOf(prep(n).vertices) / EXTENT).toBeCloseTo(1, 2);
         log('κ_excl production', kExcGood);
         log('κ_excl knock-out (2) — BLIND', dropped.lambdaMax / dropped.lambda2);
         log('κ_excl rs-identity — caught', rsid.lambdaMax / rsid.lambda2);
@@ -682,7 +702,7 @@ describe('precond: symmetry and definiteness on 1⊥', () => {
         // final `project` left 44/0 passing: on `1⊥` the operator WITHOUT it genuinely IS
         // symmetric (it reads 4.9e-18 either way), because the defect it admits is a constant
         // component, which is orthogonal to every `w` here. MEASURED on GENERAL `v, w`: 5.0e-17
-        // with the projector, 3.3e-3 without (fix round 1, finding I2). Same bar, different draw.
+        // with the projector, 3.3e-3 without. Same bar, different draw.
         const gv = randVec(n, 43);
         const gw = randVec(n, 44);
         const Mgv = new Float64Array(n);
@@ -821,7 +841,7 @@ describe('precond: the mass-weight provenance gap (module TSDoc)', () => {
     });
 
     test("a knock-out L^{2-s} is refused unless let through, like prepareA's", () => {
-        // GREPPED before adding this (fix round 1, finding I3): `makePreconditioner` has exactly
+        // GREPPED before adding this: `makePreconditioner` has exactly
         // two call sites in the repo, both in this file, and `'rs-identity'` appears in `src/`
         // only as the type literal and its docstrings — nothing legitimate builds a
         // preconditioner on it. What made the guard Important anyway is that flipping

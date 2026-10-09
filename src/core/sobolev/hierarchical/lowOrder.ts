@@ -179,8 +179,10 @@ export interface LowOrderA {
      * `psi = 1` case of exactly that percolation and is therefore the cheapest independent check
      * that the bottom-up pass is right: `nodeMass[root] = total curve length` and
      * `nodeMass[parent] = nodeMass[left] + nodeMass[right]`, both asserted in `lowOrder.test.ts`.
-     * An earlier docstring called it "the far lump's `s[B]` weight", which is what made a
-     * reviewer's mutant on it vacuous (fix round 1, finding m1).
+     * An earlier docstring called it "the far lump's `s[B]` weight" — it is NOT; the far lump's
+     * weight is the percolated `s[B] = sum_t w_t psi_t`. That wrong docstring is why a mutant on
+     * this field was vacuous (a reviewer measured `nodeMass[id] *= 1.000001` passing 44/0 before
+     * the assertions above existed, 33/1 after).
      */
     nodeMass: Float64Array;
     /** RECOMPUTED node barycentre of the collocation points, `w`-weighted, flat xyz. */

@@ -22,6 +22,12 @@
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.2, §7.8, §11.2 task 6
  * @see .superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-6-brief.md
  * @issue utof/repulsive-test2#59
+ *
+ * REVIEW PROVENANCE. Comments below that cite a measured counter-example come from this task's
+ * two blind reviews and the scoped re-review, kept at
+ * `.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/` as `task-6-review-gates.md`,
+ * `task-6-review-math.md` and `task-6-rereview.md`. Cited here once rather than inline, so the
+ * individual comments carry the measurement and not an ephemeral finding label.
  */
 import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -355,7 +361,12 @@ describe('lowOrder: the hierarchical operator IS the dense reference (spec §5.6
         // so no ratio bar can close that hole. This closes it: an INDEPENDENT transcription of the
         // compressed operator at the production theta, built in this file from `bct.farA/farB`,
         // `bct.nearA/nearB` and `bvh` alone, with its own dual weights, its own collocation points
-        // and its own w-weighted node barycentres. Nothing here calls into `lowOrder.ts`.
+        // and its own w-weighted node barycentres. Nothing on the FAR PATH is shared with
+        // `lowOrder.ts`: not `farKernel`, `far[]`, the `s` percolation, the `acc` down-scatter, nor
+        // `forEachBlock`. The one shared input is the exponent `P_LOW` via `lowOrderExponent`, so a
+        // defect in `p` is common-mode HERE and is caught instead by the 15-digit exponent pin and
+        // the 10-digit `λ_max`-vs-oracle pins (measured: `p × 1.01` leaves this test green at
+        // 6.35e-16 and fails 9 others).
         //
         //   far block (A,B):  W~[s][t] += w_s w_t k(nodeC_A, nodeC_B)   for ALL s in A, t in B
         //                     (the `acc` percolation scatters down to every descendant slot)
@@ -445,7 +456,7 @@ describe('lowOrder: the hierarchical operator IS the dense reference (spec §5.6
             log(`bct-vs-block-list-transcription relErr theta=${THETA} n=${n}`, err);
             // ROUNDOFF, not compression: both sides evaluate the SAME compressed operator, only
             // the summation order differs (percolation vs row-major). MEASURED 7e-16 / 1e-15.
-            // A uniform far-kernel x1.01 moves this to ~1e-2 (fix round 1, finding I1).
+            // A uniform far-kernel x1.01 moves this to ~1e-2.
             expect(err).toBeLessThan(1e-13);
             log(`nFar / nNear theta=${THETA} n=${n}`, `${bct.stats.nFar} / ${bct.stats.nNear}`);
             expect(bct.stats.nFar).toBeGreaterThan(0);
@@ -501,7 +512,7 @@ describe('lowOrder: the hierarchical operator IS the dense reference (spec §5.6
             // The bars BRACKET THAT COEFFICIENT, 0.02 to 0.12: ~2.3x below the smallest and ~2.1x
             // above the largest. The previous bars (`10 theta^1.5` / `0.01 theta^1.5`) sat 179-218x
             // above and 4.6-5.6x below the measurement, so the upper one could not fire — and the
-            // 9.75e-4 they quoted at theta=0.1 was wrong (fix round 1, finding m4).
+            // 9.75e-4 they quoted at theta=0.1 was wrong.
             expect(err).toBeLessThan(0.12 * theta ** 1.5);
             expect(err).toBeGreaterThan(0.02 * theta ** 1.5);
         });
@@ -632,7 +643,7 @@ describe('lowOrder: structure of the hierarchical W', () => {
         // leaves the nullity and `λ_max` unchanged. The recompute is right and stays — the lump
         // belongs at the points the kernel is collocated on — but it is an accuracy improvement,
         // NOT an admissibility guard: the block lists are reused as `bct.ts` built them and
-        // `nodeRx` is never read by the apply (fix round 1, finding I6).
+        // `nodeRx` is never read by the apply.
         expect(worstR).toBeGreaterThan(1);
         expect(worstC).toBeGreaterThan(0.01);
 
@@ -640,7 +651,7 @@ describe('lowOrder: structure of the hierarchical W', () => {
         // which depends on `psi`. It is the `psi = 1` case of that percolation, which makes it the
         // cheapest independent check that the bottom-up pass is right, so it is CHECKED here
         // rather than left dead: an un-read field with no test is a field a mutant cannot move
-        // (fix round 1, finding m1).
+        //.
         let total = 0;
         for (const [a, b] of edges) total += dist(flat(vertices), a, flat(vertices), b);
         log(`nodeMass[root] vs total curve length n=${n}`, `${Lo.nodeMass[0]} vs ${total}`);
@@ -669,7 +680,7 @@ describe('lowOrder: structure of the hierarchical W', () => {
         // dropped, because `LowOrderOptions` is exported and a caller composing this with `A`'s
         // own `EPS_A` is a reasonable thing to try — but a parameter never exercised non-zero is a
         // parameter whose placement is untested: a mutant moving `(‖d‖ + ε)^p` to
-        // `(‖d‖² + ε)^{p/2}` survives vacuously at ε = 0 (fix round 1, finding m3). ε is taken
+        // `(‖d‖² + ε)^{p/2}` survives vacuously at ε = 0. ε is taken
         // LARGE (0.05, ~4 % of the mean edge length at n=240) so the two spellings cannot agree.
         const n = 240;
         const eps = 0.05;
@@ -959,7 +970,7 @@ describe('lowOrder: cost, against spec §3’s DERIVED +25 %', () => {
         // there (tangle at theta=0.1, 24 886 020 pairs), half of each in f32. NOT 3.6 GB: that is
         // §7.1's `chi = 0` ALL-PAIRS case (`3.6e9/8 = 4.5e8 = 30 000²/2` exactly) and reading it as
         // the near-pair cost over-states the storage 66x — whoever sizes that task should start
-        // from 51.8 MiB (fix round 1, finding I5).
+        // from 51.8 MiB.
         //
         // Non-gate: a wall-clock on one machine, f64. Asserted only so the measurement cannot
         // silently become a no-op. `msInline > msPre` was asserted here and is now logged only:

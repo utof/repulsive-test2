@@ -88,8 +88,9 @@ export interface PreconditionerOptions {
      * 2 on an even closed polyline (`lowOrder.ts`'s `LowOrderVariant`). Without this flag
      * {@link makePreconditioner} REFUSES it, mirroring `prepareA` (`apply.ts:482-490`, commit
      * `2a8b88b`): a configuration the code itself calls a knock-out must not be
-     * production-reachable, because `Ã⁻¹` built on it kills the mode `A_σ` weights MOST and every
-     * preconditioner-level test still reads GREEN (fix round 1, finding I3).
+     * production-reachable, because `Ã⁻¹` built on it kills the mode `A_σ` weights MOST while
+     * every preconditioner-level test still reads GREEN: MEASURED 13 pass / 0 fail with
+     * `'rs-identity'` as the default before this guard existed.
      * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8
      */
     knockOut?: boolean;
@@ -267,7 +268,7 @@ export function makePreconditioner(
     // Knock-out instruments are refused unless explicitly let through, exactly as `prepareA` does
     // (`apply.ts:482-490`). `'rs-identity'` has nullity 2 for even n, so `Ã` is singular on the
     // checkerboard and `Ã⁻¹` stops being a preconditioner — and `precond.test.ts` used to pass in
-    // full with it as the default (fix round 1, finding I3).
+    // full (13 pass / 0 fail, MEASURED) with it as the default.
     if (!opts.knockOut && lowOrder.variant !== 'vertex') {
         throw new Error(
             `makePreconditioner: knock-out L^{2-s} in a production preconditioner (variant=${lowOrder.variant}); pass knockOut: true in a test`,
