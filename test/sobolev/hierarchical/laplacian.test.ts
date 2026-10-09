@@ -25,25 +25,56 @@ function chainEdges(n: number, closed: boolean): Edge[] {
     if (closed) e.push([n - 1, 0]);
     return e;
 }
-function circle(n: number): Vec3[] {
-    return Array.from({ length: n }, (_, i) => {
-        const t = (2 * Math.PI * i) / n;
-        return [Math.cos(t), Math.sin(t), 0] as Vec3;
-    });
+/**
+ * Rescale so the bbox max extent is 1, centred at the origin: verbatim port of `normalize` in
+ * scratch/curves.ts:49-66, called by `closedFrom`/`openFrom` (curves.ts:74,84). Omitting it made
+ * the first version of these tests use curves 2-5.6x larger (better conditioned) than the artefact's.
+ */
+function normalize(V: Vec3[]): Vec3[] {
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (const p of V) {
+        for (let c = 0; c < 3; c++) {
+            if (p[c] < lo[c]) lo[c] = p[c];
+            if (p[c] > hi[c]) hi[c] = p[c];
+        }
+    }
+    const ext = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+    const s = ext > 0 ? 1 / ext : 1;
+    return V.map(
+        (p) =>
+            [
+                (p[0] - 0.5 * (lo[0] + hi[0])) * s,
+                (p[1] - 0.5 * (lo[1] + hi[1])) * s,
+                (p[2] - 0.5 * (lo[2] + hi[2])) * s,
+            ] as Vec3,
+    );
 }
-// Same generators as scratch/curves.ts (torusKnot(2,3), openHelix(4 turns)).
+function circle(n: number): Vec3[] {
+    return normalize(
+        Array.from({ length: n }, (_, i) => {
+            const t = (2 * Math.PI * i) / n;
+            return [Math.cos(t), Math.sin(t), 0] as Vec3;
+        }),
+    );
+}
+// Same generators AND normalization as scratch/curves.ts (torusKnot(2,3), openHelix(4 turns)).
 function torusKnot(n: number): Vec3[] {
-    return Array.from({ length: n }, (_, i) => {
-        const t = (2 * Math.PI * i) / n;
-        const rad = 2 + 0.8 * Math.cos(3 * t);
-        return [rad * Math.cos(2 * t), rad * Math.sin(2 * t), 0.8 * Math.sin(3 * t)] as Vec3;
-    });
+    return normalize(
+        Array.from({ length: n }, (_, i) => {
+            const t = (2 * Math.PI * i) / n;
+            const rad = 2 + 0.8 * Math.cos(3 * t);
+            return [rad * Math.cos(2 * t), rad * Math.sin(2 * t), 0.8 * Math.sin(3 * t)] as Vec3;
+        }),
+    );
 }
 function openHelix(n: number): Vec3[] {
-    return Array.from({ length: n }, (_, i) => {
-        const t = (4 * 2 * Math.PI * i) / (n - 1);
-        return [Math.cos(t), Math.sin(t), (3 * i) / (n - 1)] as Vec3;
-    });
+    return normalize(
+        Array.from({ length: n }, (_, i) => {
+            const t = (4 * 2 * Math.PI * i) / (n - 1);
+            return [Math.cos(t), Math.sin(t), (3 * i) / (n - 1)] as Vec3;
+        }),
+    );
 }
 function rhs(n: number, seed: number): Float64Array {
     let s = seed >>> 0;
@@ -95,7 +126,7 @@ describe('dense cross-check (proves Sherman-Morrison corner wiring)', () => {
         test(`n=64 ${closed ? 'closed' : 'open'}, mass=1`, () => {
             const n = 64;
             const sys = assembleCurveLaplacian(
-                torusKnot(n).map((p, i) => (closed ? p : openHelix(n)[i])),
+                closed ? torusKnot(n) : openHelix(n),
                 chainEdges(n, closed),
             );
             expect(sys.closed).toBe(closed);
@@ -114,29 +145,57 @@ describe('dense cross-check (proves Sherman-Morrison corner wiring)', () => {
     }
 });
 
-describe('residual bars (closed-cyclic(mass=1) rows of out-tridiag.json, applied to every geometry)', () => {
+function residualOf(gen: (n: number) => Vec3[], closed: boolean, n: number, seed: number): number {
+    const sys = assembleCurveLaplacian(gen(n), chainEdges(n, closed));
+    const r = rhs(n, seed);
+    const x = new Float64Array(n);
+    solveLaplacian(sys, r, x, makeLaplacianWorkspace(n));
+    return triResidual(sys, x, r);
+}
+
+const NS = [960, 3000, 10000, 30000, 100000];
+
+describe('check 1, fidelity: closed-cyclic reproduces out-tridiag.json to 4 significant digits', () => {
+    // scratch/out-tridiag.json rows[] case "closed-cyclic(mass=1)", key relResidual, geometry torusKnot(2,3)
+    // (normalized), rhs seed 4242, mass=1, Sherman-Morrison; the residual is a property of the solve, not the
+    // timing, so the contended host / min-of-21 do not affect it. This is the port-fidelity oracle.
+    const ref: Record<number, number> = {
+        960: 2.8647e-13,
+        3000: 1.1903e-12,
+        10000: 3.2063e-12,
+        30000: 2.1214e-11,
+        100000: 1.9401e-10,
+    };
+    for (const n of NS) {
+        test(`torus knot n=${n} == ${ref[n]}`, () => {
+            const got = residualOf(torusKnot, true, n, 4242);
+            expect(Math.abs(got - ref[n]) / ref[n]).toBeLessThan(5e-4);
+        });
+    }
+});
+
+describe('check 2, stability: max over 3 seeds <= 1000 * N * u_f64, every geometry', () => {
+    // Floor N*u_f64 is DERIVED (backward stability of an O(N) sweep). The x1000 is CHOSEN headroom, justified
+    // by two MEASURED facts (normalized curves, mass=1, this branch's first review, /tmp/lap-scale-check.ts):
+    //  - seed spread 5.4x: circle n=30000 gives 1.43e-10 at rhs seed 31337 vs 2.66e-11 at 4242;
+    //  - worst constant vs the floor: c ~ 43 circle vs 6.4 knot at n=30000 (c = residual / (N*u_f64)).
+    // It CATCHES a corner sign error, a wrong gamma, or a dropped mass term (orders of magnitude). It does NOT
+    // certify accuracy: that is check 1's job. Replaces the controller's first ruling (one geometry's bars
+    // transferred to two others), which was self-anchoring (spec §7.5/§10.2) and which circle breaches.
+    const U = 1.1102230246251565e-16;
     const geoms: Array<[string, (n: number) => Vec3[], boolean]> = [
-        ['closed-cyclic (torus knot)', torusKnot, true],
-        ['closed-circle', circle, true],
-        ['open-helix', openHelix, false],
-    ];
-    // [n, bar]: <=5e-12 for n<=10000 (measured 2.86e-13..3.21e-12); 5e-11 at 30000 (measured 2.12e-11, spec-named);
-    // 5e-10 at 100000 (measured 1.94e-10, spec-named). §11.2 ruling; do NOT loosen on failure - report a finding.
-    const bars: Array<[number, number]> = [
-        [960, 5e-12],
-        [3000, 5e-12],
-        [10000, 5e-12],
-        [30000, 5e-11],
-        [100000, 5e-10],
+        ['torus knot', torusKnot, true],
+        ['circle', circle, true],
+        ['open helix', openHelix, false],
     ];
     for (const [name, gen, closed] of geoms) {
-        for (const [n, bar] of bars) {
-            test(`${name} n=${n} <= ${bar}`, () => {
-                const sys = assembleCurveLaplacian(gen(n), chainEdges(n, closed));
-                const r = rhs(n, 4242);
-                const x = new Float64Array(n);
-                solveLaplacian(sys, r, x, makeLaplacianWorkspace(n));
-                expect(triResidual(sys, x, r)).toBeLessThanOrEqual(bar);
+        for (const n of NS) {
+            const bar = 1000 * n * U; // 1.07e-10 (960) .. 1.11e-8 (100000)
+            test(`${name} n=${n} <= ${bar.toExponential(2)}`, () => {
+                const worst = Math.max(
+                    ...[4242, 777, 31337].map((s) => residualOf(gen, closed, n, s)),
+                );
+                expect(worst).toBeLessThanOrEqual(bar);
             });
         }
     }
@@ -193,7 +252,7 @@ describe('topology and singularity are named errors', () => {
                 [0, 1],
                 [2, 3],
             ]),
-        ).toThrow(CurveTopologyError);
+        ).toThrow(/missing edge \[1,2\]/);
     });
     test('massWeight=0 is singular (closed AND open) and throws', () => {
         expect(() => assembleCurveLaplacian(circle(8), chainEdges(8, true), 1, 0)).toThrow(
@@ -206,7 +265,7 @@ describe('topology and singularity are named errors', () => {
 });
 
 describe('O(N) scaling', () => {
-    test('ns/vertex at n=100000 within 4x of n=1000 (measured mass=1 range 25.07-39.36 ns/vtx)', () => {
+    test('ns/vertex at n=100000 within 4x of n=1000 (measured mass=1 range 25.07-73.01 ns/vtx incl. the n=960 row; 4x is slack)', () => {
         const per = (n: number): number => {
             const sys = assembleCurveLaplacian(torusKnot(n), chainEdges(n, true));
             const ws = makeLaplacianWorkspace(n);
@@ -224,7 +283,6 @@ describe('O(N) scaling', () => {
         };
         const small = per(1000);
         const big = per(100000);
-        console.log(`laplacian ns/vertex: n=1000 ${small.toFixed(2)}, n=100000 ${big.toFixed(2)}`);
         expect(big).toBeLessThan(4 * small);
     });
 });

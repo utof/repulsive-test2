@@ -14,6 +14,13 @@
  * edge -- assembling a wrong matrix silently is the failure this prevents. Task 8b's dispatch must
  * route such curves to the dense path.
  *
+ * KNOWN FINDING (task 1 review): the closed circle is the worst geometry for this algorithm at every mass
+ * weight -- 2-7x the torus knot's residual at matched n at mass=1 (rhs-seed dependent, up to 5.4x spread),
+ * and spec §11.2 records it at 159x over a 1e-9 bar at mass=1e-3 (1.5881e-07, n=30000). Residuals follow
+ * ~N*u_f64*c with c ~ 43 (circle) vs 6.4 (knot). Do NOT "fix" it by loosening a bar or changing the solve:
+ * nothing downstream reads this level (H5 gates on nullity, ||p|| and kappa_eig*u_inner). The tests gate it
+ * with a derived 1000*N*u_f64 stability bar plus a 4-digit fidelity check against out-tridiag.json.
+ *
  * SINGULAR CASE: pure stiffness has the constants in its kernel on open AND closed curves, so
  * `massWeight <= 0` THROWS (no pseudo-inverse route). Default `massWeight = 1`: mass-weight ruling,
  * spec §11.2 / §12 q1 (CLOSED at 1). It stays a runtime parameter; only the default is decided.
@@ -168,6 +175,10 @@ function thomas(
     cp: Float64Array,
     dp: Float64Array,
 ): void {
+    // The two zero-pivot throws below are UNREACHABLE for a system from assembleCurveLaplacian (mass > 0 makes
+    // it strictly diagonally dominant, and the Sherman-Morrison perturbed ends only grow b[0], b[n-1]). They
+    // MUST stay: they guard a hand-built TriSystem, where a silent division by zero yields NaN that GMRES
+    // would swallow. Spec §11.2 (mass-weight ruling).
     let beta = b[0];
     if (beta === 0) throw new Error('laplacian thomas: zero pivot at 0');
     cp[0] = c[0] / beta;
