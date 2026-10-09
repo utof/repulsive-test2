@@ -1,5 +1,5 @@
 /**
- * Task 4 of Phase 2H, part 2: the 12-column hierarchical apply, f64 and f32 as accumulator
+ * Spec §11.2 task 4 of Phase 2H, part 2: the 12-column hierarchical apply, f64 and f32 as accumulator
  * variants of ONE traversal, and the four gates this task carries:
  *
  *   1. spec §5.4 item 4 — the bit-level pin of the chi=0 `endpoint4` apply against the repo's
@@ -9,7 +9,7 @@
  *   3. spec §2.2 — `A_bct · 1 = 0` EXACTLY for the apply (structural, see the test);
  *   4. spec §7.2 H1-a (delta_compress monotone down the theta ladder; inverted-admissibility
  *      knock-out RED; the circle tie flagged) and H1-b (the precision band, TWO-sided per the
- *      task-4 brief, and the f64 / f32 / f16 three-rung ladder).
+ *      brief `.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-4-brief.md`, and the f64 / f32 / f16 three-rung ladder).
  *
  * Oracle artefact: `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/out-accuracy.json`
  * (git-ignored spike output of `run-accuracy.ts`), `params {ALPHA: 3, BETA: 6, EPS: 1e-10,
@@ -40,6 +40,7 @@ import {
     F16_NEAR_KNOCKOUT,
     F32,
     F64,
+    precomputeNear,
 } from '../../../src/core/sobolev/hierarchical/nearField';
 import { assembleAFlat } from '../../../src/core/sobolev/innerProduct';
 import { calculateDisjointPairs } from '../../../src/core/tangentPointEnergy';
@@ -568,7 +569,7 @@ describe('§7.2 H1-a: delta_compress — out-accuracy.json relErrRandom (torusKn
     });
 
     test('knock-out (2): invertAdmissibility => delta_compress RISES as theta falls => H1-a RED', () => {
-        // The switch is task 3's (bct.ts `invertAdmissibility`); the RED is asserted here because
+        // The switch is bct.ts's (`invertAdmissibility`, spec §7.2 knock-out 2); the RED is asserted here because
         // delta_compress is a ratio of two applies. The knock-out must TRIP: a gate never seen
         // failing is not a verified gate (memory gates-name-their-impossible-values).
         const thetas = [0.5, 0.25, 0.1];
@@ -611,7 +612,8 @@ describe('§7.2 H1-a: delta_compress — out-accuracy.json relErrRandom (torusKn
 });
 
 // ---------------------------------------------------------------------------------------------
-// 6. Spec §7.2 H1-b — the precision band (two-sided, per the task-4 brief) and the ladder.
+// 6. Spec §7.2 H1-b — the precision band (two-sided, per the brief
+//    `.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-4-brief.md`) and the ladder.
 // ---------------------------------------------------------------------------------------------
 
 describe('§7.2 H1-b: delta_precision band and the f64 / f32 / f16 ladder (torusKnot n=960 leaf=8, theta=0.5 AND theta=0.25)', () => {
@@ -658,10 +660,15 @@ describe('§7.2 H1-b: delta_precision band and the f64 / f32 / f16 ladder (torus
         });
 
         test(`theta=${theta} — rung 2, f32 accumulator: 1e-07 <= delta_precision <= bar (two-sided; the lower bound names the unplumbed-f32 value)`, () => {
-            // Upper bound: §7.2's bar. Lower bound (task-4 brief): a decade under the MEASURED f32
+            // Upper bound: §7.2's bar. Lower bound (the brief, see section header): a decade under the MEASURED f32
             // apply noise at n=960, because an "f32" path reporting ~1e-16 is an f64 simulation
             // that was never rounded — the defect memory simulate-bugs-at-target-precision
             // records. One-sided bars cannot see it.
+            // SCOPE: the band bounds ACCUMULATION noise (kappa_near + kappa_far terms per row). It
+            // is BLIND to kernel-chain rounding: evaluating the whole hi chain in f64 with one
+            // fround on the return moved delta_precision by ~1 % (-1.2 %, MEASURED 2026-10-09)
+            // and this test passed. An H1-b pass is NOT evidence that the chain is rounded —
+            // the ROUNDING-PLACEMENT PINs (nearField.test.ts, and below for the far kernel) are.
             const bar = h1bBar(theta);
             const d = deltaPrecision(theta, F32);
             record(`delta_precision f32 (scalar A apply) theta=${theta}`, d);
@@ -716,8 +723,59 @@ describe('§7.2 H1-b: delta_precision band and the f64 / f32 / f16 ladder (torus
             scalarApply(prepared('torusKnot', n, 0.5, F32), rhs(n)),
         );
         record('delta_total f32 theta=0.5 vs f64 chi=0', dt);
+        // PRESENT, NOT EXERCISED: at n=960 delta_compress ~8.6e-3 dominates delta_precision
+        // ~1.05e-6 by four orders of magnitude, so both predicates hold with that margin and a
+        // pass here is not evidence of anything beyond "the instruments were wired". They would
+        // bite only where delta_compress and delta_precision are comparable (theta -> 0, or f16).
         expect(dt).toBeLessThanOrEqual(1.01 * (dc + dp));
         expect(dt).toBeGreaterThanOrEqual(dp / 2);
+    });
+
+    test('f32 ROUNDING-PLACEMENT PIN for the far kernel: precomputeFar(F32) is bit-identical to a per-op Math.fround transcription, both kernels', () => {
+        // Same guardian as nearField.test.ts's pin, for the far (rank-1, barycentre) kernel —
+        // through `precomputeFar(…, F32)` rather than a new export of `farKernel` (nothing else
+        // needs it). Unfused binary32 contract: every product rounded before the add.
+        const bvh = tree('torusKnot', 400);
+        const bct = buildBct(bvh, { theta: 0.5 });
+        const f = Math.fround;
+        const C = Float32Array.from(bvh.C);
+        const TN = Float32Array.from(bvh.TN);
+        const eps = f(EPS);
+        const { pHi, pLow } = exponents(ALPHA, BETA);
+        const ref32Far = (A: number, B: number, kernel: 'hi' | 'low', p: number): number => {
+            const dx = f(C[3 * A] - C[3 * B]);
+            const dy = f(C[3 * A + 1] - C[3 * B + 1]);
+            const dz = f(C[3 * A + 2] - C[3 * B + 2]);
+            const d = f(f(Math.sqrt(f(f(f(dx * dx) + f(dy * dy)) + f(dz * dz)))) + eps);
+            const dp = f(d ** p);
+            if (kernel === 'hi') return f(2 / dp);
+            const [ax, ay, az] = [TN[3 * A], TN[3 * A + 1], TN[3 * A + 2]];
+            const [bx, by, bz] = [TN[3 * B], TN[3 * B + 1], TN[3 * B + 2]];
+            const c1x = f(f(ay * dz) - f(az * dy));
+            const c1y = f(f(az * dx) - f(ax * dz));
+            const c1z = f(f(ax * dy) - f(ay * dx));
+            const c2x = f(f(by * dz) - f(bz * dy));
+            const c2y = f(f(bz * dx) - f(bx * dz));
+            const c2z = f(f(bx * dy) - f(by * dx));
+            const n1 = f(f(Math.sqrt(f(f(f(c1x * c1x) + f(c1y * c1y)) + f(c1z * c1z)))) + eps);
+            const n2 = f(f(Math.sqrt(f(f(f(c2x * c2x) + f(c2y * c2y)) + f(c2z * c2z)))) + eps);
+            return f(f(f(n1 * n1) + f(n2 * n2)) / dp);
+        };
+        let differFromRoundOnce = 0;
+        for (const kernel of ['hi', 'low'] as const) {
+            const p = kernel === 'hi' ? pHi : pLow;
+            const far32 = precomputeFar(bvh, bct, kernel, ALPHA, BETA, EPS, F32);
+            const far64 = precomputeFar(bvh, bct, kernel, ALPHA, BETA, EPS, F64);
+            expect(far32.length).toBe(bct.stats.nFar);
+            for (let k = 0; k < bct.stats.nFar; k++) {
+                const ref = ref32Far(bct.farA[k], bct.farB[k], kernel, p);
+                expect(far32[k]).toBe(ref);
+                if (f(far64[k]) !== ref) differFromRoundOnce++;
+            }
+        }
+        expect(bct.stats.nFar).toBe(1222);
+        // The pin's own impossible value: round-once must disagree with per-op on most blocks.
+        expect(differFromRoundOnce).toBeGreaterThan(bct.stats.nFar);
     });
 
     test('K-apply f32 noise oracle: f32NoiseHi 1.0638571324665979e-06, f32NoiseLow 3.002378984962962e-06 (nc=1, psi = sin(0.013 s) + 0.5, run-accuracy.ts:94-106)', () => {
@@ -760,11 +818,17 @@ describe('§7.2 H1-b: delta_precision band and the f64 / f32 / f16 ladder (torus
             const ea = relErr(p64, p32a);
             record(`f32 K-apply noise ${kernel} (f64-cast far values, oracle construction)`, ea);
             // Not bit-identical to the spike: this port adds the far scatter AFTER the near sum
-            // (one walker for lists and stream — apply.ts), the spike added it before. One f32
-            // addition per entry is reordered, which moves the noise norm by ~0.3 % (MEASURED
-            // 1.060521e-06 vs 1.063857e-06, 2026-10-09). 2 % rejects any real change (a missing
-            // fround on the kernel chain moves it by 10x or more).
-            expect(Math.abs(ea - oracle[kernel]) / oracle[kernel]).toBeLessThan(0.02);
+            // (one walker for lists and stream — apply.ts, "ACCUMULATION ORDER"), the spike added
+            // it before. One f32 addition per entry is reordered. MEASURED 2026-10-09 (n=960,
+            // theta=0.5): construction (a) hi 1.060521e-06 vs oracle 1.0638571e-06 (-0.31 %),
+            // low 3.001293e-06 vs 3.0023790e-06 (-0.036 %); construction (b) hi 1.061746e-06,
+            // low 3.001233e-06. Bar: 0.5 % relative = the hi deviation plus 0.19 points of
+            // headroom (x1.6), 14x the low deviation — a measured floor, not a chosen round
+            // number (§11.3 rule 3; replaces the 2 % of the first review). This bar bounds
+            // ACCUMULATION noise only: an unrounded kernel chain moves the hi value by 0.15 %
+            // (M3b, 2026-10-09) and passes here — the ROUNDING-PLACEMENT PINs are the guardian
+            // of chain rounding, not this test.
+            expect(Math.abs(ea - oracle[kernel]) / oracle[kernel]).toBeLessThan(0.005);
             // (b) production construction: far values at f32.
             const p32b = new Float32Array(m);
             applyK(
@@ -866,6 +930,50 @@ describe('§5.6 one traversal: every block source and column count is the same a
         }
     });
 
+    test('applyK throws on a precomputed near field of the OTHER kernel (the silent-wrong-operator trap)', () => {
+        const bvh = tree('torusKnot', 128);
+        const bct = buildBct(bvh, { theta: 0.5 });
+        const { pHi } = exponents(ALPHA, BETA);
+        const near = precomputeNear(bvh, bct, 'low', ALPHA, BETA, EPS, F64);
+        const m = bvh.order.length;
+        expect(() =>
+            applyK(
+                bvh,
+                { kind: 'lists', bct },
+                { kernel: 'hi', p: pHi, epsilon: EPS, far: null, near },
+                new Float64Array(m),
+                new Float64Array(m),
+                makeWorkspace(bvh, 1, F64),
+                F64,
+            ),
+        ).toThrow(/precomputed near field is 'low', apply is 'hi'/);
+    });
+
+    test('applyK throws when a streaming source carries precomputed far or near values (spec §7.1)', () => {
+        const bvh = tree('torusKnot', 128);
+        const bct = buildBct(bvh, { theta: 0.5 });
+        const { pHi } = exponents(ALPHA, BETA);
+        const m = bvh.order.length;
+        const stream: BlockSource = { kind: 'stream', params: { theta: 0.5 } };
+        const run = (far: Float64Array | null, near: ReturnType<typeof precomputeNear> | null) =>
+            applyK(
+                bvh,
+                stream,
+                { kernel: 'hi', p: pHi, epsilon: EPS, far, near },
+                new Float64Array(m),
+                new Float64Array(m),
+                makeWorkspace(bvh, 1, F64),
+                F64,
+            );
+        expect(() =>
+            run(precomputeFar(bvh, bct, 'hi', ALPHA, BETA, EPS, F64) as Float64Array, null),
+        ).toThrow(/streaming source carries no precomputed values/);
+        expect(() => run(null, precomputeNear(bvh, bct, 'hi', ALPHA, BETA, EPS, F64))).toThrow(
+            /streaming source carries no precomputed values/,
+        );
+        expect(() => run(null, null)).not.toThrow();
+    });
+
     test('symmetry: u^T A v == v^T A u to f64 roundoff (theta=0.5)', () => {
         const H = prepared('torusKnot', n, 0.5);
         const u = rhs(n);
@@ -883,7 +991,7 @@ describe('§5.6 one traversal: every block source and column count is the same a
         expect(e).toBeLessThan(1e-13);
     });
 
-    test('knock-out instruments are refused by prepareA unless opted in (task-3 review: production can never apply an inverted or truncated operator)', () => {
+    test('knock-out instruments are refused by prepareA unless opted in (production can never apply an inverted or truncated operator; task-3-review.md)', () => {
         const bvh = tree('torusKnot', 128);
         const base = { alpha: ALPHA, beta: BETA, epsilon: EPS };
         const inverted = buildBct(bvh, { theta: 0.5, invertAdmissibility: true });

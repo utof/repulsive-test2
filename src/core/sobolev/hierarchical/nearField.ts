@@ -28,7 +28,8 @@
  * (`calculateDisjointPairs`, src/core/tangentPointEnergy.ts:44-58). The near field skips those
  * pairs (stored as an exact 0 when precomputed) and COUNTS them in `adjacentSkipped` — a counter
  * that is structurally `3m` on a closed curve (`3m - 2` open), which is what the tests assert; a
- * counter pinned at 0 would read like a passing gate (task-4 brief ruling 1).
+ * counter pinned at 0 would read like a passing gate (spec §11.2 task 4; ruling 1 of
+ * `.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-4-brief.md`).
  *
  * eps PLACEMENT: `+ epsilon` AFTER each norm separately (distance, each cross-product norm),
  * mirroring innerProduct.ts:96 and :242-246. Per-exponent `pow` (`d ** p`) is used rather than a
@@ -37,6 +38,14 @@
  * `pLow = pHi + 4` — algebraically identical, pinned to the repo at 4e-15 by
  * `nearField.test.ts`; keep whichever form is here, do not "simplify" to the other without
  * re-running that pin, because the two differ in f32 by more than the H1-b band is wide.
+ *
+ * PRECONDITION of the f32 variant (per-exponent `pow` underflow): `fr(d ** pLow)` with
+ * `pLow = 19/3` flushes to 0 for `d` below ~8e-8 (binary32 min normal 1.18e-38), and the low
+ * kernel then returns `Infinity` — MEASURED 2026-10-09: `d = 5e-8` gives `Inf` in F32 against
+ * `2.2e34` in F64. Unreachable for the bbox-normalised fixtures in scope (edge length ~1.6e-4 at
+ * N = 30 000, and `d` is an endpoint distance of a NON-adjacent pair), but an inner solve on a
+ * curve with near-coincident non-adjacent endpoints would go NaN silently. Keep the SCALE
+ * PRECONDITION of `bvh.ts` (max extent 1) and the disjoint-pair skip; do not lower the scale.
  *
  * ONE TRAVERSAL, THREE ACCUMULATOR VARIANTS (spec §5.6, "non-negotiable"). JavaScript arithmetic
  * is f64; an f32 path is genuine only if EVERY intermediate is rounded. Rather than two bodies
@@ -57,20 +66,37 @@
 import type { Bct } from './bct';
 import type { Bvh } from './bvh';
 
-/** `'hi'` = the high-order kernel `k^0_{2s+1}` (B); `'low'` = the low-order `k^2_{2s+5}` (B⁰). */
+/**
+ * `'hi'` = the high-order kernel `k^0_{2s+1}` (B); `'low'` = the low-order `k^2_{2s+5}` (B⁰).
+ * @see https://arxiv.org/abs/2006.07859 Eq. 31-32
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.2
+ */
 export type KernelId = 'hi' | 'low';
 
-/** Rounding applied to every arithmetic result: identity (f64) or `Math.fround` (f32). */
+/**
+ * Rounding applied to every arithmetic result: identity (f64) or `Math.fround` (f32).
+ * Why a function and not a flag: the variant must be able to round at EVERY site (module TSDoc).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6
+ */
 export type Rounding = (x: number) => number;
 
-/** State/geometry array at the variant's width. */
+/**
+ * State/geometry array at the variant's width.
+ * Why a union and not `Float64Array`: a `Float32Array` holding the f32 state is what makes the
+ * f32 variant genuine rather than f64-until-stored (memory `simulate-bugs-at-target-precision`).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6
+ */
 export type RealArray = Float64Array | Float32Array;
 
 /**
  * An accumulator variant of the one traversal (spec §5.6). All four members must agree: a
  * `Float32Array` with an identity `round` would still be an f64 simulation (products and sums
  * are f64 until stored), which is exactly the defect memory `simulate-bugs-at-target-precision`
- * records.
+ * records. EXPONENT WIDTH: the exponent `p` of `d ** p` stays an f64 constant in every variant
+ * (only the base and the result are rounded); a GPU port that holds `p` as an f32 literal
+ * (7/3, 19/3 are not representable) evaluates a slightly different power — compare against
+ * {@link F32} with that in mind, not as a bit-identity.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6
  */
 export interface AccumulatorVariant {
     readonly name: 'f64' | 'f32' | 'f16near';
@@ -90,7 +116,10 @@ export interface AccumulatorVariant {
 
 const identity: Rounding = (x) => x;
 
-/** f64: the reference accumulator. The identity rounding costs a call per op; accepted (§5.6). */
+/**
+ * f64: the reference accumulator. The identity rounding costs a call per op; accepted.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6
+ */
 export const F64: AccumulatorVariant = {
     name: 'f64',
     round: identity,
@@ -101,7 +130,9 @@ export const F64: AccumulatorVariant = {
 
 /**
  * f32: every result through `Math.fround`, `Float32Array` state, down-cast geometry.
- * ACCURACY-ONLY — never quote a wall-clock from this variant (module TSDoc).
+ * ACCURACY-ONLY — never quote a wall-clock from this variant (module TSDoc). Rounding placement
+ * is pinned bit-exactly by `nearField.test.ts` / `apply.test.ts` ("ROUNDING-PLACEMENT PIN").
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6, §7.2
  */
 export const F32: AccumulatorVariant = {
     name: 'f32',
@@ -148,7 +179,6 @@ export function exponents(alpha: number, beta: number): { pHi: number; pLow: num
  * signature identical across variants.
  */
 export interface NearGeometry {
-    m: number;
     sT: RealArray;
     sEll: RealArray;
     sXa: RealArray;
@@ -165,7 +195,6 @@ export interface NearGeometry {
  */
 export function nearGeometry(bvh: Bvh, epsilon: number, variant: AccumulatorVariant): NearGeometry {
     return {
-        m: bvh.order.length,
         sT: variant.cast(bvh.sT),
         sEll: variant.cast(bvh.sEll),
         sXa: variant.cast(bvh.sXa),
@@ -354,6 +383,10 @@ export function nearBlockInline(
             }
             const kv = endpoint4Kernel(g, s, t, kernel, p, fr);
             const tb = t * nc;
+            // FMA CONTRACT: the reference is UNFUSED — the product is rounded (`fr`) BEFORE the add,
+            // here, in `nearBlockPre`, in the far scatter (apply.ts) and in the kernel chain. WGSL
+            // permits contracting `a*b+c` into one rounding; a GPU port that reproduces f32 values
+            // bit-for-bit must disable contraction (or expect last-bit differences, not a bug).
             for (let c = 0; c < nc; c++) phi[ob + c] = frNear(phi[ob + c] + fr(kv * psi[tb + c]));
         }
     }

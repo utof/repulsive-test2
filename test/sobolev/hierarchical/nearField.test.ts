@@ -1,5 +1,5 @@
 /**
- * Task 4 of Phase 2H, part 1: the `endpoint4` near field and its precomputed arrays.
+ * Spec §11.2 task 4 of Phase 2H, part 1: the `endpoint4` near field and its precomputed arrays.
  *
  * What is pinned here is STRUCTURE (exponents, which pairs are skipped, that the f32 variant is
  * really f32); the bit-level pin against `assembleAFlat`, the fidelity ladder and the precision
@@ -21,6 +21,8 @@ import {
     F16_NEAR_KNOCKOUT,
     F32,
     F64,
+    type KernelId,
+    type NearGeometry,
     nearGeometry,
     precomputeNear,
 } from '../../../src/core/sobolev/hierarchical/nearField';
@@ -62,7 +64,7 @@ test('exponents: pHi = 2*sigma+1 = 7/3, pLow = 2*sigma+5 = 19/3 at alpha=3, beta
 // 2. The near field skips exactly the pairs the energy omits, and nothing else.
 // ---------------------------------------------------------------------------------------------
 
-describe('precomputeNear: adjacentSkipped and the zero entries (spec §2.2, §5.5; task-4 brief ruling 1)', () => {
+describe('precomputeNear: adjacentSkipped and the zero entries (spec §2.2, §5.5; brief ruling 1)', () => {
     // Structural count: `calculateDisjointPairs` (src/core/tangentPointEnergy.ts:44-58) omits
     // J == I and every J sharing a vertex with I. On a closed polyline every edge has exactly two
     // neighbours, so each ROW I meets 3 skipped columns; the BCT is a partition of ordered leaf
@@ -203,6 +205,102 @@ describe('endpoint4Kernel', () => {
             // been rounded (memory simulate-bugs-at-target-precision).
             expect(differ).toBeGreaterThan(0.9 * (bct.stats.nearPairs - pre32.adjacentSkipped));
         }
+    });
+
+    /**
+     * INDEPENDENT transcription of the endpoint4 kernel with a literal `Math.fround` at EVERY
+     * arithmetic site — the binary32 contract spec §5.6 requires ("genuine only if every
+     * intermediate is rounded"), unfused (no FMA: each product is rounded before the add). A
+     * separate copy on purpose: calling the implementation would pin nothing.
+     */
+    function ref32Endpoint4(
+        g: NearGeometry,
+        s: number,
+        t: number,
+        kernel: KernelId,
+        p: number,
+    ): number {
+        const f = Math.fround;
+        const { sT, sXa, sXb, sEll, epsilon } = g;
+        const tix = sT[3 * s];
+        const tiy = sT[3 * s + 1];
+        const tiz = sT[3 * s + 2];
+        const tjx = sT[3 * t];
+        const tjy = sT[3 * t + 1];
+        const tjz = sT[3 * t + 2];
+        const lij = f(sEll[s] * sEll[t]);
+        let sum = 0;
+        for (const Xi of [sXa, sXb]) {
+            for (const Xj of [sXa, sXb]) {
+                const dx = f(Xi[3 * s] - Xj[3 * t]);
+                const dy = f(Xi[3 * s + 1] - Xj[3 * t + 1]);
+                const dz = f(Xi[3 * s + 2] - Xj[3 * t + 2]);
+                const d = f(f(Math.sqrt(f(f(f(dx * dx) + f(dy * dy)) + f(dz * dz)))) + epsilon);
+                const dp = f(d ** p);
+                if (kernel === 'hi') {
+                    sum = f(sum + f(1 / dp));
+                } else {
+                    const c1x = f(f(tiy * dz) - f(tiz * dy));
+                    const c1y = f(f(tiz * dx) - f(tix * dz));
+                    const c1z = f(f(tix * dy) - f(tiy * dx));
+                    const c2x = f(f(tjy * dz) - f(tjz * dy));
+                    const c2y = f(f(tjz * dx) - f(tjx * dz));
+                    const c2z = f(f(tjx * dy) - f(tjy * dx));
+                    const n1 = f(
+                        f(Math.sqrt(f(f(f(c1x * c1x) + f(c1y * c1y)) + f(c1z * c1z)))) + epsilon,
+                    );
+                    const n2 = f(
+                        f(Math.sqrt(f(f(f(c2x * c2x) + f(c2y * c2y)) + f(c2z * c2z)))) + epsilon,
+                    );
+                    sum = f(sum + f(f(f(n1 * n1) + f(n2 * n2)) / dp));
+                }
+            }
+        }
+        return kernel === 'hi' ? f(f(0.5 * lij) * sum) : f(f(0.25 * lij) * sum);
+    }
+
+    test('f32 ROUNDING-PLACEMENT PIN: endpoint4Kernel(F32) is bit-identical to a per-op Math.fround transcription, both kernels', () => {
+        // Why this test exists (fix round 1, Important-1): the H1-b band and the archived f32
+        // noise oracles bound ACCUMULATION noise and are blind to the kernel chain — a mutant
+        // that evaluated the whole hi chain in f64 with ONE fround on the return moved
+        // f32NoiseHi by 0.15 % and delta_precision by 1.2 %, and all 56 tests passed
+        // (MEASURED 2026-10-09). This pin is the guardian of §5.6's "every intermediate is
+        // rounded": under that mutant it fails on essentially every pair (power verified by
+        // applying the mutant; see `.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-4-report.md` "Fix round 1").
+        const bvh = tree('torusKnot', 400);
+        const bct = buildBct(bvh, { theta: 0.5 });
+        const g32 = nearGeometry(bvh, EPS, F32);
+        const { pHi, pLow } = exponents(ALPHA, BETA);
+        let checked = 0;
+        let differFromRoundOnce = 0;
+        for (const kernel of ['hi', 'low'] as const) {
+            const p = kernel === 'hi' ? pHi : pLow;
+            for (let k = 0; k < bct.stats.nNear; k += 3) {
+                const A = bct.nearA[k];
+                const B = bct.nearB[k];
+                for (let s = bvh.begin[A]; s < bvh.end[A]; s++) {
+                    for (let t = bvh.begin[B]; t < bvh.end[B]; t++) {
+                        if (g32.sE[2 * s] === g32.sE[2 * t] || g32.sE[2 * s] === g32.sE[2 * t + 1])
+                            continue;
+                        if (
+                            g32.sE[2 * s + 1] === g32.sE[2 * t] ||
+                            g32.sE[2 * s + 1] === g32.sE[2 * t + 1]
+                        )
+                            continue;
+                        const ref = ref32Endpoint4(g32, s, t, kernel, p);
+                        expect(endpoint4Kernel(g32, s, t, kernel, p, F32.round)).toBe(ref);
+                        // The pin's own impossible value: if a round-once-on-return evaluation
+                        // agreed with the per-op reference on every pair, the pin could not see
+                        // M3b. Count the pairs where the two differ.
+                        if (Math.fround(endpoint4Kernel(g32, s, t, kernel, p, F64.round)) !== ref)
+                            differFromRoundOnce++;
+                        checked++;
+                    }
+                }
+            }
+        }
+        expect(checked).toBeGreaterThan(5000);
+        expect(differFromRoundOnce).toBeGreaterThan(0.5 * checked);
     });
 
     test('the three variants are distinct objects with the documented rounding', () => {

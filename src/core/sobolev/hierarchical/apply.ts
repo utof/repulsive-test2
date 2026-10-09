@@ -15,7 +15,7 @@
  * part of what the oracles measure; keep it.
  *
  * ONE TRAVERSAL (spec §5.6, non-negotiable). There is one block walker, {@link forEachBlock}:
- * over materialised lists (`{kind: 'lists'}`, theta > 0, reused across applies) or over task 3's
+ * over materialised lists (`{kind: 'lists'}`, theta > 0, reused across applies) or over `bct.ts`'s
  * streaming `traverseBct` (`{kind: 'stream'}`, which at theta = 0 IS the exact all-inadmissible
  * reference and materialises nothing — spec §7.1: its near list would be 112 MB and its near
  * values 3.60 GB at N=30 000). The far and near block bodies are the same functions either way,
@@ -36,14 +36,14 @@
  * K1 AND K⁰1 come from THIS apply on the ones vector (spec §2.2): `diag(K1) − K` then annihilates
  * constants BIT-EXACTLY, because `K · 1` in the apply is the same sequence of operations that
  * produced `K1`. That is why `A_bct · 1 = 0` is asserted EXACTLY (`apply.test.ts` section 4) and
- * why task 5 must not recompute `K1` any other way (a dense row sum would break the exact zero
+ * why the `SobolevOperator` wrapper (spec §11.2 task 5) must not recompute `K1` any other way (a dense row sum would break the exact zero
  * and, worse, the PSD-by-construction argument of §2.2).
  *
  * LAYOUT of the vector apply: the repo's coordinate-block layout `[x0..x(n-1), y0.., z0..]`
  * (src/core/sobolev/layout.ts:9, `expandBlockDiag`), NOT the spike's interleaved `U[3i + c]`.
  * `A` acts block-diagonally, so one `A` matvec is 9 high-order columns (3 components × 3 tangent
  * directions of `M u`) + 3 low-order columns = 12 columns of `K` (spec §3.5). `nc` is a parameter
- * of {@link applyK} because task 6's `L_{2−s}` is 3 columns on the same tree.
+ * of {@link applyK} because the `L_{2−s}` metric (spec §11.2 task 6) is 3 columns on the same tree.
  *
  * @see https://arxiv.org/abs/2006.07859 Eq. 31-32, App. B.2-B.3 ("we percolate these sums up and down the BVH")
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §2.2, §3.5, §5.6, §7.1, §7.2, §11.2 task 4
@@ -71,6 +71,7 @@ import {
     nearGeometry,
     precomputeNear,
     type RealArray,
+    type Rounding,
 } from './nearField';
 
 /**
@@ -85,6 +86,9 @@ export type BlockSource = { kind: 'lists'; bct: Bct } | { kind: 'stream'; params
 /**
  * Per-node accumulators of one apply, `ncols` wide, at the variant's width.
  * `s[N] = sum_{I in N} l_I psi_I` (upward), `acc[N]` = far-field contributions (downward).
+ * Why per node and not per primitive: the percolation (module TSDoc, "load-bearing").
+ * @see https://arxiv.org/abs/2006.07859 App. B.3.4
+ * @issue utof/repulsive-test2#57
  */
 export interface ApplyWorkspace {
     s: RealArray;
@@ -92,7 +96,11 @@ export interface ApplyWorkspace {
     ncols: number;
 }
 
-/** Allocates an {@link ApplyWorkspace} for `ncols` columns. */
+/**
+ * Allocates an {@link ApplyWorkspace} for `ncols` columns. Why exported: `apply.test.ts` drives
+ * {@link applyK} directly for the per-kernel oracles; {@link prepareA} caches one per `nc`.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6
+ */
 export function makeWorkspace(
     bvh: Bvh,
     ncols: number,
@@ -105,6 +113,9 @@ export function makeWorkspace(
  * Everything one kernel's apply needs besides the vectors. `far[k]` is `k(p_A, p_B)` of far
  * block `k` (lists source only; `null` => evaluated inline), `near` the precomputed near field
  * (lists only; `null` => inline). `epsilon` is already rounded to the variant.
+ * Why `far`/`near` are nullable rather than always present: the stream source (spec §7.1)
+ * materialises nothing, and {@link applyK} refuses precomputed values with it.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6, §7.1
  */
 export interface KernelData {
     kernel: KernelId;
@@ -115,7 +126,12 @@ export interface KernelData {
     near: NearPre | null;
 }
 
-/** What one {@link applyK} reports besides `phi`. */
+/**
+ * What one {@link applyK} reports besides `phi`. Why `adjacentSkipped` is reported at all: a
+ * counter the tests pin at `3m` / `3m − 2` (nearField.ts module TSDoc, "a counter pinned at 0
+ * would read like a passing gate").
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.5, §7.1
+ */
 export interface ApplyStats {
     /** Adjacent pairs skipped by the near field — `3m` on a closed curve (nearField.ts). */
     adjacentSkipped: number;
@@ -146,7 +162,7 @@ function farKernel(
     B: number,
     kernel: KernelId,
     p: number,
-    fr: (x: number) => number,
+    fr: Rounding,
 ): number {
     const { C, TN, epsilon } = g;
     const dx = fr(C[3 * A] - C[3 * B]);
@@ -181,8 +197,9 @@ function nodeGeometry(bvh: Bvh, epsilon: number, variant: AccumulatorVariant): N
  * Why at the variant's precision rather than f64-then-cast (the spike's construction,
  * `run-accuracy.ts:104`): so that lists-with-precomputed-far and streaming-with-inline-far are
  * bit-identical in EVERY variant, and so the f32 operator contains no f64 arithmetic anywhere.
- * `apply.test.ts` reproduces the spike's f32 noise oracle with the cast construction and shows
- * this one lands within 2x of it.
+ * `apply.test.ts` reproduces the spike's f32 noise oracle with the cast construction to 0.31 %
+ * (hi) / 0.036 % (low) — not bit-for-bit, see the accumulation-order note in {@link applyK} —
+ * and shows this construction lands within 2x of it.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6, §7.2
  */
 export function precomputeFar(
@@ -237,7 +254,13 @@ function forEachBlock(
  *
  * Far field (lists: `kd.far[k]`; stream or `far === null`: inline) through the percolation;
  * near field from `kd.near` when present (lists only), else inline through
- * `nearField.ts`. Throws if `kd.near.kernel !== kd.kernel` (the silent-wrong-operator trap).
+ * `nearField.ts`. Throws if `kd.near.kernel !== kd.kernel` (the silent-wrong-operator trap) and
+ * if a `'stream'` source carries precomputed values (spec §7.1).
+ *
+ * PER-APPLY ALLOCATION: `variant.cast(bvh.sEll)` (and, when inline, the node/near geometry) is
+ * cast on every call — a copy for f32, free for f64. Accepted here (one `Float32Array.from` of
+ * `m` floats against an O(nearPairs) apply); a GPU port holds the cast geometry ONCE per
+ * prepared operator and never re-uploads it per apply.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §3.5, §5.6, §7.1
  * @issue utof/repulsive-test2#57
  */
@@ -323,10 +346,17 @@ export function applyK(
     );
 
     // --- downward percolation, then scatter to primitives ---
-    // Near contributions were accumulated into phi inside the walk; the far field is added
-    // afterwards (the spike added far first — for f64 the order only moves reduction noise,
-    // and the oracle construction in apply.test.ts reproduces the spike's f32 value because the
-    // near sum there is walked first in BOTH; see the test).
+    // ACCUMULATION ORDER — near first, then far (the spike, run-accuracy.ts, added far FIRST).
+    // For f64 the order only moves reduction noise (every f64 oracle reproduces, delta_compress
+    // to 2.39e-15); for f32 it reorders one addition per entry, so the archived f32 noise oracle
+    // is reproduced to 0.31 % (hi) / 0.036 % (low) in apply.test.ts, NOT bit-for-bit. This is a
+    // §5.6-vs-§11.2 conflict ruled for §5.6 (task-4 fix round 1, controller ruling): reproducing
+    // the spike's order needs a far-only pass, the scatter, then a near-only pass — TWO traversals,
+    // which §5.6 forbids — and the `'stream'` source has no materialised near list to replay
+    // (§7.1: 112 MB of lists, 3.60 GB of near values at N = 30 000). Buffering the near sum and
+    // adding it after the scatter is one traversal but computes `far + sum(near)` instead of
+    // `((far + near_1) + near_2) + ...`, a different f32 rounding again. Do NOT "fix" the order
+    // back to far-first: it cannot be done on the stream path and buys no bit-identity on lists.
     for (let id = 0; id < nNodes; id++) {
         const base = id * nc;
         if (left[id] < 0) {
@@ -349,10 +379,16 @@ export function applyK(
 }
 
 /**
- * The prepared hierarchical `A` (spec §5.6 `apply.ts`; task 5 wraps it as a `SobolevOperator`
- * with `sigma = tr(A_bct)/n`). Holds the tree, the block source, both kernels' data, the
- * geometry-only row sums `K1` / `K⁰1` (computed by {@link applyK} on the ones vector — module
- * TSDoc), and the workspaces.
+ * The prepared hierarchical `A` (spec §5.6 `apply.ts`; the `SobolevOperator` wrapper of spec
+ * §11.2 task 5 takes it with `sigma = tr(A_bct)/n`). Holds the tree, the block source, both
+ * kernels' data, the geometry-only row sums `K1` / `K⁰1` (computed by {@link applyK} on the ones
+ * vector — module TSDoc), and the workspaces.
+ *
+ * NOT RE-ENTRANT: `mv` and `ws` are shared scratch, so two concurrent {@link applyA} /
+ * {@link applyAScalar} calls on one `HierarchicalA` corrupt each other — a GMRES that overlaps
+ * matvecs (or a worker pool) needs one prepared `A` per in-flight apply, or `prepareA` per
+ * worker. Sequential reuse is the design (the scratch exists to avoid per-apply allocation).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §2.2, §3.5, §5.6, §11.2 task 5
  */
 export interface HierarchicalA {
     bvh: Bvh;
@@ -383,7 +419,10 @@ export interface HierarchicalA {
     geom: NearGeometry;
 }
 
-/** Options of {@link prepareA}. */
+/**
+ * Options of {@link prepareA}.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.6, §7.1, §7.2
+ */
 export interface PrepareOptions {
     alpha: number;
     beta: number;
@@ -400,7 +439,8 @@ export interface PrepareOptions {
      * `invertAdmissibility` (spec §7.2 H1-a knock-out 2) or the `F16_NEAR_KNOCKOUT` variant
      * (H1-b knock-out 2). Without it {@link prepareA} throws, so an inverted or truncated
      * operator can never be applied by accident — reaching a knock-out from a production path
-     * would be silent corruption (task-3 review). Default `false`.
+     * would be silent corruption (`.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-3-review.md`;
+     * guarded since this file's first review). Default `false`.
      */
     knockOut?: boolean;
 }
@@ -491,8 +531,8 @@ export function prepareA(
 /**
  * `out = A u` for a SCALAR vertex function `u` (length n): 3 high-order columns (the three
  * components of `M u`) + 1 low-order column. `out` is overwritten (variant-rounded values; a
- * `Float64Array` holds f32 values exactly). Used by task 5's trace and by the gates; the
- * production matvec is {@link applyA}.
+ * `Float64Array` holds f32 values exactly). Used by the `sigma = tr(A_bct)/n` trace (spec §11.2
+ * task 5) and by the gates; the production matvec is {@link applyA}.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §3.5, §5.6
  */
 export function applyAScalar(H: HierarchicalA, u: ArrayLike<number>, out: RealArray): void {
