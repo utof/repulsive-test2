@@ -576,7 +576,9 @@ describe('§7.2 H1-a: delta_compress — out-accuracy.json relErrRandom (torusKn
         const d = thetas.map((t) =>
             deltaCompress('torusKnot', 960, t, { invertAdmissibility: true }),
         );
-        thetas.forEach((t, k) => record(`delta_compress INVERTED theta=${t}`, d[k]));
+        thetas.forEach((t, k) => {
+            record(`delta_compress INVERTED theta=${t}`, d[k]);
+        });
         const green = d[1] <= 1.001 * d[0] && d[2] <= 1.001 * d[1];
         expect(green).toBe(false);
         // "rises as theta falls": the last rung is worse than the first.
