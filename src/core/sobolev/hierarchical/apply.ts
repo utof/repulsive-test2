@@ -477,12 +477,14 @@ export function prepareA(
     const lists = source.kind === 'lists';
     const pre = lists && (opts.precomputeNear ?? true);
     // Knock-out instruments are refused unless explicitly let through (PrepareOptions.knockOut).
-    const inverted = lists
-        ? source.bct.params.invertAdmissibility
-        : resolveBctParams(source.params).invertAdmissibility;
-    if (!opts.knockOut && (inverted || variant.name === 'f16near')) {
+    const resolved = lists ? source.bct.params : resolveBctParams(source.params);
+    const inverted = resolved.invertAdmissibility;
+    // The adjacency certificate off yields "a WRONG operator" (bct.ts header) and a silently
+    // wrong sigma = tr(A_bct)/n (operator.ts `traceA`): a knock-out like the other two.
+    const uncertified = !resolved.adjacencyCertificate;
+    if (!opts.knockOut && (inverted || uncertified || variant.name === 'f16near')) {
         throw new Error(
-            `prepareA: knock-out instrument in a production apply (invertAdmissibility=${inverted}, variant=${variant.name}); pass knockOut: true in a test`,
+            `prepareA: knock-out instrument in a production apply (invertAdmissibility=${inverted}, adjacencyCertificate=${!uncertified}, variant=${variant.name}); pass knockOut: true in a test`,
         );
     }
     const kernelData = (kernel: KernelId): KernelData => ({

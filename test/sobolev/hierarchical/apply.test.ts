@@ -1017,6 +1017,14 @@ describe('§5.6 one traversal: every block source and column count is the same a
                 },
             ),
         ).toThrow(/knock-out instrument/);
+        // Certificate off => K_IJ != 0 on shared-vertex pairs: a WRONG operator (bct.ts header).
+        const uncertified = buildBct(bvh, { theta: 0.5, adjacencyCertificate: false });
+        expect(() => prepareA(bvh, 128, { kind: 'lists', bct: uncertified }, base)).toThrow(
+            /knock-out instrument/,
+        );
+        expect(() =>
+            prepareA(bvh, 128, { kind: 'lists', bct: uncertified }, { ...base, knockOut: true }),
+        ).not.toThrow();
         // The honest configurations are untouched, and the opt-in lets the knock-outs through.
         expect(() =>
             prepareA(bvh, 128, { kind: 'lists', bct: buildBct(bvh, { theta: 0.5 }) }, base),

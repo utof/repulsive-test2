@@ -38,7 +38,6 @@ interface OracleRow {
     sigma: number;
     traceRatio: number;
     symDefect: number;
-    lamMinBctSigma: number;
 }
 const rows: OracleRow[] = JSON.parse(readFileSync(ORACLE, 'utf8')).rows;
 const row = (n: number, theta: number): OracleRow => {
@@ -68,7 +67,10 @@ function build(n: number, theta: number) {
 function prep(n: number, theta: number) {
     const k = `${n}/${theta}`;
     let v = cache.get(k);
-    if (!v) cache.set(k, (v = build(n, theta)));
+    if (!v) {
+        v = build(n, theta);
+        cache.set(k, v);
+    }
     return v;
 }
 
@@ -138,7 +140,6 @@ describe('RULING 1: structural trace == densified diagonal sum', () => {
 });
 
 describe('gate 5a: trace ratio tr(A_bct)/tr(A)', () => {
-    const ratios: number[] = [];
     for (const n of [240, 480, 960])
         for (const theta of THETAS)
             test(`n=${n} theta=${theta}`, () => {
@@ -154,7 +155,6 @@ describe('gate 5a: trace ratio tr(A_bct)/tr(A)', () => {
                 let trA = 0;
                 for (let i = 0; i < n; i++) trA += A[i * n + i];
                 const ratio = traceA(H) / trA;
-                ratios.push(ratio);
                 log(`traceRatio n=${n} theta=${theta}`, ratio);
                 expect(sig3(ratio)).toBe(sig3(row(n, theta).traceRatio));
                 expect(ratio).toBeGreaterThanOrEqual(0.989);
@@ -171,6 +171,17 @@ describe('gate 5b: SPD after the sigma shift', () => {
                 // A_sigma = A + (sigma/n) 11^T (spec §2.3; k1-calibration.py:228-230).
                 const As = Float64Array.from(A);
                 for (let i = 0; i < n * n; i++) As[i] += op.sigma / n;
+                // Structural identity A_sigma 1 = sigma 1 (A_bct 1 = 0 up to densification roundoff,
+                // (sigma/n) 11^T 1 = sigma 1): pins the shift's MAGNITUDE (a factor n or 1/n off,
+                // or a constant, still passes Cholesky). Spec §2.3.
+                let worst = 0;
+                for (let i = 0; i < n; i++) {
+                    let r = 0;
+                    for (let j = 0; j < n; j++) r += As[i * n + j];
+                    worst = Math.max(worst, Math.abs(r - op.sigma) / op.sigma);
+                }
+                log(`A_sigma 1 = sigma 1 residual n=${n} theta=${theta}`, worst);
+                expect(worst).toBeLessThanOrEqual(1e-12);
                 cholesky(As, n); // throws if not SPD
                 // lamMinBct is genuinely negative in the oracle (RULING 2) -> never asserted > 0.
                 // Knock-out: one negated diagonal entry must make the Cholesky fail.
@@ -188,7 +199,7 @@ describe('gate 5b: SPD after the sigma shift', () => {
 });
 
 describe('gate 5c: symmetry defect (densified)', () => {
-    for (const n of [240, 480])
+    for (const n of [240, 480, 960])
         for (const theta of THETAS)
             test(`fidelity + 4u bar n=${n} theta=${theta}`, () => {
                 const d = symDefect(dense(n, theta), n);
@@ -196,11 +207,18 @@ describe('gate 5c: symmetry defect (densified)', () => {
                     `symDefect n=${n} theta=${theta}`,
                     `${d} (bar ${4 * U_F64}, oracle ${row(n, theta).symDefect})`,
                 );
-                // Fidelity: 4 of 6 cells reproduce the artefact to 3 s.f. (in fact bit-equal); n=240
-                // theta=0.5/0.25 differ by ~0.5e-16 (< 1 u_f64, one ulp of one entry: the port's op
-                // order vs the spike's). 3 s.f. on a ~1-ulp roundoff quantity is not a stable bar,
-                // so fidelity is |d - oracle| <= u_f64 (brief RULING 3 amended; see task-5 report).
-                expect(Math.abs(d - row(n, theta).symDefect)).toBeLessThanOrEqual(U_F64);
+                // Fidelity: 4 of 6 n<=480 cells are bit-equal to the artefact; n=240 theta=0.5/0.25
+                // differ by ~0.5e-16 (one ulp of one entry: the port's op order vs the spike's), so
+                // 3 s.f. is not a stable bar on a ~1-ulp roundoff quantity (brief RULING 3 amended).
+                // Ratio band (measured 1.50,1.50,1.00x4) instead of an absolute band: at n=480 an
+                // absolute u_f64 band would admit 2.7x the oracle.
+                const ratio = d / row(n, theta).symDefect;
+                log(`symDefect/oracle n=${n} theta=${theta}`, ratio);
+                expect(ratio).toBeGreaterThanOrEqual(0.5);
+                expect(ratio).toBeLessThanOrEqual(2);
+                // Spec §2.2 (ii): an exact 0 means "the densifier is faking it" -- n separately
+                // rounded columns cannot give a bit-exact symmetric matrix. Impossible => INVALID.
+                expect(d).toBeGreaterThan(0);
                 expect(d).toBeLessThanOrEqual(4 * U_F64);
             });
 });

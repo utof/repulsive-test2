@@ -22,7 +22,11 @@ export interface SobolevOperator {
     n: number;
 }
 
-/** A {@link SobolevOperator} that also carries its shift `sigma = tr(A_bct)/n` (scalar `A`). */
+/**
+ * A {@link SobolevOperator} that also carries its shift `sigma = tr(A_bct)/n` (scalar `A`).
+ * Why: GMRES needs `A_sigma = A + (sigma/n) 11^T`, and sigma must be hierarchical (spec §2.3).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §2.3
+ */
 export interface HierarchicalOperator extends SobolevOperator {
     /** `tr(A_bct)/n` of the SCALAR `A` (the 3n operator is 3 copies of it). */
     sigma: number;
@@ -33,12 +37,16 @@ export interface HierarchicalOperator extends SobolevOperator {
  *
  * Derivation: `tr(M^T L M) = sum_{I,J} L_IJ <M_I, M_J>_F`, nonzero only if edges I, J share a
  * vertex. The BCT sets `K_IJ = 0` exactly on shared-vertex pairs and on I = J (the energy omits
- * them; apply.ts `adjacentSkipped`), so `L_IJ = 0` for I != J there and `L_II = K1_I`. With
+ * them; apply.ts `adjacentSkipped`) -- the NEAR-field half. The FAR-field half is bct.ts's
+ * ADJACENCY CERTIFICATE: a far block is a rank-1 lump that cannot zero a shared-vertex pair, so
+ * with the certificate off this formula is ~7.9e-4 relative wrong (n=240, theta=0.5), 3 orders
+ * above the 1e-13 bar; `prepareA` therefore refuses it. So `L_IJ = 0` for I != J there and `L_II = K1_I`. With
  * `|M_I|_F^2 = 2 |T_I|^2 / l_I^2` and `|E_I|_F^2 = 1/2` the trace is
  * `sum_I K1_I 2|T_I|^2/l_I^2 + K⁰1_I / 2`. The vanishing of the cross terms is VERIFIED, not
  * assumed: operator.test.ts compares against the densified diagonal at 6 (n, theta) cells.
  * Why: spec §2.3 forbids an exact trace in production; densifying is n applies (~64 min at 30k).
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §2.2, §2.3
+ * @see src/core/sobolev/hierarchical/bct.ts (adjacency certificate)
  */
 export function traceA(H: HierarchicalA): number {
     const { sT, sEll } = H.geom;
