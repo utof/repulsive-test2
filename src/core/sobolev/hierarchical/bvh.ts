@@ -1,5 +1,5 @@
 /**
- * R^6 tangent-point BVH for the Phase 2H BCT spike (issue utof/repulsive-test2#57).
+ * R^6 tangent-point BVH for the Phase 2H block cluster tree (issue utof/repulsive-test2#57).
  *
  * Port of the spike that produced every `out-bct-*.json` oracle (tasks 3-4 test against them);
  * keep the structure exactly -- "cleaning up" a field invalidates those oracles.
@@ -20,9 +20,22 @@
  *    would make the measured constant a property of the fixture, not the algorithm.
  *
  * 2. r_x^N is the EXACT `max_{I in N} |x_I - x_N|` (distance from the barycentre),
- *    not the bounding-box half-diagonal. It is the quantity the Taylor argument
- *    behind Eq. 27/28 actually needs, it is never larger than the box radius, and it
- *    is O(1) extra work at build time. Same for r_T^N with `|T_I - T_N|`.
+ *    not a box radius. It is the quantity the Taylor argument behind Eq. 27/28
+ *    actually needs and is O(1) extra work at build time. Same for r_T^N with
+ *    `|T_I - T_N|`. It is NOT bounded by the box half-diagonal: the length-weighted
+ *    barycentre sits off the box centre on a curved node, so r_x usually EXCEEDS the
+ *    half-diagonal (measured: 244/255 nodes at n=960, 8182/8191 at n=30000; 1D example,
+ *    lengths 1000 and 1 at 0 and 1 => r_x 0.999 vs half-diagonal 0.5). Only the full
+ *    diagonal bounds it. The spike header's "never larger than the box radius" is WRONG;
+ *    do not restore it or "simplify" r_x to a box radius (a test pins the exact value).
+ *
+ * SCALE PRECONDITION (caller's job; buildBvh does NOT normalise, that would silently change
+ * the operator): the split score sums squared diameters of positions (curve scale) and unit
+ * tangents (scale 1), so it is only dimensionally sensible when the spatial scale is O(1).
+ * The spike normalised every fixture to bbox max extent 1 (`scratch/curves.ts:13-17`) and
+ * every `out-bct-*.json` oracle (e.g. kappa_near = 108.20) was measured that way. At scale
+ * ~1000 positions swamp tangents, the chosen axis changes, and tree quality, hence kappa_near
+ * and far-field accuracy (the low-order kernel involves T), changes with it.
  *
  * `maxEll` per node exists for the adjacency exclusion in the block cluster tree (task 3). Do not delete it: without it, a two-edge leaf pair of
  * ADJACENT edges can satisfy Eq. 28 and get lumped into the far field, silently
@@ -31,13 +44,16 @@
  * src/core/tangentPointEnergy.ts:44).
  *
  * @see https://arxiv.org/abs/2006.07859 App. B.1.1
- * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.5 (recorded deviations)
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.5 (median split, leaf size;
+ *   the r_x deviation is recorded HERE, §5.5 does not carry it)
  * @issue utof/repulsive-test2#57
  */
 import type { Edge, Vec3 } from '../../testConfigs';
 
 /**
  * Per-edge primitives, edge-id indexed: midpoint `P`, unit tangent `T`, regularised length `ell`.
+ * Layout: `P[3*I + c]` midpoint xyz; `T[3*I + c]` UNregularised unit tangent (zero if `||e|| < 1e-14`);
+ * `ell[I] = ||e|| + epsilon`.
  * Why: shared by the BVH and the task-4 near field so both see one discretisation.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.5
  */
@@ -197,6 +213,8 @@ function boxScore(a: Int32Array, b: number, e: number, key6: Float64Array): numb
 
 /**
  * Builds the R^6 tangent-point BVH.
+ * PRECONDITION: curve scaled to bbox max extent ~1 (O(1) spatial scale); NOT normalised here, see
+ * the module header SCALE PRECONDITION for why and the measurements behind it.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.5
  * @issue utof/repulsive-test2#57
  * @param epsilon regularisation added after the edge norm (see {@link edgeData}).

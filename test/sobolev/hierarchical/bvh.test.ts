@@ -34,6 +34,8 @@ const build = (n: number, leaf = 8) => {
     return { vertices, edges, bvh: buildBvh(vertices, edges, leaf, EPS) };
 };
 
+// leafCount = 2^ceil(log2(m/8)), nNodes = 2*leafCount - 1, depth = log2(leafCount) hold at THESE sizes only
+// (and 64/100/256): the (b+e)>>1 split makes siblings differ by 1, so e.g. m=17 gives 3 leaves and m=33 gives 5.
 describe('oracle table (out-bct-...-struct.json rows[].stats)', () => {
     const rows: [number, number, number, number][] = [
         [960, 128, 7, 255],
@@ -49,8 +51,9 @@ describe('oracle table (out-bct-...-struct.json rows[].stats)', () => {
             expect(bvh.depth).toBe(depth);
             expect(bvh.nNodes).toBe(nNodes);
             const mean = n / bvh.leafCount;
+            // Spec §11.2 says 4.88-7.81; 7.81 truncates 2000/256 = 7.8125, so use the exact value.
             expect(mean).toBeGreaterThanOrEqual(4.88);
-            expect(mean).toBeLessThanOrEqual(7.82);
+            expect(mean).toBeLessThanOrEqual(7.8125);
         });
     }
 });
@@ -68,7 +71,7 @@ describe('partition invariants', () => {
                 const e = bvh.end[N];
                 if (bvh.left[N] < 0) {
                     expect(bvh.right[N]).toBe(-1);
-                    expect(e - b).toBeLessThanOrEqual(8);
+                    expect(e - b).toBeLessThanOrEqual(bvh.leafSize);
                     expect(e - b).toBeGreaterThan(0);
                 } else {
                     const l = bvh.left[N];
@@ -87,7 +90,7 @@ describe('cluster data', () => {
     const { vertices, edges, bvh } = build(n);
     const ed = edgeData(vertices, edges, EPS);
 
-    test('radii are exact max distance from barycentre and <= box half-diagonal', () => {
+    test('radii are the exact max distance from the barycentre (NOT a box radius)', () => {
         for (let N = 0; N < bvh.nNodes; N++) {
             let mrx = 0;
             let mrt = 0;
@@ -113,7 +116,10 @@ describe('cluster data', () => {
                 1e-15 * (1 + bvh.rt[N]),
             );
             const half = 0.5 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-            // Barycentre radius <= box diagonal (not half): barycentre lies in the box, so the bound is the full diagonal.
+            // Sanity bound ONLY (vacuous: a wrong-centre or box-radius mutant also passes it). The
+            // barycentre is inside the box so rx <= full diagonal; it is NOT <= half-diagonal (usually
+            // exceeds it on curved nodes, bvh.ts header deviation 2). The exact match above plus the
+            // `C` pin in the next test are what carry this test.
             expect(bvh.rx[N]).toBeLessThanOrEqual(2 * half + 1e-15);
         }
     });
@@ -123,12 +129,19 @@ describe('cluster data', () => {
         for (let N = 0; N < bvh.nNodes; N++) {
             let L = 0;
             const t = [0, 0, 0];
+            const x = [0, 0, 0];
             for (let s = bvh.begin[N]; s < bvh.end[N]; s++) {
                 const I = bvh.order[s];
                 L += ed.ell[I];
-                for (let c = 0; c < 3; c++) t[c] += ed.ell[I] * ed.T[3 * I + c];
+                for (let c = 0; c < 3; c++) {
+                    t[c] += ed.ell[I] * ed.T[3 * I + c];
+                    x[c] += ed.ell[I] * ed.P[3 * I + c];
+                }
             }
             for (let c = 0; c < 3; c++) {
+                // C == sum l_I x_I / L_N: the only independent pin on the barycentre (a C := box-centre
+                // mutant passed every other test; review I-1).
+                expect(Math.abs(bvh.C[3 * N + c] - x[c] / L)).toBeLessThanOrEqual(1e-14);
                 expect(Math.abs(bvh.TN[3 * N + c] - t[c] / L)).toBeLessThanOrEqual(1e-14);
             }
             expect(Math.abs(bvh.L[N] - L)).toBeLessThanOrEqual(1e-13);
