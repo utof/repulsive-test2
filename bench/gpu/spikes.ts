@@ -6,6 +6,8 @@ import { nearTouchPair, splitHiLo, trefoil } from '../../src/core/fixtures';
 import { DEFAULTS } from '../../src/core/optimizer';
 import { calculateDisjointPairs, calculateEnergy } from '../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
+import { T1_REL_ERR, T2_REL_ERR, T3_COSINE_MIN } from '../../src/gpu/gateTolerances';
+import { median } from '../stats';
 import { cosineComparator, relErrComparator, xorshift32 } from './compare';
 import { phase1Spikes } from './phase1';
 
@@ -104,12 +106,6 @@ spikes.g3 = async () => {
     );
     return { totalsMs: totals, mean, cv: sd / mean, pass: sd / mean < 0.1 };
 };
-
-function median(xs: number[]): number {
-    const sorted = [...xs].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
 
 /**
  * Minimal shape of `GPUDevice.queue` this file reads — see
@@ -493,7 +489,7 @@ spikes.g2 = async () => {
         cpu64,
         relErr,
         relErrPlain,
-        pass: relErr < 1e-5,
+        pass: relErr < T1_REL_ERR,
     };
 };
 
@@ -966,7 +962,7 @@ spikes.toleranceSkeleton = async () => {
     const { sumPlain, termsPlain } = await runPlainF32PairKernel(renderer);
 
     const t1Value = relErrComparator(sumPlain, cpu64Sum);
-    const t1Threshold = 1e-5; // spec §3 T1
+    const t1Threshold = T1_REL_ERR; // spec §3 T1
     const t1 = {
         value: t1Value,
         threshold: t1Threshold,
@@ -993,7 +989,7 @@ spikes.toleranceSkeleton = async () => {
         disjointPairs,
     );
     const t2Value = relErrComparator(gpuEnergy, cpu64Energy);
-    const t2Threshold = 1e-6; // spec §3 T2
+    const t2Threshold = T2_REL_ERR; // spec §3 T2
     const t2 = {
         value: t2Value,
         threshold: t2Threshold,
@@ -1005,7 +1001,7 @@ spikes.toleranceSkeleton = async () => {
     // --- T3: cosine of the T1 fixture's plain-f32 vs f64 per-term vectors
     // (stand-in for a real gradient-direction pair; see docstring above). ---
     const t3Value = cosineComparator(termsPlain, cpu64Terms);
-    const t3Threshold = 1 - 1e-6; // spec §3 T3
+    const t3Threshold = T3_COSINE_MIN; // spec §3 T3
     const t3 = {
         value: t3Value,
         threshold: t3Threshold,

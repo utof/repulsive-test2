@@ -22,9 +22,11 @@ import {
 } from '../../src/core/tangentPointEnergy';
 import { type Edge, testConfigs, type Vec3 } from '../../src/core/testConfigs';
 import { GpuDriver, type GpuStepSource } from '../../src/gpu/driver';
+import { T1_REL_ERR, T2_REL_ERR, T3_COSINE_MIN } from '../../src/gpu/gateTolerances';
 import { makeReduceSum, REDUCE_MAX_EDGES } from '../../src/gpu/reduce';
 import { GpuTangentPoint } from '../../src/gpu/tangentPoint';
 import { packTopology } from '../../src/gpu/topology';
+import { upperMedian } from '../stats';
 import { cosineComparator, relErrComparator, withSeed } from './compare';
 
 /**
@@ -215,7 +217,7 @@ phase1Spikes.phase1Tolerance = async () => {
             const cpu64 = calculateEnergy(vertices, edges, dp, alpha, beta, epsilon);
             const { energy } = await gpu.energy(vertices);
             const relErr = relErrComparator(energy, cpu64);
-            t1.push({ gap, gpu: energy, cpu64, relErr, pass: relErr < 1e-5 });
+            t1.push({ gap, gpu: energy, cpu64, relErr, pass: relErr < T1_REL_ERR });
         } finally {
             gpu.dispose();
         }
@@ -241,9 +243,9 @@ phase1Spikes.phase1Tolerance = async () => {
                 name: f.name,
                 nV: f.vertices.length,
                 t2,
-                t2pass: t2 < 1e-6,
+                t2pass: t2 < T2_REL_ERR,
                 t3,
-                t3pass: t3 > 1 - 1e-6,
+                t3pass: t3 > T3_COSINE_MIN,
                 finite,
             });
         } finally {
@@ -266,16 +268,18 @@ phase1Spikes.phase1Tolerance = async () => {
     };
 };
 
-/**
- * Median of `xs` (upper middle for an even count). Used instead of the mean
- * for the perf gate because a single scheduler/driver hiccup in a 5-run
- * sample moves a mean but not a median, and the gate is pre-registered as
- * "medians" — averaging or cherry-picking runs is explicitly forbidden.
- * Sorts a copy so the caller's raw sample array stays in run order in the
- * committed JSON.
- * @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (D4 timing method; Task 4)
- */
-const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+// This harness reports `upperMedian` (bench/stats.ts), NOT the true median:
+// upper-middle for an even count. It is the median variant every committed
+// results JSON under `bench/results/` was produced with, so "fixing" it to
+// `median` would silently shift even-count values out of comparability —
+// @issue utof/repulsive-test2#65 carries that decision.
+//
+// Why a median at all (and never a mean): a single scheduler/driver hiccup in
+// a 5-run sample moves a mean but not a median, and the gate is pre-registered
+// as "medians" — averaging or cherry-picking runs is explicitly forbidden.
+// Both helpers sort a COPY, so the caller's raw sample array stays in run
+// order in the committed JSON.
+// @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md (D4 timing method; Task 4)
 
 /**
  * The pre-registered Phase 1 PERF gate: GPU dE must be >= 5x faster than CPU
@@ -325,14 +329,14 @@ phase1Spikes.phase1DeGate = async () => {
                 gradientAnalytical(vertices, edges, dp, alpha, beta, epsilon);
                 cpuMs.push(performance.now() - t0);
             }
-            const speedup = median(cpuMs) / median(gpuMs);
+            const speedup = upperMedian(cpuMs) / upperMedian(gpuMs);
             rows.push({
                 N,
                 cpuMs,
                 gpuMs,
-                cpuP50Ms: median(cpuMs),
-                gpuP50Ms: median(gpuMs),
-                gpuComputeOnlyP50Ms: median(gpuOnly),
+                cpuP50Ms: upperMedian(cpuMs),
+                gpuP50Ms: upperMedian(gpuMs),
+                gpuComputeOnlyP50Ms: upperMedian(gpuOnly),
                 speedup,
                 pass: speedup >= 5,
             });
@@ -612,7 +616,7 @@ phase1Spikes.phase1DriverSmoke = async () => {
         monotone,
         stepsAgreeOnAccept: a.rows.every((r, k) => r.accepted === b.rows[k].accepted),
         // Informational only — the perf gate is phase1DeGate (5 runs, medians, N=480/960).
-        dEp50Ms: { cpu: median(a.dEms), gpu: median(b.dEms) },
+        dEp50Ms: { cpu: upperMedian(a.dEms), gpu: upperMedian(b.dEms) },
         pass: maxRelEnergyDiff < 1e-2 && monotone,
     };
 };
