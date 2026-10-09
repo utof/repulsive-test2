@@ -167,6 +167,8 @@ function prepared(
             epsilon: EPS,
             variant,
             precomputeNear: mode === 'pre',
+            // The knock-out instruments are opted into HERE, per configuration, never by default.
+            knockOut: extra.invertAdmissibility === true || variant === F16_NEAR_KNOCKOUT,
         });
         hCache.set(key, H);
     }
@@ -584,9 +586,18 @@ describe('§7.2 H1-a: delta_compress — out-accuracy.json relErrRandom (torusKn
     });
 
     test('must-NOT-trip (3): circle n=960, 0.5 -> 0.25 — kappa_near tie FLAGGED, delta_compress GREEN, both values recorded', () => {
-        // Task-4 brief ruling 2: the circle tie is on the NEAR side only (near lists bit-identical,
-        // nFar 748 -> 904), so delta_compress need not tie; it is MEASURED, not asserted equal.
+        // PROVENANCE: spec §7.2 labels this case "MEASURED", but no artefact carries circle at
+        // theta=0.25 (out-accuracy.json has circle at 0.5 only; H1-a's "15/15 cells" are
+        // torusKnot). Task 3 produced the first theta=0.25 block counts; the delta_compress values
+        // below are the first ones, MEASURED by this task on 2026-10-09: 8.640671e-03 at 0.5 (which
+        // is the artefact's 0.5 row) and 8.461128e-03 at 0.25, ratio 0.979. The tie is on the
+        // NEAR side only — nearPairs 21 598 at both theta, near lists bit-identical — while the
+        // far side differs (nFar 748 -> 904, adjacencyVetoed 480 -> 0), which is why delta_compress
+        // moves at all. Task-4 brief ruling 2: it is MEASURED, not asserted equal.
         const lad = thetaLadder(tree('circle', 960), [0.5, 0.25], {});
+        expect(lad.rungs[0].stats.nearPairs).toBe(21598);
+        expect(lad.rungs[1].stats.nearPairs).toBe(21598);
+        expect([lad.rungs[0].stats.nFar, lad.rungs[1].stats.nFar]).toEqual([748, 904]);
         expect(lad.ties).toEqual([[0.5, 0.25]]);
         const d5 = deltaCompress('circle', 960, 0.5);
         const d25 = deltaCompress('circle', 960, 0.25);
@@ -603,78 +614,103 @@ describe('§7.2 H1-a: delta_compress — out-accuracy.json relErrRandom (torusKn
 // 6. Spec §7.2 H1-b — the precision band (two-sided, per the task-4 brief) and the ladder.
 // ---------------------------------------------------------------------------------------------
 
-describe('§7.2 H1-b: delta_precision band and the f64 / f32 / f16 ladder (torusKnot n=960 theta=0.5 leaf=8)', () => {
+describe('§7.2 H1-b: delta_precision band and the f64 / f32 / f16 ladder (torusKnot n=960 leaf=8, theta=0.5 AND theta=0.25)', () => {
     const n = 960;
 
     /** `delta_precision` = relErr(A_f64,theta u, A_variant,theta u) at the SAME theta. */
-    function deltaPrecision(variant: AccumulatorVariant, mode: Mode = 'pre'): number {
-        const ref = scalarApply(prepared('torusKnot', n, 0.5), rhs(n));
-        return relErr(ref, scalarApply(prepared('torusKnot', n, 0.5, variant, mode), rhs(n)));
+    function deltaPrecision(
+        theta: number,
+        variant: AccumulatorVariant,
+        mode: Mode = 'pre',
+    ): number {
+        const ref = scalarApply(prepared('torusKnot', n, theta), rhs(n));
+        return relErr(ref, scalarApply(prepared('torusKnot', n, theta, variant, mode), rhs(n)));
     }
 
-    test('the bar: 10 * (kappa_near + kappa_far) * u_f32 = 5.78e-05 from the MEASURED counts', () => {
-        // §7.2: kappa_near = 93.3 (= 89538 / 960 = 93.26875), kappa_far = 3.68 (= 3530 / 960 =
-        // 3.677), u_f32 = 5.96e-08 => 10 * 96.95 * 5.96e-08 = 5.778e-05, written 5.78e-05.
-        const H = prepared('torusKnot', n, 0.5);
-        const m = H.m;
-        const bar = 10 * (H.stats.nearPairs / m + H.stats.nFar / m) * U_F32;
-        record('H1-b bar', bar);
-        expect(H.stats.nearPairs).toBe(89538);
-        expect(H.stats.nFar).toBe(3530);
-        expect(bar).toBeCloseTo(5.78e-5, 7);
-    });
+    /** `10 * (kappa_near + kappa_far) * u_f32` from the prepared operator's OWN counts. */
+    function h1bBar(theta: number): number {
+        const H = prepared('torusKnot', n, theta);
+        return 10 * (H.stats.nearPairs / H.m + H.stats.nFar / H.m) * U_F32;
+    }
 
-    test('rung 1, f64 accumulator: delta_precision is IDENTICALLY 0 (must-NOT-trip consistency check)', () => {
+    // theta=0.5 is the anchor the MEASURED f32 noise was taken against (f32NoiseHi 1.0639e-06,
+    // f32NoiseLow 3.0024e-06, out-accuracy.json); theta=0.25 is PRODUCTION after gate H6 read RED
+    // (spec §7.9, 2026-10-09). A precision gate anchored only at a theta the product no longer
+    // uses is a gate on nothing, so the band is asserted at both.
+    const BARS: [number, number, number, number][] = [
+        // [theta, nearPairs, nFar, bar]:
+        //   0.5:  kappa_near = 89538/960 = 93.26875 (§7.2 "93.3"), kappa_far = 3530/960 = 3.677
+        //         (§7.2 "3.68") => 10 * 96.946 * 5.96e-08 = 5.778e-05, written 5.78e-05.
+        //   0.25: kappa_near = 178320/960 = 185.75 (out-accuracy.json nearPairsPerEdge), kappa_far
+        //         = 5716/960 = 5.954 => 10 * 191.704 * 5.96e-08 = 1.1426e-04.
+        [0.5, 89538, 3530, 5.78e-5],
+        [0.25, 178320, 5716, 1.1426e-4],
+    ];
+
+    for (const [theta, nearPairs, nFar, expectedBar] of BARS) {
+        test(`theta=${theta} — the bar: 10 * (kappa_near + kappa_far) * u_f32 from the MEASURED counts = ${expectedBar}`, () => {
+            const H = prepared('torusKnot', n, theta);
+            expect(H.stats.nearPairs).toBe(nearPairs);
+            expect(H.stats.nFar).toBe(nFar);
+            const bar = h1bBar(theta);
+            record(`H1-b bar theta=${theta}`, bar);
+            expect(Math.abs(bar - expectedBar) / expectedBar).toBeLessThan(1e-3);
+        });
+
+        test(`theta=${theta} — rung 2, f32 accumulator: 1e-07 <= delta_precision <= bar (two-sided; the lower bound names the unplumbed-f32 value)`, () => {
+            // Upper bound: §7.2's bar. Lower bound (task-4 brief): a decade under the MEASURED f32
+            // apply noise at n=960, because an "f32" path reporting ~1e-16 is an f64 simulation
+            // that was never rounded — the defect memory simulate-bugs-at-target-precision
+            // records. One-sided bars cannot see it.
+            const bar = h1bBar(theta);
+            const d = deltaPrecision(theta, F32);
+            record(`delta_precision f32 (scalar A apply) theta=${theta}`, d);
+            record(`delta_precision f32 / bar theta=${theta}`, d / bar);
+            expect(d).toBeGreaterThanOrEqual(1e-7);
+            expect(d).toBeLessThanOrEqual(bar);
+            // Inline and precomputed near fields are the same f32 arithmetic: bit-identical.
+            expect(deltaPrecision(theta, F32, 'inline')).toBe(d);
+            // The vector apply, same band.
+            const U = new Float64Array(3 * n);
+            for (let c = 0; c < 3; c++) U.set(seeded(n, 300 + c), c * n);
+            const dv = relErr(
+                vectorApply(prepared('torusKnot', n, theta), U),
+                vectorApply(prepared('torusKnot', n, theta, F32), U),
+            );
+            record(`delta_precision f32 (12-column A apply) theta=${theta}`, dv);
+            expect(dv).toBeGreaterThanOrEqual(1e-7);
+            expect(dv).toBeLessThanOrEqual(bar);
+        });
+
+        test(`theta=${theta} — rung 3, f16 near accumulator (knock-out, §7.11 item 7): delta_precision EXCEEDS the bar`, () => {
+            // Model (§7.2): m * u_f16 = 97 * 4.88e-04 = 4.7e-02, ~820x over the bar — a worst-case
+            // LINEAR-growth model. NOT previously measured; first measurement 2026-10-09 at
+            // theta=0.5: 2.635e-03, 45.6x over the bar (random-walk growth, ~sqrt(m) * u_f16).
+            // The knock-out must trip, and it does, decisively.
+            expect(typeof Math.f16round).toBe('function'); // Bun 1.3.11; the variant depends on it
+            const bar = h1bBar(theta);
+            const d = deltaPrecision(theta, F16_NEAR_KNOCKOUT);
+            record(`delta_precision f16-near knock-out theta=${theta}`, d);
+            record(`f16 knock-out / bar theta=${theta}`, d / bar);
+            expect(d).toBeGreaterThan(bar);
+            expect(d).toBeGreaterThan(10 * bar); // not a marginal trip
+        });
+    }
+
+    test('rung 1, f64 accumulator: delta_precision is IDENTICALLY 0 at both theta (must-NOT-trip consistency check)', () => {
         // Structural: the same deterministic traversal with the same variant on the same inputs.
         // A second prepared instance (inline near field) is used so this is not an object
         // compared with itself.
-        const d = deltaPrecision(F64, 'inline');
-        record('delta_precision f64-vs-f64', d);
-        expect(d).toBe(0);
-    });
-
-    test('rung 2, f32 accumulator: 1e-07 <= delta_precision <= 5.78e-05 (two-sided; the lower bound names the unplumbed-f32 value)', () => {
-        // Upper bound: §7.2's bar. Lower bound (task-4 brief): a decade under the MEASURED f32
-        // apply noise at n=960 (f32NoiseHi 1.0639e-06, f32NoiseLow 3.0024e-06, out-accuracy.json),
-        // because an "f32" path reporting ~1e-16 is an f64 simulation that was never rounded —
-        // the defect memory simulate-bugs-at-target-precision records. One-sided bars cannot see it.
-        const H = prepared('torusKnot', n, 0.5);
-        const bar = 10 * (H.stats.nearPairs / H.m + H.stats.nFar / H.m) * U_F32;
-        const d = deltaPrecision(F32);
-        record('delta_precision f32 (scalar A apply)', d);
-        record('delta_precision f32 / bar', d / bar);
-        expect(d).toBeGreaterThanOrEqual(1e-7);
-        expect(d).toBeLessThanOrEqual(bar);
-        // Inline and precomputed near fields are the same f32 arithmetic: bit-identical.
-        expect(deltaPrecision(F32, 'inline')).toBe(d);
-        // The vector apply, same band.
-        const U = new Float64Array(3 * n);
-        for (let c = 0; c < 3; c++) U.set(seeded(n, 300 + c), c * n);
-        const dv = relErr(
-            vectorApply(prepared('torusKnot', n, 0.5), U),
-            vectorApply(prepared('torusKnot', n, 0.5, F32), U),
-        );
-        record('delta_precision f32 (12-column A apply)', dv);
-        expect(dv).toBeGreaterThanOrEqual(1e-7);
-        expect(dv).toBeLessThanOrEqual(bar);
-    });
-
-    test('rung 3, f16 near accumulator (knock-out, §7.11 item 7): delta_precision EXCEEDS the bar', () => {
-        // Model (§7.2): m * u_f16 = 97 * 4.88e-04 = 4.7e-02, ~820x over the bar. NOT previously
-        // measured; this is the first measurement. The knock-out must trip.
-        expect(typeof Math.f16round).toBe('function'); // Bun 1.3.11; the variant depends on it
-        const H = prepared('torusKnot', n, 0.5);
-        const bar = 10 * (H.stats.nearPairs / H.m + H.stats.nFar / H.m) * U_F32;
-        const d = deltaPrecision(F16_NEAR_KNOCKOUT);
-        record('delta_precision f16-near knock-out', d);
-        record('f16 knock-out / bar', d / bar);
-        expect(d).toBeGreaterThan(bar);
-        expect(d).toBeGreaterThan(10 * bar); // not a marginal trip
+        for (const theta of [0.5, 0.25]) {
+            const d = deltaPrecision(theta, F64, 'inline');
+            record(`delta_precision f64-vs-f64 theta=${theta}`, d);
+            expect(d).toBe(0);
+        }
     });
 
     test('INVALID predicates (§7.2 table rows 2-3): the triangle holds and delta_total is not below delta_precision / 2', () => {
         const dc = deltaCompress('torusKnot', n, 0.5);
-        const dp = deltaPrecision(F32);
+        const dp = deltaPrecision(0.5, F32);
         const dt = relErr(
             exactAu('torusKnot', n),
             scalarApply(prepared('torusKnot', n, 0.5, F32), rhs(n)),
@@ -845,6 +881,41 @@ describe('§5.6 one traversal: every block source and column count is the same a
         const e = Math.abs(uAv - vAu) / Math.abs(uAv);
         record('symmetry rel', e);
         expect(e).toBeLessThan(1e-13);
+    });
+
+    test('knock-out instruments are refused by prepareA unless opted in (task-3 review: production can never apply an inverted or truncated operator)', () => {
+        const bvh = tree('torusKnot', 128);
+        const base = { alpha: ALPHA, beta: BETA, epsilon: EPS };
+        const inverted = buildBct(bvh, { theta: 0.5, invertAdmissibility: true });
+        expect(() => prepareA(bvh, 128, { kind: 'lists', bct: inverted }, base)).toThrow(
+            /knock-out instrument/,
+        );
+        expect(() =>
+            prepareA(
+                bvh,
+                128,
+                { kind: 'stream', params: { theta: 0.5, invertAdmissibility: true } },
+                base,
+            ),
+        ).toThrow(/knock-out instrument/);
+        expect(() =>
+            prepareA(
+                bvh,
+                128,
+                { kind: 'lists', bct: buildBct(bvh, { theta: 0.5 }) },
+                {
+                    ...base,
+                    variant: F16_NEAR_KNOCKOUT,
+                },
+            ),
+        ).toThrow(/knock-out instrument/);
+        // The honest configurations are untouched, and the opt-in lets the knock-outs through.
+        expect(() =>
+            prepareA(bvh, 128, { kind: 'lists', bct: buildBct(bvh, { theta: 0.5 }) }, base),
+        ).not.toThrow();
+        expect(() =>
+            prepareA(bvh, 128, { kind: 'lists', bct: inverted }, { ...base, knockOut: true }),
+        ).not.toThrow();
     });
 
     test('prepareA reports the traversal stats and the near-field skip count (brief ruling 1)', () => {

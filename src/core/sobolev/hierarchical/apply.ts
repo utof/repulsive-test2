@@ -50,7 +50,14 @@
  * @see src/core/sobolev/layout.ts (coordinate-block layout)
  * @issue utof/repulsive-test2#57
  */
-import { type Bct, type BctParams, type BctStats, type BlockVisitor, traverseBct } from './bct';
+import {
+    type Bct,
+    type BctParams,
+    type BctStats,
+    type BlockVisitor,
+    resolveBctParams,
+    traverseBct,
+} from './bct';
 import type { Bvh } from './bvh';
 import {
     type AccumulatorVariant,
@@ -388,6 +395,14 @@ export interface PrepareOptions {
      * streaming source ignores it (spec §7.1). Default `true`.
      */
     precomputeNear?: boolean;
+    /**
+     * TESTS ONLY. Allows a knock-out instrument through: a block source built with
+     * `invertAdmissibility` (spec §7.2 H1-a knock-out 2) or the `F16_NEAR_KNOCKOUT` variant
+     * (H1-b knock-out 2). Without it {@link prepareA} throws, so an inverted or truncated
+     * operator can never be applied by accident — reaching a knock-out from a production path
+     * would be silent corruption (task-3 review). Default `false`.
+     */
+    knockOut?: boolean;
 }
 
 function workspace(H: HierarchicalA, nc: number): ApplyWorkspace {
@@ -421,6 +436,15 @@ export function prepareA(
     const eps = variant.round(epsilon);
     const lists = source.kind === 'lists';
     const pre = lists && (opts.precomputeNear ?? true);
+    // Knock-out instruments are refused unless explicitly let through (PrepareOptions.knockOut).
+    const inverted = lists
+        ? source.bct.params.invertAdmissibility
+        : resolveBctParams(source.params).invertAdmissibility;
+    if (!opts.knockOut && (inverted || variant.name === 'f16near')) {
+        throw new Error(
+            `prepareA: knock-out instrument in a production apply (invertAdmissibility=${inverted}, variant=${variant.name}); pass knockOut: true in a test`,
+        );
+    }
     const kernelData = (kernel: KernelId): KernelData => ({
         kernel,
         p: kernel === 'hi' ? pHi : pLow,
