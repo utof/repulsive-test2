@@ -1,0 +1,2287 @@
+# Phase 2H Design Spec — the hierarchical solver (BCT + preconditioned GMRES)
+
+**Issue:** utof/repulsive-test2#58. **Epic:** #51. **Supersedes the solve architecture of**
+`docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md` (`[DESIGN]`), which is marked
+stale against #51 by commit `2a01332`.
+
+**Status:** pre-registered. Kill gates are in §7 of THIS document, not in a plan
+(CLAUDE.md: "Pre-registered kill gates go in the spec, not the plan").
+
+**Provenance of every number below.** This spec quotes only values re-derived from the raw JSON in
+`.superpowers/sdd/2026-09-11-phase2h-queue/scratch/`. Three measurement reports stand behind it
+(#57 cost spike, #59 gate derivation, #64 θ decision), and all three contain numbers that their own
+raw data contradicts. Those are listed in §10.3 and are **not** quoted here. Two digests did the
+cross-checking: `reports/digest-57.md` (§11: eleven report-vs-raw disagreements) and
+`reports/digest-59.md` (§0: six defects). When this spec and a report disagree, the spec is keyed to
+the JSON and wins.
+
+---
+
+## 0. State detection (fresh session)
+
+Run these before touching anything; they tell you where the branch is.
+
+```bash
+git log --oneline -3                      # feat/phase2h-spec branches from main @ 9dd5551
+bun test                                  # 402 pass / 0 fail expected (397 pre-2H + 5 bench/stats)
+bunx tsc --noEmit                         # clean
+ls src/core/sobolev/hierarchical/ 2>/dev/null   # absent ⇒ nothing in src/ yet
+wc -l .superpowers/sdd/2026-09-11-phase2h-queue/scratch/*.ts | tail -1   # 3823 — the PROTOTYPE
+ls .superpowers/sdd/2026-09-11-phase2h-queue/scratch/e1b-left-f64*.json   # task 0a output, present
+git checkout -- bench/results/gpu-phase2a-cr.json   # known churn, @issue utof/repulsive-test2#47
+```
+
+`codebase-memory-mcp` project name is `media-vboxuser-G-samsung-0utoffiles-code-repulsive-test2`.
+`deepwiki` is not installed — use `gh` or WebFetch for GitHub.
+
+---
+
+## 1. Scope
+
+### 1.1 What this phase replaces
+
+Phase 2 assembled a dense `3n × 3n`-equivalent Sobolev operator and factored it (Cholesky on the
+shifted block, then Schur + Woodbury for the constraints). Phase 2H **never forms the operator**. It
+applies it hierarchically and solves iteratively.
+
+This is a replacement, not an acceleration. `[YSC §6.3]` (arXiv:2006.07859) states the consequence
+directly:
+
+> "Since the hierarchical matrix-vector multiply does not build an explicit matrix, we use an
+> iterative method to solve our linear systems."
+
+Once the operator is hierarchical **there is no `A` to factor**. BCT and dense Cholesky are mutually
+exclusive; the two cannot be stacked. `[DESIGN §1:118]` listed "Multigrid / BCT preconditioning" as
+an explicit out-of-scope non-goal; `[DESIGN]:119-127` already carries the correction ruling that
+non-goal contradicted by the scale target. **This spec executes that correction.**
+
+### 1.2 Why the dense path cannot reach the target
+
+CLAUDE.md records the target: **N=960 is the FLOOR; the goal is 1,000–30,000 vertices.**
+
+| ceiling | value | source |
+|---|---|---|
+| dense f32 `A_σ` vs WebGPU's default 128 MiB `maxStorageBufferBindingSize` (`4N²` bytes) | **N ≈ 5 793** | `[DESIGN]:461-465`. **NOT enforced in code** — `GPU_SOLVE_MAX_N` exists only in plan/spec prose (§10.3); CLAUDE.md calls it "enforced", which is wrong |
+| dense f32 `A` at N=30 000 | **3 433 MiB** — unallocatable on this GPU | `-prenear.json` `memMb.denseF32Equivalent` |
+| dense factorization at N=30 000 | ~9e12 flops | `[DESIGN]` |
+| numerics ceiling of the current kernel + fan-in + extended accumulator + GMRES-IR | **N ≈ 6 900** | `#51`, `research-precision-r1.md:562-609` |
+
+Numerics bind before memory does. **No amount of tuning takes the dense path to 30 000.**
+
+### 1.3 In scope
+
+1. The hierarchical operator `A` (BVH + block cluster tree), f32 and f64 accumulator variants of one
+   traversal.
+2. The `Ã⁻¹ = (−Δ)⁻¹ L_{2−s} (−Δ)⁻¹` preconditioner, including the `L_{2−s}` operator that the
+   existing 30k projection never budgeted.
+3. **Left**-preconditioned GMRES (§5.3 — right preconditioning is measured unusable).
+4. A mixed-precision scheme in which the f32 hierarchical apply is the **inner** solver, never the
+   solver (§6).
+5. The seam change from "matrix + factor" to "matvec + iterate" (§4).
+6. The constraint fork for `k = O(n)` (§8, #62).
+7. Pre-registered kill gates H1–H5 + R1 (§7).
+
+### 1.4 Explicit non-goals
+
+- **Changing the CPU f64 reference path.** `assembleAFlat`, `ldltFactor`, `lineSearchStepSet`,
+  `projectOntoConstraintSet` stay byte-for-byte unchanged. The hierarchical path is selected at the
+  seam; absent ⇒ bit-identical, with the golden suites as backstop. This is `[DESIGN §1]`'s rule and
+  it survives unchanged.
+- **Deleting the dense path.** It is the f64 reference every gate in §7 measures against, and it is
+  the fallback below the crossover where the RS preconditioner is *worse than none* (§5.2). Park it,
+  do not remove it.
+- `df64` emulation, `f16`. Untouched by #51.
+- GPU implementation of the hierarchical apply. **This spec specifies and gates the CPU
+  implementation.** Every GPU number in the source reports is extrapolated from zero GPU runs
+  (§10.1); promoting them to a GPU work item requires its own measurement, and #63 means it must be
+  wall-clock. The architecture is chosen so the GPU port is possible (array-of-structs near field,
+  CSR-like block lists), and §9.4 records what the port must not break.
+
+---
+
+## 2. The decision, and what is actually settled
+
+Three axes, with their current status stated honestly:
+
+| axis | status | the number that settles it |
+|---|---|---|
+| **memory** | **SETTLED** | ~33–34 MiB f32 for `A` at n=30 000 (two independent estimates, §3.4). Near pairs scale **n^0.9796**, i.e. linear. The 128 MiB binding limit is never approached on trefoil-class geometry. |
+| **accuracy** | **RESOLVED, guarded** | The hierarchical operator is spectrally equivalent to `A`: A-relative defect **2.44–11.81 × δ₂** over all 15 (n, θ) cells, where a random perturbation of identical spectral norm-distance gives **1.83e3–5.22e6 × δ₂** — a ratio of up to **4.4e5×** at n=4 000. End to end the hierarchical direction takes **99.69–99.91 %** of the exact operator's energy decrease. §2.2. |
+| **cost** | **PLAUSIBLE, not settled, and ~25 % worse than previously reported** | 194 ms per matvec at n=30 000 on one CPU thread (measured, loaded box). Beyond that, 12 threads and GPU are extrapolated; the near-field precompute (§3.3, ~3.5 s/step) was never counted; and the iteration multiplier is **32, not 26** — the 26 was measured on the preconditioning side this spec forbids (§5.3.1a, newly measured). |
+
+### 2.1 The #57 ⊕ #59 collision, and why it dissolved
+
+Read literally, the two measurement reports killed this phase: #57 measured BCT truncation
+`4.039e-2` at θ=0.5 (`out-accuracy.json` row θ=0.5, `relErrRandom`), and #59 measured the tolerable
+perturbation falling as `n^{-2.76}` to `1.1146e-5` by n=960 (`e3-bisect-large.json`,
+`betaCos90Min`). Four thousand times over bar.
+
+**Both measurements are correct. The inference was not.** #59 perturbed the exact `A` with a
+**random symmetric** `E` (`e2_inexact.py:28-50 bct_proxy`), and for a generic `E` the damage to the
+descent direction scales as `κ₂(A_σ)·δ`. The BCT does not perturb `A`; it **replaces** it with a
+different, spectrally equivalent operator. #59 flagged its own model as "the weakest link" and
+predicted the real BCT's tolerance would come out *lower*. **That prediction is falsified by a
+factor of 655× to 921 600×** (#64, `out-64-beta-struct.json`).
+
+`δ` is the wrong currency for this gate. That is the finding, and §7 is built on it.
+
+### 2.2 The operator is SPD by construction, not by luck
+
+`A_bct = Mᵀ(diag(K1) − K)M + Eᵀ(diag(K⁰1) − K⁰)E`. Every entry of the hierarchical `K` is
+non-negative (near entries are kernel values or an exact 0 for adjacent pairs; far entries are
+`ℓ_I ℓ_J · k(x_A,x_B) > 0`), and `K1` is computed by applying **that same hierarchical operator** to
+the ones vector. So `diag(K1) − K` is exactly the graph Laplacian of a non-negatively weighted graph
+⇒ PSD with nullspace the constants, **regardless of how coarse the admissibility is**. `Mᵀ(·)M` and
+`Eᵀ(·)E` preserve PSD.
+
+Measured consequences, every (n, θ) in n=240…4 000 × θ∈{0.5, 0.25, 0.1}:
+
+- **zero negative eigenvalues at every one of the 15 cells** (`negEigCount` = 0 throughout);
+- **`numpy.linalg.cholesky(A_bct,σ)` succeeds at every cell** (`choleskyBctSigma` = OK ×15);
+- symmetry defect `max|A−Aᵀ|/max|A|` ≤ **1.63e-16** (`symDefect`, max over all cells);
+- the hierarchical operator annihilates constants **better than `assembleAFlat` does**:
+  `‖A_bct·1‖₂/‖A‖₂` = **2.19e-15 … 2.59e-14** against the exact operator's own
+  `‖A·1‖₂/‖A‖₂` = **7.96e-15 … 1.27e-13** (`bctOnesRel` vs `AonesRel`), i.e. roughly 4× smaller at
+  every n.
+
+> **Three different "A·1" quantities exist and they must not be conflated.** (i) The **apply**,
+> `max_i |(A_bct·1)_i|`, is **exactly 0** — but that is checked only by the `W2` assertion in
+> `run-64-verify.ts:117` ("must be EXACTLY 0"), whose output is **console-only with no saved
+> artefact**, the same provenance weakness as §5.4's 33.9 %. (ii) `bctOnesRel` in the saved JSON is
+> the **densified** operator's normalised row sum — 2.19e-15…2.59e-14, correctly **nonzero**.
+> (iii) `bctOnesAbs` is that same quantity unnormalised (3.9e-12…3.3e-8) and is not comparable
+> across n at all.
+>
+> The exact zero in (i) is structural and must be asserted exactly; a zero in (ii) would mean the
+> densifier is faking it. §11.3 makes (i) a standing test precisely because it currently is not one.
+> @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §2.2
+
+**No θ exists at which it stops being SPD**, and the argument above says none can. This is what
+licenses calling it a different-but-valid Sobolev metric rather than a corrupted one.
+
+> **Anchor.** `A_bct·1 = 0` holding *exactly for the apply* but **not** for assembled rows is not a
+> bug and must not be "fixed": the apply's zero is structural (`M·1 = 0` because
+> `du = (u[i₂]−u[i₁])/ℓ` on a constant is `0−0`, and `diag(K1)·1 − K·1 = 0` bit-exactly because
+> `K1` comes from the same apply), while a row-sum computed from `N` separately-accumulated columns
+> is roundoff. An exactly-zero row sum would mean the densifier is not doing what it claims.
+> @see .superpowers/sdd/2026-09-11-phase2h-queue/reports/64-theta-decision.md §1.1, §4
+
+### 2.3 One consequence for the shift
+
+`tr(A_bct)/tr(A)` = **0.9891 … 1.0000**. Computing the rank-1 shift `σ = tr(A)/n` from the
+hierarchical operator instead of the exact one moves it by ≤ 1.1 %.
+
+**Ruling: `σ` is computed from the hierarchical operator's own trace.** Reason: the production path
+has no exact trace to read, and a gate that silently depends on one is not reproducible at n=30 000.
+The ≤1.1 % difference is recorded, not corrected. `A_σ = A + (σ/n)11ᵀ` with
+`σ = tr(A_bct)/n`, matching `bench/gpu/k1-calibration.py:228-230`'s form.
+
+---
+
+## 3. The cost model
+
+### 3.1 Where the time goes
+
+Measured at n=30 000, trefoil (`torusKnot`), θ=0.5, leaf=8, `endpoint4` quadrature, near field
+precomputed, **single CPU thread, f64, loaded box (1-min load average 35.56)**, min of 21 reps after
+3 warmups (`out-bct-torusKnot-theta0.5-leaf8-endpoint4-prenear.json`, row n=30000):
+
+| | ms | share |
+|---|---:|---:|
+| `farOnlyMin` | 13.360 | **7.1 %** |
+| `nearOnlyMin` | 173.908 | **92.9 %** |
+| `fullMin` (separately timed) | 194.193 | — |
+
+**κ is a near-field constant, not a tree constant.** Any optimisation effort aimed at the tree is
+aimed at 7 % of the work.
+
+> Note the denominator: 7.1/92.9 is over `farOnly + nearOnly` = 187.27 ms, not over `fullMin`.
+> Against `fullMin` it is 6.9 % / 89.6 %; the 6.9 ms gap is because `full` is a separate timed run.
+> The split closes to within 3.6 % at n=30 000 only — at n=10 000 the parts sum to 32.4 ms against a
+> full of 45.70 ms. Do not quote the split at small n.
+
+### 3.2 Scaling — linear, and NOT `n log n`
+
+| fit (5 sizes: n = 960, 2 000, 5 000, 10 000, 30 000; trefoil, θ=0.5, leaf=8) | exponent | R² |
+|---|---:|---:|
+| near pairs | **0.9796** | 0.9581 |
+| far blocks | 1.1529 | 0.9716 |
+| matvec ms (near precomputed) | **1.0464** | 0.9708 |
+| memory (near precomputed) | 1.0015 | 0.9845 |
+
+Other geometries agree on the near-pair exponent: tangle **0.9834**, circle **0.9463**.
+
+The `n log₂ n` model mis-predicts by **±36.7 %** (`fits.torusKnot.nearPairs.nLogN.maxRelDev`
+= 0.3673, constant 7.1899). **Use the linear model.**
+
+> **Mechanism, and it matters for every gate in §7.** Per-vertex near pairs *oscillate*:
+> 93.3 → 104.5 → 63.7 → 60.4 → 108.2 across those five sizes. The median-split BVH forces the leaf
+> count to a power of two (128/256/1024/2048/4096), so mean leaf size wanders over **4.88–7.81** as
+> `n` crosses powers of two. **A 5-point log-log fit through an oscillating series is a locator, not
+> a law.** #64 ignored exactly this warning for a spectral quantity and had to retract a
+> recommendation (§10.2).
+>
+> One correction to the source report: it attributes the oscillation to near pairs going as
+> `leaf-size²`. Per *block* that is right, but the number of blocks per leaf falls as `1/leaf`, and
+> per **vertex** the data show `κ_near / mean-leaf-size` = 12.4 / 13.4 / 13.0 / 12.4 / 14.8 —
+> roughly **constant**, i.e. `κ_near` is linear in mean leaf size. The qualitative mechanism stands;
+> the exponent does not.
+
+### 3.3 The cost nobody budgeted: near-field precompute
+
+Assembling the near field once per gradient step and reusing it across GMRES iterations is worth
+**12.75×** on the matvec (2 476.30 ms on the fly → 194.19 ms precomputed, n=30 000). It is
+mandatory.
+
+**But the assembly itself costs 3.2–3.5 s at n=30 000 on one CPU thread.** Two measurements, from
+the two different runs: **3 512.5 ms** (`-prenear.json` `build.precomputeNearMs` — the *same run*
+that produced the 194 ms, so this is the internally consistent pair) and **3 182.9 ms**
+(`out-64-kappa-n30000.json` `nearPrecomputeMs`, θ=0.25: 8 136 ms, θ=0.1: 5 574 ms — all noisy and
+loaded). That is **~18× one matvec**, **it is not inside the 194 ms, and no prior projection counted
+it.** Break-even against on-the-fly is **1.54** matvecs, so it pays for itself immediately at 26
+iterations — but as a per-gradient-step one-time cost of ~3.5 s it dominates the 5 s budget
+conversation on CPU all by itself.
+
+**The spec budgets it as a separate line item** (§3.5) and §9.1 records it as the largest single
+unquantified risk in the GPU port.
+
+### 3.4 Memory
+
+At n=30 000, trefoil, θ=0.5, near precomputed (`-prenear.json` `memMb`):
+
+| | f64 | f32 (estimated) |
+|---|---:|---:|
+| tree | 4.1736 MiB | — |
+| block lists | 1.6576 MiB | — |
+| **`hierarchicalTotal`** | **60.2785 MiB** | **33.0–34.3 MiB** |
+
+Two independent f32 estimates exist — **33.0 MiB** (reconstructed: indices/tree/blocks 5.83 + far
+values 2.22 + two near arrays 24.8) and **34.34 MiB** (`out-64-kappa-n30000.json` `bytesF32Est`,
+36 003 304 bytes). **Both are EXTRAPOLATED.** Quote the range, never a single figure. The source
+reports give the second as "36 MB" by dividing by 10⁶; in MiB the two estimates agree to 4 %.
+
+**What that estimate omits**, and the spec must carry each separately: `L_{2−s}` (+25 MiB f64 /
++12 MiB f32, DERIVED, never implemented); the GMRES Krylov basis; the 12-column working vector sets
+(1.4 MiB per set at n=30 000); geometry — positions, tangents, lengths — (0.8 MiB).
+
+> `memMb` in the raw JSON is genuinely MiB: `treeBytes` 4.1735687255859375 × 2²⁰ = 4 376 320 bytes
+> exactly. `bytesF32Est` in #64's file is raw **bytes**. The two keys use different units, which is
+> where the MB/MiB confusion in the source tables originates.
+
+**Largest single storage binding** — the number that must stay under
+`maxStorageBufferBindingSize` = **128 MiB**:
+
+All figures re-derived from `out-64-kappa-n30000.json` (`nearPairs`, `bytesF32Est` — note that key
+is **raw bytes**, which is how the source tables came to be quoted in MB):
+
+| geometry | θ | near pairs | f32 total for `A` | largest single binding |
+|---|---:|---:|---:|---:|
+| trefoil | 0.5 | 3 245 868 | 34.34 MiB | **12.38 MiB** |
+| trefoil | 0.25 | 6 785 670 | 64.89 MiB | 25.89 MiB |
+| tangle | 0.5 | 9 681 766 | 89.23 MiB | **36.93 MiB** |
+| tangle | 0.25 | 15 946 490 | **143.01 MiB** | 60.83 MiB |
+| tangle | 0.1 | 24 886 020 | **218.35 MiB** | 94.93 MiB |
+| circle | 0.5 | 659 598 | 11.85 MiB | 2.52 MiB |
+
+> **Unit correction — the binding limit is in MiB and the source figures are not.** Both digests and
+> #64's table report "13.0 MB / 38.7 MB" for the largest binding, which is `pairs × 4 / 10⁶`.
+> `maxStorageBufferBindingSize` is **128 × 2²⁰ bytes**, so the comparison must be in MiB:
+> `3 245 868 × 4 / 2²⁰` = **12.38 MiB** (trefoil) and `9 681 766 × 4 / 2²⁰` = **36.93 MiB**
+> (tangle). Re-derived here from `stats.nearPairs` in the raw JSON. The conclusion is unchanged and
+> the headroom is slightly *larger* than reported — but a 4.8 % unit error in the one number that is
+> compared against a hard device limit is exactly the kind that survives into a kill gate.
+
+> **Ruling: the two per-kernel near-value arrays are bound SEPARATELY, never concatenated.** Each is
+> `nearPairs × 4 B`; concatenated they double. The source report's "the near-value array (25 MB f32)
+> is the largest single buffer" is the *sum* of the two and is wrong as stated for a per-binding
+> limit. Separate bindings also keep tangle-class geometry at 36.93 MiB where the concatenation
+> (73.9 MiB) would start to crowd the limit.
+> @see .superpowers/sdd/2026-09-11-phase2h-queue/reports/digest-57.md §7, §11 item 6
+
+**Binding size is not the binding constraint; total device memory is.** Every per-binding figure
+above sits comfortably under 128 MiB, including adversarial geometry at the tightest θ. But
+`tangle` reaches **143 MiB at θ=0.25 and 218 MiB at θ=0.1** for `A` *alone*, ~240/250+ MiB once
+`L_{2−s}` is counted. The Quadro RTX 3000's 6 GB absorbs that, so it is not a kill — but it is a
+real cost, it is one more reason θ=0.1 is out (§4.3), and it means the θ=0.25 fallback is not free
+on adversarial geometry either.
+
+### 3.5 The per-iteration and per-step budget
+
+One `A` matvec is **12 columns** of `K`, not 3 and not 1. `A` acts block-diagonally on the 3
+coordinate components (`src/core/sobolev/layout.ts` `expandBlockDiag`); the high-order `B` has `M u`
+R³-valued (a tangent direction) so it needs 3 `K`-applies per scalar component ⇒ 3×3 = **9
+columns**; the low-order `B⁰` needs 1 per component ⇒ **3 columns**. `K1` and `K⁰1` are
+geometry-only, computed once per build.
+
+**The measured 194 ms already is the 12-column matvec.** A cost model treating one `A` apply as a
+single scalar traversal is 12× optimistic on column count (the source report says "4× optimistic",
+which is relative to a 3-column model). Because the precomputed near field is memory-bound, kernel
+evaluation amortises across columns, so the true ratio is *below* 12× — **unmeasured; there is no
+`ncols=1` or `ncols=3` timing in any JSON.**
+
+Per preconditioned GMRES iteration at n=30 000, trefoil, θ=0.5, 1 CPU thread:
+
+| term | ms | status |
+|---|---:|---|
+| `A` matvec (12 columns) | **194.19** | **MEASURED** |
+| `L_{2−s}` (3 columns, same tree, same block lists) | ~43 | **DERIVED** as 3/12 of near work; never implemented |
+| `2 × (−Δ)⁻¹` | **1.61** | **MEASURED** (0.804 ms each) |
+| **per iteration** | **~239–241** | DERIVED |
+| × **3** iterations ← **the production number** | **0.72 s** | **MEASURED** — see the ruling below |
+| × 32 iterations (gate configuration, `τ_η = 1e-6`) | 7.7 s | calibration only — H3's instrument, never the production stop (§7.4) |
+| × 42 iterations (τ_true=1e-4) | 10.1 s | MEASURED; the *backward-error* budget, not the production one |
+| ~~× 26 iterations~~ | ~~6.3 s~~ | **superseded.** The 26 every prior projection used is the `rs/**right**/f64` count, which this architecture forbids (§5.3.1) |
+
+> **Three different iteration counts have been conflated across this phase and they differ by ≥14×;
+> this spec's own first draft charged production for the gate's stopping rule.** Now separated, all
+> MEASURED (`e2-inexact.json` δ=0 left-prec; `e1-closer-0b-n*.json`):
+>
+> | what it is | count at n=960 | who needs it |
+> |---|---:|---|
+> | **direction quality** — `min cos∠_A ≥ 0.9` over 5 rhs | **3** (2 at n=480) | **production.** What a descent step actually requires |
+> | gate currency — `η ≤ τ_η = 1e-6` | ~32 | H3 only (§7.4) |
+> | backward-error floor — `argmin η` | 36–60 | H2's probe schedule (§7.3) |
+>
+> **Production needs a good direction, not a small residual.** MEASURED at the loosest stop
+> (recurrence 1e-2): `min cos∠_A` = **0.9115 at n=480 in 2 iterations** and **0.9486 at n=960 in 3**,
+> and the quantity **improves with n** — it crosses 0.9 between n=240 (0.885) and n=480, in the same
+> direction as H4a's baseline, so n=30 000 is comfortably clear on that trend.
+>
+> **Why the gate needs τ ≤ 1e-4 while production does not.** `q > 0 ⇒ cos∠_A > 0` is a theorem (§7.6)
+> and holds at **any** τ; what degrades at a loose stop is only its *sharpness* as a 0.9-classifier,
+> and only at the small n where the solve has not yet reached 0.9 itself. So H4b′ runs per solve at the
+> production stop as a **soundness** check, while the `cos ≥ 0.9` *calibration* happens at τ ≤ 1e-4
+> where §7.6's confusion matrix is clean. Conflating the two inflated this budget by **14×**.
+>
+> **Consequence for what to optimise.** At 3 iterations the GMRES cost is 0.72 s against a MEASURED
+> **3 513 ms** near-field precompute (§3.3) — so the per-gradient-step budget is **~83 %
+> precompute**, and the iteration count stops being the thing worth tuning. The projection solves are
+> *not* a third term: MEASURED `projectionIterations` is median **0**, max 2 at n=240 and 4 at n=480.
+| **+ near-field precompute, once per gradient step** | **+3 513** | **MEASURED**, §3.3 |
+
+`(−Δ)⁻¹` is **0.83 % of the matvec**. Drop it from the risk register — it is a Sherman–Morrison
+cyclic-tridiagonal solve (Numerical Recipes §2.7 `cyclic`: two Thomas sweeps plus a rank-1
+correction, no stored factorization, no pivoting), O(N) confirmed with `nsPerVertex` falling
+67.4 → 30.6 over n=960…100 000.
+
+> One caveat the spec carries into §9: the cyclic solve's relative residual **degrades with n** —
+> 2.2e-10 at n=960 to 1.8e-7 at n=100 000 — attributed to the absence of pivoting. At n=30 000 it is
+> 1.697e-9. Fine for a preconditioner; it is not a solve.
+
+### 3.6 What is extrapolated
+
+**Every GPU number in every source report is extrapolated from zero GPU runs.** The chain is:
+`194 ms measured` → "40–200× for a bandwidth-bound kernel on a 336 GB/s Quadro RTX 3000" (assumed)
+→ 1–5 ms/matvec on trefoil → ×3.29 (the *tangle* time ratio) → 3–16 ms → ×26 iterations (itself
+superseded by **42**, §3.5) ×1.23 for
+`L_{2−s}` → **0.10–0.51 s/solve**.
+
+Three things make that chain weaker than it reads:
+
+1. The "40–200×" is bandwidth reasoning with no kernel behind it, and the "20–25 % of peak bandwidth
+   for a gather-heavy SpMV" is assumed.
+2. The upper end of "3–16 ms" is an **adversarial-geometry** figure (tangle) applied to a
+   representative-geometry claim.
+3. The source report's own table labels 3–16 ms *per iteration* while its text, the issue comments,
+   `cost64.py` and #64 all treat it as *per matvec* — a 1.23× discrepancy sitting inside a range
+   quoted to two significant figures.
+   **This spec defines it as per `A` matvec.**
+
+It also excludes submission and readback latency entirely. **§7 therefore contains no timing gate**,
+and §9.1 carries the GPU cost as an open risk with a named measurement protocol rather than a bar.
+
+---
+
+## 4. θ — the admissibility parameter
+
+### 4.1 The ruling
+
+**θ = 0.5 by default, guarded per-solve by H4b′ and end-to-end by H4c, with θ = 0.25 as the
+runtime fallback — and the default is decided by H6 (§7.9), not asserted here.**
+
+This is CLAUDE.md's "prefer swappable strategies over one hardcoded kernel" applied to a parameter
+where five measured currencies and one unpredictable residual risk point in opposite directions. θ
+is a runtime knob with a measured trip condition, not a compile-time constant.
+
+> **The guard is NOT H4b, and this is a correction to #64's recommendation.** #64 recommends
+> *"ship θ=0.5 with H4b as a mandatory per-solve guard"*, which requires H4b to enforce
+> `cos∠_A ≥ 0.9` per solve. **That instrument does not exist**: §7.6 proves H4b's surrogate is
+> `≥ 1` identically (algebra, plus 122/122 of the samples where it is defined, and 16 measured false
+> passes with true `cos`
+> down to 0.0281), so the 0.9 bar sits below the quantity's structural minimum and cannot be
+> tripped. §7.6 further proves that no reference-free lower bound on `cos∠_A` from a single iterate
+> exists at all. What survives — `min q > 0` — catches *catastrophic* failure soundly but **cannot
+> distinguish θ=0.5 from θ=0.25**, and cannot see the `cosBound = 0.8234` worst case that is the
+> whole θ risk.
+
+**So the θ ruling is re-based on three instruments that do exist**, plus one pre-registered
+measurement that can overturn it:
+
+| instrument | what it covers | what it cannot see |
+|---|---|---|
+| **H4b′** `min q > 0`, per solve, reference-free | catastrophic direction failure; GREEN *certifies* `cos∠_A > 0` | anything in `0 < cos < 0.9`, incl. `cosBound = 0.8234` and the f32 wall |
+| **H4c** `R_E ≥ 0.95` **and** accepted fraction `== 1.0`, per calibration | end-to-end energy delivery and line-search refusals; MEASURED separation **0.99691 vs 0.86027** | a θ difference — all 15 BCT arms pass |
+| **H6** adversarial rhs at θ=0.5, n=960 and 2 000 | **exactly the gap the other two cannot**: the sub-0.9 generalized modes | — |
+
+**H6 is the decision rule, and it is cheap** (the bad modes are already computed by
+`scratch/run64_badmodes.py`): if `min cos∠_A < 0.9` on an rhs built from the sub-0.9 modes, the
+default flips to θ=0.25 — the only θ with **zero** poorly-approximated modes at every n tested
+(worst-case guarantee 0.9984) — and §4.4 is what that costs. Every `cos∠_A` in the corpus is against
+**random** rhs, and a converged flow is precisely where the rhs stops being random, so this is the
+measurement that matters.
+
+**θ = 0.1 is off the table**: it buys nothing over 0.25 on any measured currency and costs 22 % more
+near-field work, and on tangle-class geometry it reaches 218 MiB f32 (§3.4).
+
+### 4.2 What says θ=0.5 works
+
+All MEASURED, on `trefoil(n)` via the repo's own `assembleAFlat` as reference (cross-checked against
+#59's independently assembled cache at **1.24e-16 / 1.44e-16** relative — two assembly paths, TS and
+Python, agreeing to machine precision):
+
+| currency | θ=0.5 | degrades with n? |
+|---|---|---|
+| `cos∠_A`, exact solve, min over 5 pinned rhs, n=240…4 000 | **0.9955 – 0.9984** | **no** |
+| `cos∠_A`, stopped left-preconditioned GMRES @1e-4, vs the δ=0 baseline | within **0.0022** at every n | **no** |
+| end-to-end ΔE / ΔE(exact) through the repo's own `lineSearchStepSet`, n=240/480/960 | **0.99691 / 0.99867 / 0.99909** | **no — it improves** |
+| margin `β(cos≥0.9) ÷ the operator's own δ₂`, n=240/480/960/2 000 † | **5.01 / 4.94 / 4.76 / 5.16×** | **no — flat across a 66 000× change in κ₂(A_σ)** |
+| A-relative defect ÷ δ₂ (all θ, n=240…4 000) | **2.44 – 11.81** | mild drift only |
+
+> † **This row is evidence, never a bar.** It is a legitimate measurement — the operator tolerates
+> ~4.8× more error along its own structured error direction than it actually has, and that ratio
+> could have come out below 1 and did not. But as a *predicate* it reduces to `δ ≤ 4.8·δ`, because
+> numerator and denominator scale together; and both inputs are bisected against a **dense**
+> `A_σ + δ‖A_σ‖₂E`, so neither is measurable above N ≈ 5 793. §7.2 retires it along with every other
+> δ-magnitude bar.
+
+**The line search is discriminating, not rubber-stamping.** Median accepted `τ` is 0.0039–0.00098,
+not 1, and the control arm — a random symmetric perturbation rebuilt at every step to the *same*
+spectral norm-distance as that step's hierarchical operator — is rejected as
+`not_a_descent_direction` **on step 0** at n=240 (`cos∠_A = −0.111530`) and at step 1 at n=480. Same
+δ, opposite outcome. That control is what makes this section falsifiable.
+
+### 4.3 What says θ=0.5 is risky
+
+At θ=0.5, **0.4–2.2 % of the generalized spectrum sits below 0.9**, and **which n is worst is
+unpredictable**:
+
+| n | c₁ = λ_min(A_bct,σ ; A_σ) | # modes < 0.9 | # < 0.5 |
+|---:|---:|---:|---:|
+| 240 | 0.8597 | 3 | 0 |
+| 480 | 0.8432 | 4 | 0 |
+| 960 | **0.3634** | 21 (2.19 %) | **4** |
+| 2 000 | **0.2886** | 18 (0.90 %) | 1 |
+| 4 000 | 0.6979 | 17 (0.43 %) | 0 |
+| 240–4 000 at θ=0.25 | 0.9726 → 0.9240 | **0 at every n** | **0** |
+| 240–4 000 at θ=0.1 | 0.9974 → 0.9921 | **0 at every n** | **0** |
+
+`c₁` at θ=0.5 **oscillates over a 2.98× range with R² = 0.216 against any power law** — it is not
+decaying, it is bouncing, and it bounces with BVH leaf alignment (§3.2), not with size. The worst
+value measured anywhere (0.2886 at n=2 000) gives a worst-case direction guarantee
+`2√(c₁c₂)/(c₁+c₂)` = **0.8235**, under the 0.9 bar. At θ≤0.25 the worst guarantee over the whole
+sweep is **0.9984**.
+
+**You cannot buy this off with an n threshold, because there is no monotone trend to threshold on.**
+Any rule of the form "θ=0.5 below N, θ=0.25 above" would be fitting noise. You *can* buy it off by
+measuring the direction per solve — which is free, and which **§7's H4b′ does only for catastrophic
+failure.** `min q > 0` certifies `cos∠_A > 0`, not `cos∠_A ≥ 0.9`, so it cannot see the
+`cosBound = 0.8234` worst case that is this subsection's entire subject (§7.6 caveat 2). The
+instrument that addresses *this* risk is **H6** (§7.9); §4.1 carries the ruling.
+
+Two further caveats, recorded because they bound the ruling:
+
+- **The cause of θ=0.5's bad modes is not established.** They are strongly localized (44–71 % of
+  their mass in 5 % of the vertices) but sit where the curve is *farther* from itself than average
+  (0.52–0.57 against a curve mean of 0.496) — so the obvious explanation, admissibility
+  conservatism at self-approach regions, is **falsified by measurement**. What replaces it is a
+  hypothesis with no evidence. Anyone planning to "fix θ=0.5 and keep the 2.09× saving" is opening
+  an investigation, not applying a known patch.
+- **Adversarial rhs untested.** Every `cos∠_A` above is against five *random* rhs, and a converged
+  flow is exactly where the rhs stops being random. §9.2.
+
+### 4.4 What θ costs
+
+`κ_near` MEASURED at n=30 000 (`out-64-kappa-n30000.json`); everything right of it DERIVED from
+§3.5's model:
+
+| θ | κ_near (trefoil) | ×θ=0.5 | κ_near (tangle) | κ_near (circle) | largest binding, trefoil |
+|---:|---:|---:|---:|---:|---:|
+| **0.5** | **108.20** | 1.00× | 322.73 | 21.99 | 12.38 MiB |
+| 0.4 | 134.79 | 1.25× | — | — | 15.43 MiB |
+| 0.3 | 202.91 | 1.88× | — | — | 23.22 MiB |
+| **0.25** | **226.19** | **2.09×** | 531.55 | 21.99 | 25.89 MiB |
+| 0.1 | 275.19 | 2.54× | 829.53 | 65.92 | 31.49 MiB |
+
+Geometry spread at θ=0.5 is **14.67×** (circle 21.99 → trefoil 108.20 → tangle 322.73), so the cost
+half of this table is geometry-robust in *shape*. The accuracy half is **not** — every direction,
+SPD and line-search result is on `trefoil(n)` alone, and `tangle`-class geometry is the obvious gap
+(§9.2).
+
+The fallback's price: θ=0.25 doubles the dominant term, moving the per-iteration cost from 241 ms to
+501 ms and the extrapolated GPU solve from 0.10–0.51 s to **0.20–1.07 s**, i.e. out of the top of
+#51's claimed 0.05–0.5 s band.
+
+### 4.5 θ is not buying step quality
+
+The end-to-end ΔE spread across **all** θ is **≤ 0.0008**, and the ordering is not even monotone (at
+n=960 θ=0.5 beats θ=0.25: 0.99909 vs 0.99855; at n=240 θ=0.5 is last). **θ buys a worst-case
+guarantee, not a measurably better step.** That is the whole content of the cost decision, and it is
+why a cheap runtime guard dominates a conservative constant.
+
+---
+
+## 5. Architecture
+
+### 5.1 The seam: from "matrix + factor" to "matvec + iterate"
+
+The existing Phase-2 seam is nearly right already. `ExternalFactorization`
+(`src/core/sobolev/linsolve.ts:415`) is a black-box `solve(rhs) → x`, and a GMRES iteration fits
+behind it unchanged. **Two exported interfaces carry the dense matrix, not one** — and the first
+draft of this section named only the first, which is the defect this subsection now leads with.
+
+```ts
+// src/core/sobolev/linsolve.ts:440-443 — TODAY
+export interface PreparedSaddle {
+    A: Float64Array;                            // ← 2H never forms this
+    factor(C: number[][]): SaddleFactorization;
+}
+```
+
+`A` is not decoration: `solveSaddleFrozen` (`:932-955`) packs it into `FrozenSaddleOperator.a`
+(`:915-920`) and `structuredSaddleResidual` (`:860`, module-private) consumes it as a dense
+row-major `n×n` buffer to compute the self-certifying residual. **So the residual needs a matvec
+too, not a matrix.** That is the entire architectural delta.
+
+**The second carrier, which the first draft missed.** `FrozenSaddleOperator` (`:915-920`) has a
+**required** `a: Float64Array`, and it has *two* production consumers, not one
+(`trace_path(solveSaddleFrozen, inbound)`):
+
+| caller | file:line | covered by |
+|---|---|---|
+| `solveConstrainedGradientSetFrozen` | `src/core/sobolev/gradient.ts:127-133` | task 8 |
+| **`projectOntoConstraintSet`** | **`src/core/sobolev/lineSearch.ts:259-267`** | **nothing, in the first draft** |
+
+`projectOntoConstraintSet` has exactly two routes and neither works hierarchically: the frozen branch
+needs `frozenOp.a`, and the fallback assembles a dense `assembleAFlat` **per projection iterate** —
+3.4 GB at N=30 000, the very thing this phase exists to escape. Worse, §1.4 declares that function
+"byte-for-byte unchanged". **So on the hierarchical path the Sobolev step's *projection* half had no
+route at all.**
+
+> **And `a` is not the real blocker — `fac` is.** On the dense path "frozen" means *factor once,
+> back-substitute many times*, and `a` is retained only so each reuse can recompute
+> `structuredSaddleResidual`. The actual solve goes through `fac`, a `SaddleFactorization`. **The
+> hierarchical path has no factorization by construction** (§1.1), so `FrozenSaddleOperator` cannot
+> be patched by making `a` optional: the whole *meaning* of "frozen" changes from "reuse the
+> factorization" to "reuse the tree and the near-field precompute, and run a fresh GMRES per solve".
+> That is a semantic change, and it is why the delta below is a discriminated union rather than two
+> optional fields.
+>
+> **The cost of that change is measured and small**, which is why it is survivable: a hierarchical
+> reuse solve is a full GMRES run rather than a back-substitution, but MEASURED
+> `projectionIterations` is median **0** (max 2 at n=240, 4 at n=480), so the projection adds 0–4
+> solves per τ trial, not a new dominant term. §3.5.
+
+**The 2H delta — a discriminated union, not optional fields.** The first draft used `A?` + `op?`,
+which **does not compile**: widening a required member is a breaking change for every reader of
+`prepared.A`, and there are two —
+
+```
+query_graph → src/core/optimizer.ts:291        (the `saddle.A length mismatch` shape guard)
+              src/core/sobolev/gradient.ts:127 (`a: saddle.A` into FrozenSaddleOperator)
+```
+
+Applying `A?: Float64Array` verbatim to a copy of the tree and running `bunx tsc --noEmit` yields
+`optimizer.ts(291,24) TS18048: 'opts.saddle.A' is possibly 'undefined'` and
+`gradient.ts(127,13) TS2322`, where the unpatched copy is clean (`"strict": true`). A union forces
+both readers to handle both cases explicitly instead of silently accepting `undefined`:
+
+```ts
+// src/core/sobolev/linsolve.ts
+/**
+ * Applies Ā to one flat 3n coordinate vector, block-diagonally over the 3
+ * components. Present ⇒ the residual and every solve route through this instead
+ * of a dense `A`; absent ⇒ today's dense path, bit-identical.
+ * Why: the hierarchical operator is never assembled, so there is no `A` to read
+ * (arXiv:2006.07859 §6.3). @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+ */
+export interface SobolevOperator {
+    applyA(u: ArrayLike<number>, out: Float64Array): void;   // 3n → 3n
+    n: number;
+}
+
+/** Dense path — today's behaviour, bit-identical. */
+export interface DensePreparedSaddle {
+    kind: 'dense';
+    A: Float64Array;
+    factor(C: number[][]): SaddleFactorization;
+}
+
+/** Hierarchical path — no matrix, no factorization; `prepare` returns a reusable solver. */
+export interface HierarchicalPreparedSaddle {
+    kind: 'hierarchical';
+    op: SobolevOperator;
+    prepare(C: number[][]): HierarchicalSaddleSolver;
+}
+
+/** The 2H seam. Exhaustive `switch (saddle.kind)` at both readers. */
+export type PreparedSaddle = DensePreparedSaddle | HierarchicalPreparedSaddle;
+
+/**
+ * The hierarchical analogue of a frozen factorization: the tree and near-field
+ * precompute are reused across solves, each solve is a fresh preconditioned GMRES.
+ * Why: there is no factorization to freeze (§1.1), so "frozen" means reuse of the
+ * BUILD, not of a decomposition. @see §5.1
+ */
+export interface HierarchicalSaddleSolver {
+    solve(rhsTop: ArrayLike<number>, rhsBottom?: ArrayLike<number>):
+        { x: number[]; lambda: number[]; residual: number };
+}
+```
+
+**`FrozenSaddleOperator` gets the same treatment** — a `kind`-tagged union whose hierarchical arm
+carries `{ op, solver }` instead of `{ a, fac }` — and `solveSaddleFrozen` dispatches on it. Both of
+its callers are then exhaustive, which is what gives `projectOntoConstraintSet` a route.
+
+> **Migration is mechanical but must be stated, since `kind` is a new required member on a type an
+> existing producer builds.** `src/gpu/saddle.ts makePreparedSaddle` adds `kind: 'dense'`;
+> `optimizer.ts:291`'s guard becomes `saddle.kind === 'dense' ? saddle.A.length !== n**2 : saddle.op.n !== n`
+> (there is no `A.length` to check hierarchically, and `test/gpu/saddleSeam.test.ts:287-295` pins the
+> current throw, so the dense message must not change); `gradient.ts:127` switches on `kind`.
+
+`structuredSaddleResidual` gains an operator-shaped overload. **Its dense branch keeps its current
+loop and term order byte-for-byte** — that value is golden-gated, and the comment at `:855-859`
+records that it was extracted verbatim from `solveSaddleFromA` for exactly this reason. The new
+branch is a sibling, never a rewrite of the old one.
+
+> **Anchor.** Do not "simplify" the two branches into one. The dense branch's operand order is
+> load-bearing (bit-identity against committed goldens); the hierarchical branch cannot reproduce it
+> because it never has the matrix entries. Two branches is the design.
+> @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+
+This is the **fifth** sanctioned public-type change on top of `[DESIGN §4.4]`'s (i)–(iv). Declared
+here, marked, for the same reason that list exists: so a fifth cannot appear silently. **It touches
+four pre-existing files, not two** — `linsolve.ts`, `gradient.ts`, `optimizer.ts`, `lineSearch.ts`,
+plus `src/gpu/saddle.ts` for the `kind: 'dense'` tag. §11.2 task 8's file list says so.
+
+### 5.2 The preconditioner
+
+`Ã⁻¹ = (−Δ)⁻¹ L_{2−s} (−Δ)⁻¹`, from Repulsive Surfaces `[RS §5.2]` (arXiv:2107.01664), which
+replaced multigrid precisely to avoid a hierarchy. It transfers to curves: the authors' own
+[Repulsor](https://github.com/HenrikSchumacher/Repulsor) is templated on `DOM_DIM`, and `DOM_DIM=1`
+is curves.
+
+**Exponent check passes, verified in source not assumed.** `src/core/sobolev/innerProduct.ts:52-54`:
+
+```ts
+const s = (beta - 1) / alpha;   // = 5/3 at alpha=3, beta=6
+const sigma = s - 1;            // = 2/3
+const distExp = 2 * sigma + 1;  // = 7/3
+```
+
+So `2 − s = 1/3 ∈ (0,2)` and the fractional operator is well posed. Two corollaries worth recording,
+because both have confused a reader already: `2s = 10/3 = 3.3333`, which is why
+`κ₂(A_σ) ∝ n^3.3338` measured (#59) matches theory to four digits; and the high-order kernel's
+distance exponent is `2σ+1 = **7/3**`, *not* `2s+1 = 13/3` — which is what #57's `d^{-7/3}`
+quadrature argument (§5.4) refers to.
+
+**Mesh independence is measured, and it is the economic case for the whole phase:**
+
+| | n=64 → 1 920 |
+|---|---|
+| `κ₂(A_σ)` unpreconditioned | 1.37e4 → **1.63e8** (`∝ n^3.3338`) |
+| `κ₂(Ã⁻¹A_σ)` | **1.09765e4 → 1.12690e4** (`∝ n^0.0010`) |
+
+Five orders of magnitude of conditioning growth removed, flat to within 2.7 % over a 30× size range.
+
+> **Trap, measured, do not rediscover.** The RS preconditioner is **worse than no preconditioner
+> below n ≈ 223.** Unpreconditioned GMRES needs 45 iterations at n=64 where RS needs 29, but the
+> crossover is real and the dense path stays the right answer at small n. Also: unpreconditioned CG
+> is measured at **1 217 iterations at n=960** growing superlinearly, and Jacobi buys 9.6 %. **Build
+> the BCT before the preconditioner and you will measure a regression and blame the wrong
+> component.** The preconditioner lands first or together, never after.
+> @issue utof/repulsive-test2#51 (trap 1)
+
+`L_{2−s}` is 3 columns on the same tree and the same block lists as `A`, costing ~+25 % of the near
+work. **It has never been implemented and never been measured** — its +43 ms is derived from a 3/12
+column ratio, and the original 30k projection did not count it at all.
+
+### 5.3 GMRES — left preconditioning, and never trust the recurrence residual
+
+**Left preconditioning is mandatory.** Right-preconditioned f32 gives `cos∠_A = 0.142264` at n=480
+**while its recurrence residual reads a healthy 1e-4**. The direction is destroyed and the solver's
+own convergence number says it succeeded.
+
+**The recurrence residual is not a convergence criterion.** Left-preconditioned, it measures
+`‖Ã⁻¹r‖/‖Ã⁻¹b‖`, which under-reports the true relative residual by **3.9e3–6.6e3×** even in exact
+arithmetic. Worked example, n=960, δ=0, stopped at 1e-4: recurrence reads **1.0e-04**, the true
+relative residual is **6.378e-01**, and the backward error is 6.733e-06. All three are "the
+residual" and the outer two differ by **five** orders of magnitude (6.378e-01 vs 6.733e-06).
+
+**Rulings:**
+- Report the recurrence residual as a **labelled non-gate diagnostic**, never as the convergence
+  value. §7's gates recompute from `b` and an exact matvec.
+- The stopping tolerance is a **parameter**, recorded per solve, never a constant buried in the
+  loop. H2 and H3 pin different values (§7) and both must be reachable.
+- `maxit` is recorded alongside the iteration count so a censored count is detectable (§7, H3's
+  INVALID predicate).
+
+### 5.3.1 The iteration count is NOT settled, and the quoted figure is from the wrong configuration
+
+Every projection to date — #51's, #57's, #64's cost table, and §3.5 above — multiplies the
+per-iteration cost by **26**, sourced to "GMRES iterations 21–26, flat n=64 → 960". Re-derived from
+the raw JSON, that figure does not support the architecture this spec mandates. **Three problems,
+found by reading `e1_gmres.py` and `e5_growth.py` against their own output.**
+
+**(a) The two experiments count iterations to different residuals, ~10× apart.**
+
+| | stopping quantity | source |
+|---|---|---|
+| **E1** | the **TRUE** relative residual `‖b − Ax_k‖/‖b‖` vs the exact f64 operator | `e1_gmres.py:30-32` — `tr = r["true"]`, then `first_below(tr, t)` |
+| **E5** | the **RECURRENCE** residual `|g[k+1]|/β₀` | `e5_growth.py:38-41` via `e2_inexact.gmres_stopped` |
+
+RS-preconditioned medians over the 5 pinned seeds:
+
+| | n=64 | 120 | 240 | 480 | 960 |
+|---|---:|---:|---:|---:|---:|
+| E1 true-residual, to 1e-2 (`rs/right/f64`) | 21 | 23 | 23 | 26 | 25 |
+| E1 true-residual, to 1e-4 | 29 | 33 | 36 | 38 | 39 |
+| **E5 recurrence, to 1e-2** | **2** | **2** | **2** | **2** | **3** |
+| **E5 recurrence, to 1e-4** | **8** | **7** | **6** | **6** | **7** |
+| E5 recurrence, to 1e-8 | 29 | 33 | 25 | 20 | 17 |
+
+**(b) The quoted 21–26 is RIGHT-preconditioned, and §5.3 forbids right preconditioning.**
+`e1_gmres.py:62-67` enumerates exactly six cases — `none/right/f64`, `none/right/f32`,
+`jacobi/right/f32`, `rs/right/f64`, `rs/right/f32`, `rs/left/f32`. **There is no `rs/left/f64` case
+anywhere in E1**, so the left-preconditioned f64 count — what the production reference path actually
+does — has never been measured. The one left case, `rs/left/f32`, gives to-1e-2 counts of
+**25 / 28 / 28 / 33 / 35**: a **×1.4 increase** across n=64→960, *not* flat, and censored at 1e-4
+for n ≥ 480.
+
+**(c) The recurrence residual's under-reporting factor grows as `n^3.06`.** `recTrueGapMax`
+(true ÷ recurrence at the last probed iteration) for `rs/left/f32`:
+
+| n | 64 | 120 | 240 | 480 | 960 |
+|---|---:|---:|---:|---:|---:|
+| gap | 4.372e8 | 1.404e9 | 1.142e10 | 2.056e11 | **1.717e12** |
+
+**3 926× growth over n=64→960, fitted exponent +3.056** — tracking `κ₂(A_σ) ∝ n^3.3338`. So the
+left-preconditioned recurrence residual is not merely a constant ~6 000× optimistic (§5.3's
+headline, which is the *median* gap): **the optimism itself grows as n³.**
+
+> **Ruling, and it is the single most consequential one in this document.** An iteration count
+> measured against the recurrence residual gates a quantity whose **stopping criterion gets
+> monotonically easier as n grows**. The flat-or-falling RS count (29/33/25/20/17 at τ=1e-8) is
+> partly an artefact of that, not evidence of mesh independence.
+>
+> **This is precisely the error #59 retracted for H1's β** — *"a relative criterion cannot gate a
+> quantity whose anchor is degrading"* — committed against a different anchor that degrades ~500×
+> faster. §7's H3 therefore **may not count to a recurrence-residual tolerance.** It counts to a
+> true-residual or backward-error tolerance formed with the exact χ=0 matvec (one exact matvec per
+> probe, gate mode only — H1/H2 already require that entry point), or it gates the gap's growth
+> exponent as an explicit companion property. §7 states which.
+>
+> @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.3.1
+
+### 5.3.1a The missing measurement, now made
+
+`rs/left/f64` was run while authoring this spec — `scratch/e1b_left_f64.py` →
+`scratch/e1b-left-f64.json`, same `gmres` from `gmres_lab.py`, same five pinned seeds, same
+tolerances, counts against the true residual exactly as `e1_gmres.py:30-32` does.
+
+**`rs/right/f64` was re-run in the same script as a reproduction control, and it reproduced E1's
+published row exactly at all five sizes (21 / 23 / 23 / 26 / 25).** Without that the new numbers
+would be worthless; it is asserted in the script and recorded as `controlReproducesE1: true`.
+
+Median iterations to a **true** relative residual, over the 5 pinned seeds:
+
+| case | n=64 | 120 | 240 | 480 | 960 | growth |
+|---|---:|---:|---:|---:|---:|---:|
+| to 1e-2, `rs/right/f64` *(control — E1's published row)* | 21 | 23 | 23 | 26 | 25 | ×1.19 |
+| **to 1e-2, `rs/left/f64`** ← **the mandated architecture** | **25** | **27** | **26** | **32** | **32** | **×1.28** |
+| to 1e-2, `rs/left/f32` | 25 | 28 | 28 | 33 | 34 | ×1.36 |
+| to 1e-4, `rs/right/f64` | 29 | 33 | 36 | 38 | 39 | ×1.34 |
+| **to 1e-4, `rs/left/f64`** | **29** | **35** | **38** | **41** | **42** | **×1.45** |
+| to 1e-4, `rs/left/f32` | 29 | 35 | 40 | **—** | **—** | *cannot reach 1e-4 at n≥480* |
+
+**Three results, all MEASURED:**
+
+1. **The mandated configuration costs ~28 % more iterations than the quoted one.** At n=960, left
+   f64 needs **32** to 1e-2 where right f64 needs 25. **§3.5's budget multiplier is 32, not 26** —
+   and **42** if the solve must reach 1e-4.
+2. **It is mildly growing, not flat** (×1.28 to 1e-2, ×1.45 to 1e-4 over a 15× size range). The
+   "flat in n" claim was a property of the right-preconditioned row.
+3. **In the honest currency, mesh independence holds anyway.** `G(n) = iters(2n)/iters(n)` on the
+   three **true** doublings, left/f64, to 1e-4: **1.0857 / 1.0789 / 1.0244** — under 1.09, and
+   *decreasing*. Against baselines of 2.0211 (none) and 2.0518 (Jacobi). This is a better-founded
+   H3 than either candidate derived from the recurrence residual, and §7 uses it.
+
+**And the recurrence residual is unusable regardless of precision.** `recTrueGapMax` for `left/f64`
+is 2.89e4 / 8.37e4 / 7.52e5 / 8.94e6 / 3.22e7 — **exponent +2.59**. The n³ degradation in §5.3.1(c)
+is a property of *left preconditioning*, not of f32. Note also that for `right/f64` the recurrence
+and true counts are **identical** (21/23/23/26/25 both ways), which is the documented exact-arithmetic
+property of right preconditioning — and precisely why the right-preconditioned row looked so clean.
+
+> **The trade this spec is making, stated plainly.** Right preconditioning gives a cheaper iteration
+> count *and* a recurrence residual that means what it says. It is nonetheless **forbidden**,
+> because at f32 it destroys the descent direction (`cos∠_A = 0.142` at n=480 while reporting 1e-4).
+> Left preconditioning costs ~28 % more iterations and a residual that must be recomputed externally.
+> **That is the correct trade**: a 28 % cost is recoverable, a silently wrong direction is not.
+> @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.3.1a
+
+### 5.3.2 The f32 wall, measured directly rather than extrapolated
+
+`e1-gmres.json` `trueFloorMin` — the smallest true relative residual the solve ever reaches:
+
+| n | 64 | 120 | 240 | 480 | 960 |
+|---|---:|---:|---:|---:|---:|
+| `rs/left/f32` | 6.68e-7 | 3.56e-6 | 2.43e-5 | 5.26e-4 | **5.04e-3** |
+| `rs/right/f32` | 6.07e-4 | 4.05e-3 | 4.32e-2 | 2.88e-1 | **6.30e-1** |
+| `rs/right/f64` | 1.77e-12 | 1.40e-11 | 1.61e-10 | 2.26e-9 | 2.94e-8 |
+
+**At n=960 the f32 solve's true residual never gets below 5.0e-3**, and right-preconditioned f32
+never below 0.63. This is a direct measurement, it needs no extrapolation, and it bites **much
+earlier than #59's superseded n≈3 310 crossover**. It is independent corroboration of §6's ruling that
+f32 is an inner solver only — and it suggests the mixed-precision switch belongs well below n=2 000,
+not at the wall.
+
+### 5.4 The near field must use the repo's quadrature
+
+The hierarchical operator's near field uses the repo's **4-point endpoint** rule, matching
+`assembleAFlat`. It must not use `[YSC]` Eq. 32's 1-point midpoint rule.
+
+**The two disagree by 33.9 % at n=960 with no BCT involved anywhere** — it is a direct comparison of
+the O(m²) double sum under the two rules on `torusKnot(960)`, pinned to `assembleAFlat` at
+~1.4e-15. (32.6 % at n=400; two points, slowly growing rather than converging.) The mechanism: for a
+nearly-adjacent disjoint edge pair the closest endpoint pair is about half the midpoint distance,
+and the kernel goes as `d^{-7/3}` (= `d^{-(2σ+1)}`, §5.2).
+
+**Mandated:**
+1. Near-field kernel = the repo's 4-point endpoint rule (4 `sqrt` + 4 `pow` per pair vs 1).
+2. The far field has no choice — a rank-1 lump *is* a midpoint rule. Accepted.
+3. Every golden/oracle comparison is against `assembleAFlat`, **never** against an Eq.-32-verbatim
+   reference.
+4. A V0-style bit-level pin (`exactA(endpoint4)·u` vs `assembleAFlat·u` ≲ 1e-15) is a **unit gate**,
+   not a spike check.
+
+> **Caveat the spec carries, because no saved artefact backs the headline number.** The 33.9 % is
+> console output of a spike script; no JSON or log in `scratch/` contains it, and it was reproduced
+> in prose by #64 but never re-measured. **Item 4 above is therefore load-bearing**: it converts an
+> unreproducible spike number into a standing test. Re-measure once while implementing it and record
+> the value.
+>
+> Separately: the shipped BCT is a **hybrid** — `endpoint4` near, midpoint rank-1 far — and its
+> error is measured against pure `endpoint4`. So the 4.039e-2 truncation contains a far-field
+> midpoint-vs-endpoint component that was never separated out. Far blocks are θ-separated so it
+> should be small; it is not measured.
+
+### 5.5 The tree
+
+- **BVH over R⁶ tangent-points** `(x_I, T_I)`. Split axis cycles the six coordinates, choosing the
+  axis that minimises the sum of squared child-box diameters; the splitting plane is the **per-axis
+  median** (quickselect). The median was chosen because the paper does not say which candidate plane
+  it scores, and median guarantees balance — **at the price of the power-of-two leaf quantisation
+  that makes κ_near and c₁ oscillate** (§3.2, §4.3). A SAH or midpoint split would change that
+  oscillation and is **untested**.
+- **Leaf size 8** (max; mean 4.88–7.81). Swept once only, at n=960 θ=0.5: leaf 4/8/16/32 gives
+  κ_near 36.2/93.3/220.8/474.4 and `relErrRandom` 5.699e-2/4.039e-2/3.960e-2/3.869e-3. There is **no
+  leaf sweep at n=30 000, no leaf×θ grid, and no timing per leaf** — so **leaf=8 is a convention,
+  not an optimum.** Recorded as such; §9.3 lists the sweep as cheap future work.
+- **Admissibility** = `[YSC]` Eq. 28 barycentre form `max(r_x^A, r_x^B) ≤ θ·|x_A − x_B|`, with the
+  tangent-space parameter `θ_T` **off**. For an inadmissible pair where exactly one node is a leaf,
+  split the other (a deviation from the paper, recorded).
+- **Barycentre separation is more permissive than Repulsor's.** `[RS §5.1.4]` separates on
+  `dist(conv(I), conv(J))` via GJK; barycentre distance ≥ hull distance, so this tree **admits more
+  blocks than Repulsor's would** and every near count here is an optimistic lower bound. By how
+  much is **not measured.**
+
+### 5.6 Module layout
+
+```
+src/core/sobolev/hierarchical/
+  bvh.ts           # R⁶ tangent-point BVH, median split, leaf=8
+  bct.ts           # block cluster tree: admissible/inadmissible block lists, adjacency veto
+  nearField.ts     # endpoint4 near assembly (once per gradient step) + the precomputed arrays
+  apply.ts         # the 12-column traversal; f32 and f64 accumulator variants of ONE code path
+  operator.ts      # A_bct as a SobolevOperator (§5.1): applyA, trace/sigma, K1 and K⁰1
+  laplacian.ts     # (−Δ)⁻¹, Sherman–Morrison cyclic tridiagonal (NR §2.7)
+  lowOrder.ts      # L_{2−s}, 3 columns on the same tree
+  precond.ts       # Ã⁻¹ = (−Δ)⁻¹ L_{2−s} (−Δ)⁻¹, with the constant-mode correction
+  gmres.ts         # left-preconditioned GMRES; exposes iters, maxit, tol, per-iter recurrence
+  nullspace.ts     # the k=O(n) constraint route (§8)
+```
+
+**Non-negotiable structural requirement: f32 and f64 are accumulator variants of ONE traversal, not
+two implementations.** Two reasons, both measured: H1's `δ_precision` is defined as f32-vs-f64 *at
+the same θ* and is meaningless if the traversals differ; and this repo has already been burned by an
+f64 simulation of an f32 kernel reporting zero error and hiding the bug. χ (or θ) is a **runtime**
+parameter whose minimum value is the exact all-inadmissible path, through the same traversal code —
+§7's H1 INVALID predicate exists to catch a χ that was never plumbed.
+
+---
+
+## 6. Precision: f32 is an inner solver, never the solver
+
+**Plain f32 walls at n ≈ 1 200–2 000.** Four agreeing derivations (tabulated in §7.11), and the
+mechanism is not the BCT:
+`κ₂(A_σ) ∝ n^3.3338` measured against `2s = 10/3` theory, so `κ₂·u_f32` reaches 0.838 by n=1 920.
+**The BCT fixes storage and cost. It does nothing whatsoever for conditioning.**
+
+Directly measured on the real hierarchical operator at n=2 000, min over 5 rhs, stopped
+left-preconditioned GMRES @1e-4:
+
+| θ | f64 `cos∠_A` | f32 `cos∠_A` |
+|---:|---:|---:|
+| 0.5 | 0.998280 | **0.924352** |
+| 0.25 | 0.999595 | **0.904223** |
+| 0.1 | 0.999628 | **0.773241** |
+
+**The wall is θ-independent and θ cannot buy it back** — θ=0.1, the *most accurate* operator, is the
+**worst** in f32.
+
+> **#59's n ≈ 3 310 is superseded; do not quote it.** That crossover reproduces exactly and is wrong
+> for one reason: it substitutes the **dense `sgemv`** f32 floor for the **hierarchical apply** noise,
+> which §7.2 measures at 5–13× larger and growing 2–3× faster. §7.11 gives the four corrected
+> derivations (1 228 / 1 773 / 1 225 / 1 900) and the one statement that needs no fit at all: at
+> n=1 920/2 000 the MEASURED hierarchical f32 low-kernel apply noise (8.123e-06) is **5.9× ABOVE**
+> the MEASURED random-direction tolerance (1.383e-06), while at n=960 it is **0.30×** of it. **The
+> crossing is strictly inside (960, 2 000], measured.** (The upper end is 2 000, not 1 920: the apply
+> noise is measured at n=2 000 and the tolerance at n=1 920, and no n above 960 has both.)
+
+**Ruling: the f32 hierarchical apply is the inner solver of a mixed-precision scheme.** The outer
+iteration and all orthogonalisation stay f64. Above the wall, an f32-only configuration is
+**declared out of range by the gates' own output** (§7.11) — the gates' result, not their failure.
+
+**What gates the scheme is H5 property 3: `κ₂(Ã⁻¹A_σ)·u_inner ≤ 1e-2`** (MEASURED 6.716e-04, 14.9×
+margin, flat in n). This is the operative number, and it is why the preconditioner is not optional:
+`κ₂(A_σ)·u_f32` reaches 1 at **n ≈ 2 025** (DERIVED from the MEASURED 0.8369 at n=1 920 and the
+MEASURED `n^3.3338` law: `1920 × (1/0.8369)^(1/3.3338)`), while the *preconditioned* number does not move
+at all over n=64…30 000. Carson & Higham (2018) `[CH18]` is the precondition
+(`φ = (c₁κ∞(A)+c₂)u_s` sufficiently less than 1); property 3 quantifies "sufficiently" at 100×.
+
+> **Range caveat that is load-bearing:** `κ₂(Ã⁻¹A_σ)` is MEASURED flat only to n=480 in JSON (and
+> *reported* to n=1 920 with no surviving artefact — §7.8). **Above n=1 920 its flatness is ASSUMED**,
+> and that assumption carries the whole mixed-precision scheme. §7.11 item 2 is the run that closes
+> it, and it does not need a dense matrix.
+
+**Above n ≈ 960 no reference-free gate can detect the f32 wall** — only H1-b (operator-level,
+extrapolated at the target) and H4a (needs a dense f64 reference, so it stops at n≈960). §7.11 states
+this as a pre-registered limitation rather than leaving it implicit.
+
+> **Both f32 measurements share one caveat, and its sign is now known — it is UNSAFE, not safe.**
+> #59's and #64's f32 arms are **dense f32 matvecs of the hierarchical matrix**
+> (`scratch/gmres_lab.py:67-75`), not genuine f32 hierarchical applies. #59 argued this is
+> conservative, on the reasoning that a real BCT sums hierarchically so its f32 floor must be
+> *lower*. **MEASURED, that reasoning is falsified by 5–13× in the unsafe direction:** the
+> hierarchical apply noise at n=960 is 1.064e-06 (high kernel) / 3.002e-06 (low kernel) against the
+> dense `sgemv`'s `alphaMatvecF32 = 2.229e-07`, and it grows `n^0.829`/`n^1.176` against the dense
+> floor's `n^0.370`. This single correction is what moves the wall from n≈3 310 to n≈1 228–1 773.
+>
+> **A genuine f32 hierarchical apply driven through the whole solve has still never been run**, and
+> it remains the single highest-value unknown in this spec — the one measurement that could
+> invalidate §7.11's range ruling in either direction. §7.11 item 1 and §11 make it a task.
+
+> **Trap, measured, not transferable.** WGSL permits reassociation and fusion with **no portable
+> opt-out** ([gpuweb#2076](https://github.com/gpuweb/gpuweb/issues/2076), open since 2021), and
+> naga/wgpu is *measured* to delete Dekker compensation terms where Dawn preserves them. Firefox
+> uses naga, Chrome uses Dawn. **Compensated-arithmetic results are not transferable between
+> browsers**, so any gate that depends on them records its adapter and is INVALID on an uncertified
+> one.
+
+---
+
+## 7. Pre-registered kill gates
+
+<!-- GATES:BEGIN -->
+### 7.0 How to read this section
+
+Every gate is **pre-registered here, before implementation**, per CLAUDE.md ("pre-registered kill
+gates go in the spec, not the plan"). Each carries a quantity, a bar, an INVALID predicate set, at
+least one knock-out that must trip it, and at least one case that must NOT trip it.
+
+**Number tags, used on every value below.** `MEASURED` (JSON artefact + key exists), `DERIVED`
+(arithmetic from measured inputs, shown), `CHOSEN` (a criterion, not a measurement), `EXTRAPOLATED`
+(a fit). **A bar is never EXTRAPOLATED.** Fits appear only in non-vacuity arguments.
+
+**Three verdicts, not two.** `GREEN` / `RED` / `INVALID`. `INVALID` means the gate did not measure
+what it claims to measure, and it is **not** a pass — a run with any INVALID gate cannot be
+published as a result. This distinction is load-bearing: memory `gates-name-their-impossible-values`
+— a gate that cannot be tripped reads exactly like one that passed, and §7.4's H4b history is this
+repo's own instance of that failure.
+
+**Where a bar's basis changed from #59, §7 says so and §10.2 carries the retraction.** The full
+re-derivation from raw JSON, with every reproduction and every confusion matrix, is
+`.superpowers/sdd/2026-09-11-phase2h-queue/reports/gate-recalibration.md`. That report is the
+evidence; this section is the ruling.
+
+### 7.1 The set
+
+| gate | gates what | bar | mode | binds at n=30 000? |
+|---|---|---|---|---|
+| **H1-a** | θ-monotonicity of the compression error | `δ_compress(θ_{k+1}) ≤ 1.001·δ_compress(θ_k)` descending | calibration | yes |
+| **H1-b** | the f32 accumulation band | `δ_precision ≤ 10·(κ_near+κ_far)·u_f32` | calibration | yes — and it is one of only two gates that can see the f32 wall |
+| **H2** | solve backward error, run to the floor | `η ≤ 50·u_f32 = 2.98e-6` | calibration | yes (8.2× margin, EXTRAPOLATED) |
+| **H3** | iteration count, and its growth | `iters(30 000) ≤ 64`; companion `G ≥ 2.0 ⇒ RED` | calibration | yes |
+| **H4a** | direction quality against an f64 reference | `min cos∠_A ≥ 0.9` | calibration | **no — vacuous above n≈960, and that is its output** |
+| **H4b′** | direction quality, reference-free | `min q > 0` | **per-solve, production** | yes |
+| **H4c** | end-to-end energy decrease + acceptance | `R_E ≥ 0.95` **and** accepted fraction `== 1.0` | calibration | yes |
+| **H5** | preconditioner integrity (3 properties) | nullity `== 1`; `\|p\| ≤ 0.05`; `κ₂(Ã⁻¹A_σ)·u_inner ≤ 1e-2` | calibration | properties 1 and 3 yes; property 2 limited to n ≤ 1 920 |
+| **H6** | the θ default, under an adversarial rhs | `cos∠_A ≥ 0.9` at θ=0.5 on the sub-0.9 modes | calibration, **once** | decides §4.1, does not kill the phase |
+| **R1** | reporting obligation, not a kill gate | three served-N ceilings, each with its binding gate's VALUE | — | — |
+
+**No gate in H1–H6 reads a clock.** Every gated quantity is a norm ratio, an integer count, a
+nullity, or a boolean. Issue #63 (`timestamp-query` returns all zeros on this host) therefore blocks
+nothing in this section. H3's *bar* imports an extrapolated GPU per-iteration time as a **budget
+constant written into this spec** — the gate still only counts integers, and if that constant is
+later measured the bar changes while the gate does not.
+
+**Coupling, which #59 left unstated.** H1-a, H2 and H4b′ all consume the χ=0 exact matvec. An
+INVALID H1 at a given n makes **H2 and H4b′ INVALID at that n as well.** This is the difference
+between one bad gate and three silently-green ones.
+
+**The χ=0 reference must stream.** Not a materialised near-block list, not precomputed near values.
+At N=30 000, L=8 a materialised block list is 1.4e7 entries (~112 MB) and precomputed near values
+are `2 × N(N−1)/2 × 4 B = ` **3.60 GB** — which is the dense storage this whole phase exists to
+escape, and it exceeds the Quadro RTX 3000's 6 GB. The measured 12.75× speed-up from precomputing
+(#57) is a real and measured incentive to violate this, which is why it is a requirement and not a
+preference. Cost of compliance: **63.58 ns per pair·column** (MEASURED, 1-thread CPU f64) ⇒ `N(N−1)/2
+= 4.4998e8` pairs × 12 columns = **343 s ≈ 5.7 min per exact matvec at N=30 000.** This is why
+H1/H2/H4a/H4c are calibration-mode gates and H4b′ is the only one that runs per solve.
+
+### 7.2 H1 — operator fidelity: record the triple, gate monotonicity and the precision band
+
+**There is no bar on δ's magnitude.** `δ` is RECORDED, not gated. Three candidate anchors for a
+magnitude bar all require a dense matrix and so are unmeasurable above N ≈ 5 793 — the very cap this
+phase exists to escape (§1.2): `α = alphaMatvecF32` is a dense f32 `sgemv`; `β_struct` is bisected by
+repeatedly solving with a dense `A_σ + δ‖A_σ‖₂E`; and the **margin `β_struct ÷ δ₂` = 5.01/4.94/4.76/
+5.16×** (MEASURED, n=240/480/960/2 000) is flat in n because numerator and denominator scale
+together, so as a *predicate* it reduces to `δ ≤ 4.8·δ`, true for any operator. **That margin is a
+margin report, not a bar** — §4.2 lists it as evidence, and it must never be quoted as a gate.
+
+Independently: #59's `δ_bar = √(α·β) = 4.41e-04` against a **correct** operator's MEASURED
+`δ_total = 2.236e-02` at n=960 would put a working implementation permanently 50× over its own bar.
+
+**Recorded triple, per gated n, on the 5 pinned rhs directions:** `δ_compress` (θ-matvec vs χ=0, both
+f64), `δ_precision` (f32 vs f64, same θ), `δ_total` (f32 θ-matvec vs f64 χ=0).
+
+**H1-a — bar: `δ_compress(θ_{k+1}) ≤ 1.001 · δ_compress(θ_k)`** on the descending ladder
+θ ∈ {0.5, 0.25, 0.1}, per fixture, per n. CHOSEN form (the 1.001 absorbs f64 reduction-order noise);
+**MEASURED 15/15 cells** on the existing accuracy sweep, tightest margin 12 % (n=4 000, 0.5→0.25).
+This is a *structural* bar: it contains no n and no absolute level, so it is non-vacuous at every
+scale forever. What it checks is that refining θ actually refines the operator — i.e. that θ is
+genuinely plumbed through the traversal and that admissibility is not inverted.
+
+*Knock-outs.* (1) θ hardcoded to the production value ⇒ all three rungs return the same number ⇒
+passes `≤ 1.001` but trips the INVALID tie predicate. This is exactly why ties must be flagged rather
+than silently accepted. (2) Admissibility test inverted (`≥ θ·|x_A−x_B|`) ⇒ `δ_compress` rises as θ
+falls ⇒ **RED**; NOT MEASURED, one sign flip in `bct.ts` to produce. (3) *Must NOT trip:* the
+`circle` fixture's 0.5→0.25 tie (`κ_near` identical) ⇒ **GREEN with tie flag**, MEASURED.
+
+**H1-b — bar: `δ_precision ≤ 10 · (κ_near + κ_far) · u_f32`**, `u_f32 = 5.96e-08`. DERIVED from the
+worst-case relative error `≈ m·u` of a sequential f32 sum of `m = κ_near + κ_far` terms; the **×10 is
+CHOSEN** headroom for the per-kernel `pow`/`sqrt` chain. At n=960, θ=0.5: `κ_near = 93.3`,
+`κ_far = 3.68` (MEASURED) ⇒ bar **5.78e-05**, against a MEASURED hierarchical apply noise of
+1.064e-06 (high kernel) / 3.002e-06 (low kernel) and #64's independent combined-apply check at
+1.533e-06 ⇒ **19–54× margin.**
+
+> **Provenance caveat on 1.533e-06.** That value is a console-only check
+> (`scratch/run-64-verify.ts:129`) that writes no JSON, so it is REPORTED, not archived — the same
+> defect class as H5 property 2's missing support (§7.8). The 19–54× margin does **not** depend on it:
+> the archived `out-accuracy.json` `f32NoiseHi = 1.0639e-06` and `f32NoiseLow = 3.0024e-06` give
+> 19–54× on their own. The gate harness must emit `h1bValue` to JSON so this stops being
+> report-only.
+
+This bar exists because **#59's conservatism assumption is falsified by #57's own JSON, in the unsafe
+direction, by 5–13×.** #59 justified using the dense `sgemv` α as H1's floor by asserting that a BCT
+sums hierarchically so its f32 floor must be *lower*. MEASURED at n=960: hierarchical apply noise
+1.06e-6 / 3.00e-6 versus dense `sgemv` `alphaMatvecF32 = 2.229e-07`, and the hierarchical noise grows
+`n^0.829` / `n^1.176` against the dense floor's `n^0.370` (4-point fits, R² 0.996 / 0.985,
+EXTRAPOLATED). §7.8 is where that correction lands.
+
+*Knock-outs.* (1) f64 accumulator ⇒ `δ_precision → O(1e-16)` and `δ_total → δ_compress`; a *must-NOT-
+trip* consistency check whose second half is the INVALID triangle clause. MEASURED anchor: 1.533e-6
+f32-vs-f64, identically 0 for f64-vs-f64. (2) Accumulator truncated to f16, or a lost
+pairwise/Kahan sum ⇒ the same model predicts `97 × 4.88e-4 = 4.7e-2`, **820× over the bar.**
+**NOT MEASURED — this knock-out must be produced during implementation** (§7.11 item 8).
+
+*INVALID (any ⇒ H1, H2 and H4b′ all INVALID at that n).*
+
+| predicate | what it means |
+|---|---|
+| `δ_compress(θ=0.5) == δ_compress(θ=0.1)` exactly, at a fixture where `κ_near` differs between the two | θ/χ was never plumbed; one code path is being compared with itself |
+| `δ_total > 1.01·(δ_compress + δ_precision)` | violates the triangle inequality ⇒ the three were measured against *different* references |
+| `δ_total < δ_precision / 2` | `δ_total` cannot be materially smaller than its own precision component |
+| `AdapterCertification.classification ≠ 'hardware'` (`bench/gpu/adapterCert.ts:48`) | ran on a software adapter |
+
+### 7.3 H2 — solve backward error, run to the floor, independent of H1
+
+```
+η(x̃) = ‖b − A_σ x̃‖₂ / ( ‖A_σ‖₂·‖x̃‖₂ + ‖b‖₂ )
+```
+Rigal–Gaches (1967) / Higham, *ASNA* Thm 7.1. **Bar: `η ≤ 50·u_f32 = 2.98e-06`** — CHOSEN multiplier
+over a MEASURED floor.
+
+`β_η = 0.43·β_H1` is **RETRACTED** on two independent grounds: it inherits H1's dead random-E anchor,
+and the 0.43 transfer was measured for random E only — the η-per-structured-δ ratio is measured
+nowhere. Worse, at a 1e-4 recurrence stop a **perfect** operator (δ=0) is RED against `β_η` at every
+n by 1.58–3.68× (MEASURED: η = 1.705e-02 / 3.470e-03 / 6.231e-04 / 6.215e-05 / 6.733e-06 at
+n=64…960 vs `β_η` = 8.93e-3 / 9.85e-4 / 1.69e-4 / 3.08e-5 / 4.26e-6), and still RED at a 1e-6 stop
+for n ≥ 240. **So the stopping rule is not a detail: H2 is only meaningful run to the floor.**
+
+**Pinned decisions.**
+- **Run to the floor.** `maxit = min(600, 2·dim)` — exactly E1's budget, so the measured floors
+  transfer literally — and the gated value is `min over probed iterates of η`.
+- `A_σ x̃` from the **χ=0 exact, streaming** matvec, recomputed from `b`. **Never** the BCT used
+  inside the iteration.
+- **`‖A_σ‖₂` from 30 power iterations on the HIERARCHICAL (θ) matvec**, not the χ=0 one. This is a
+  change from #59 and it is what makes H2 affordable: 30 χ=0 matvecs is 2.86 h of 1-thread CPU at
+  N=30 000. Justified MEASURED: the generalized spectrum of `(A_bct,σ, A_σ)` lies in `[0.9240,
+  1.0333]` at **θ=0.25** — but production is **θ=0.5**, where the same generalized spectrum reaches
+  `c₁ = 0.2886`, i.e. a ≤ 71 % deviation, not 7.6 %. **The first draft of this section quoted the
+  θ=0.25 figure against a θ=0.5 production path; that was the wrong number.** The ruling survives on a
+  different and tighter measurement: what H2 needs is the ratio of the *largest* eigenvalue (the
+  2-norm), not the spread of the whole spectrum, and `lamMaxBct/lamMaxA` deviates by **≤ 0.53 %** at
+  every measured n and θ (`out-64-direction.json`). That is sound for the physical reason that the top
+  eigenvector is smooth and therefore well approximated by the far-field expansion — **the
+  poorly-approximated modes sit at the bottom of the spectrum, which a norm estimate never sees.**
+  A ≤ 0.53 % error in a **denominator**, against a bar with ≥ 25× margin. At n ≤ 960 both values are
+  recorded, so the transfer is pinned rather than assumed.
+- **30 power iterations suffices, for a reason #59 did not state.** `A_σ`'s top eigenvalues are nearly
+  degenerate: for order `2s = 10/3` the relative gap is `(1+2/n)^{2s} − 1 ≈ 6.67/n` = 0.70 % at n=960
+  and 0.022 % at n=30 000 (DERIVED; MEASURED anchor `lamMaxA == normAsigma2` at every n). Convergence
+  is therefore slow **and the answer is correspondingly insensitive** — the value error is bounded by
+  the relative gap, which *shrinks* with n. The residual risk is a start vector nearly orthogonal to
+  the top block, which INVALID clause 4 catches for free.
+
+**Two anti-traps, both verified in source.**
+1. **Not `structuredSaddleResidual`** (`src/core/sobolev/linsolve.ts:860`; call sites `:850`, `:953`).
+   Three reasons: its `Math.max(1, Math.sqrt(rhsNormSq))` denominator makes it not a relative residual
+   when `‖rhs‖ < 1`; it sums the **constraint rows** too, so it is a saddle-system residual, not
+   `A_σ`'s backward error; and it takes `a: Float64Array` and runs a triple loop over `n`, i.e. **it
+   requires the dense matrix and cannot exist on the hierarchical path at all.**
+2. **Not the recurrence residual.** Left-preconditioned, that is `‖Ã⁻¹r‖/‖Ã⁻¹b‖`, and its MEASURED
+   under-report is **4.372e8 / 1.404e9 / 1.142e10 / 2.056e11 / 1.717e12** at n=64…960 — 3 926× growth,
+   fitted exponent **+3.056**, tracking `κ₂(A_σ) ∝ n^3.334`. §5.3 is the rule; this is the number.
+
+| | n=64 | 120 | 240 | 480 | 960 |
+|---|---:|---:|---:|---:|---:|
+| `etaFloorMax`, worst of 5 directions, MEASURED | 4.503e-08 | 5.762e-08 | 6.567e-08 | 8.475e-08 | **1.182e-07** |
+| in units of `u_f32`, DERIVED | 0.76 | 0.97 | 1.10 | 1.42 | **1.98** |
+| margin to the 50 u bar, DERIVED | 66× | 52× | 45× | 35× | **25×** |
+
+`etaFloorMax ≈ 1.081e-08·n^0.3406` (R² 0.981, EXTRAPOLATED) ⇒ 3.62e-07 = 6.08 u at n=30 000, **margin
+8.2×**. The `n^0.34` growth is consistent with Carson & Higham (2018) `[CH18]` Cor. 4.2's `η ≲ p·u`
+for low-degree `p`. The fit is deliberately **not** in the bar; the bar is a constant and the fit is
+only the non-vacuity argument. **The ×50 is CHOSEN** to sit at roughly the log-scale centre of the
+850× gap between the worst measured floor (1.98 u) and the nearest real defect (knock-out 1 at
+1 678 u), rounded to one significant figure.
+
+*Knock-outs.* (1) Report the **recurrence** residual as η at n=960, δ=0, stop 1e-4: recurrence reads
+1.0e-04 = 1 678 u while the correct η is 6.733e-06 and the **true** relative residual is 6.378e-01 ⇒
+**RED**, 34× over bar, MEASURED. (2) A real operator defect, δ=1e-2 at n=960 ⇒ η = 3.672e-03 =
+61 602 u ⇒ **RED**, 1 232× over bar, MEASURED. (3) Measure η with the **BCT** instead of χ=0 at
+δ=1e-2 ⇒ η collapses toward stopping-tolerance level, i.e. a mis-measured η is *smaller* and reads
+**green** — so it is caught by INVALID clause 3, not by the bar. #59 listed this as a knock-out of
+the bar, which it is not. (4) *Must NOT trip:* δ=0 run to floor at every n=64…960 ⇒ **GREEN**, ≥25×
+margin, MEASURED.
+
+*INVALID.* `η == 0` exactly (the residual was formed with the operator that produced `x̃`); or
+`η < u_op/10` **where `u_op` is the unit roundoff of the operator's own precision** — #59's unscoped
+`η < u_f32/10` rules every correct f64 run INVALID, since the f64 arms reach `etaFloorMin` of
+2.047e-16…6.001e-16 (MEASURED), and §7.9's mixed-precision scheme has an f64 residual path by
+construction; or `η_exact` bit-equal to `η_bct` (both must be computed and recorded); or
+`‖A_σ‖₂_est < ‖A_σx̃‖₂/‖x̃‖₂`, i.e. the power estimate is below a free exact lower bound, so it never
+entered the top eigenspace.
+
+**Cost, and the one mitigation this spec picks.** One χ=0 matvec per probed iterate. At `maxit = 600`,
+N=30 000 that is 600 × 5.7 min = **57 h per direction** — not runnable. **Ruling: probe η on a
+two-stage schedule with the schedule RECORDED — every iterate to k=80, then every 20th.** This is
+MEASURED, not chosen: `e1-closer-0b-n*.json` `etaArgminIter` puts the floor at iterations
+**36–60** (per-seed, n=64…480), so a uniform `p = 20` would take only 2–3 probes before the floor and
+could miss it entirely. Cost at N=30 000: 80 + 26 = **106 probes ≈ 10.1 h per direction**, against
+the uniform-`p=20` schedule's 2.9 h — the extra 7 h is what buys a floor that is actually located.
+
+The schedule is safe in one direction only, and that is why a coarse tail is acceptable: the gated
+value is a *minimum* over probes, so a sparser probe can only report a **higher** η — conservative,
+no false pass. The dense head is what guarantees the minimum is not missed entirely.
+Secondarily, H2 is capped at the largest n where it is runnable, which R1 (§7.10) already puts at
+n ≈ 960 for the f32-only configuration.
+
+### 7.4 H3 — iteration count: the absolute count is primary, `G` is a companion
+
+**`α_G` is WITHDRAWN. Both of #59's candidate values are measured at a stopping rule this spec's §5.3
+forbids, and one of them is not an instance of the quantity it claims to measure.**
+
+Three independent reasons, all re-derived from raw JSON:
+
+1. **`G` is defined as `iters(2n)/iters(n)`, and 64→120 is ×1.875.** `α_G = 1.1034` (and the
+   D1-corrected 1.1379) is computed on that step. It is not an instance of `G` at all — a type error,
+   not a conservatism choice. The three *true* doublings in `e5-growth.json` are 0.7576 / 0.8000 /
+   0.8500.
+2. **Both are counted to a fixed *recurrence*-residual τ, whose optimism grows `n^3.056`** (§7.3
+   anti-trap 2). A count to a fixed recurrence τ is a count to a **monotonically easier** target as n
+   grows. The flat-or-falling series 29/33/25/20/17 is therefore partly a measurement artefact — and
+   this is precisely the error #59 itself retracted for H1's β ("a relative criterion cannot gate a
+   quantity whose anchor is degrading"), committed here against an anchor that degrades ~500× faster
+   than the one that triggered the retraction.
+3. #59's printed third value **1.5163 reproduces from no JSON** and must not be quoted (§10.3).
+
+**Quantity, re-specified:**
+```
+iters(n) = median over the 5 pinned directions of the iteration count to reach
+           η(x̃_k) ≤ τ_η,  τ_η pinned ONCE per gate run, identical at n and 2n,
+           η formed with the χ=0 exact matvec (H2's instrument)
+left-preconditioned GMRES, f32 operator, maxit RECORDED
+G(n) = iters(2n) / iters(n)
+```
+
+**H3 is measured on the f64 operator at `τ_η = 1e-8`, and that choice is forced.** MEASURED over the
+full ladder to n=1 920 (`e1-closer-0b-n*.json`, `rs/left`, median of 5, per-seed minimum in brackets):
+
+| `τ_η` | f32 operator, n=64…1 920 | f64 operator, n=64…1 920 | usable? |
+|---|---|---|---|
+| 1e-2 | 10, 2, 1, 1, 1, 1 | 10, 2, 1, 1, 1, 1 | no — met before the iteration does anything |
+| 1e-4 | 26, 27, 16, 3, **1, 1** | 26, 26, 15, 2, 1, 1 | **no — collapses** |
+| 1e-6 | 31, 35, 36, 32, **19, 12** [min 9] | 31, 33, 35, 31, 18, 11 [min 9] | **no — collapses one octave later** |
+| **1e-8** | **censored at every n** | **36, 42, 43, 41, 39, 37** [min 29] | **YES, f64 only** |
+| 1e-10 | censored | 39, 49, 52, 51, 47, 45 [min 38] | yes, but needlessly tight |
+
+**There is no fixed `τ_η` that is both reachable and non-degenerate on the f32 operator.** The f32 η
+floor is ≈3e-8, so 1e-8 censors 5/5 at every n, while 1e-6 — the tightest reachable f32 target —
+still decays to 12 by n=1 920. That is structural, not a tuning problem.
+
+**So H3 is defined on the f64 operator, and the scope limit is stated rather than hidden:** H3
+measures the **preconditioner's spectral mesh-independence**, which is a property of `Ã⁻¹A_σ` and
+therefore precision-independent. It does **not** test the production precision — that is H1-b's job
+(the apply perturbation) and H4a's (direction quality in f32). The f32 configuration's own iteration
+behaviour is RECORDED as a companion via run-to-floor: `etaArgminIter`, MEASURED at **41–60 and flat
+at ≈53–60 for n ≥ 240**.
+
+> **This is the second correction to this section, and the first one was mine.** The amended draft
+> pinned `τ_η = 1e-6` on the strength of the n ≤ 480 rungs alone (31/35/36/32, which looked flat).
+> The n=960 and n=1 920 rungs — measured 20 minutes later — are **19 and 12**. The pattern is
+> identical to the 1e-4 failure it replaced, one octave out. **§10.4's own process note is the
+> lesson: "extend every sweep one point past where the fit looks clean."** It was written in this
+> document and then violated in it. Any future change to `τ_η` must re-run the whole ladder to
+> n=1 920, not the first four rungs.
+
+> **This is a correction to this spec's own first draft, and it is the failure mode the whole section
+> is about.** The draft pinned `τ_η = 1e-4`. At that value the count falls `26 → 3` over n=64…480, so
+> the primary bar `iters(30 000) ≤ 64` would have been satisfied by **3**, with no INVALID predicate
+> able to catch it — a gate that cannot be tripped, exactly what memory
+> `gates-name-their-impossible-values` warns about, in the gate carrying the entire cost case. The
+> error in the reasoning was precise and worth naming: **a non-degrading residual *floor* does not
+> imply a non-degrading *level*.** η's floor grows only `n^0.34`, but η's level at a fixed iteration
+> count **falls as `n^-2.90`**, so a fixed loose target becomes monotonically easier with n — the
+> identical pathology this spec rejected the recurrence residual for (§5.3). Choosing a currency is
+> not enough; the target must also sit close enough to that currency's floor to stay hard. `1e-6` is
+> ~25× above the measured floor (≈4e-8): reachable at every n, trivial at none.
+
+**Why `η` and not the true relative residual.** Both are n-invariant *targets*; their attainable
+*floors* are not. MEASURED, `rs/left/f32`: `trueFloorMin` grows 6.68e-07 → **5.04e-03** over
+n=64…960 (**n^3.36**) while `etaFloorMax` grows 4.50e-08 → 1.18e-07 (**n^0.34**). A true-residual
+target of 1e-4 is therefore **unreachable in f32 at n ≥ 480** — `e1-gmres.json` returns `None` for
+all 5 seeds, which is exactly the censoring the INVALID set must catch — and 1e-2 is reachable only
+to n ≈ 1 225. **`η` is the only residual-family quantity whose floor does not degrade with n**, so it
+is the only one that can anchor an n-invariant count, and it unifies H2 and H3 on one instrument.
+
+**Bar: `iters(30 000) ≤ 64`.** CHOSEN, and it has two independent derivations that agree to 1.3 %:
+
+- **From the budget:** #51's 0.5 s per solve ÷ the optimistic 7.8 ms per iteration = 64. The 7.8 ms is
+  **EXTRAPOLATED** from #64's 6.3 ms GPU matvec × the measured `501/406 = 1.234` per-iteration factor
+  for `L_{2−s}` + 2×`(−Δ)⁻¹`, and rests on **zero GPU runs** (§3.6, §9.1).
+- **From the only left-preconditioned measurement that exists**, which this spec commissioned
+  (§5.3.1a, `scratch/e1b-left-f64.json`, control reproduces E1 exactly). `rs/left/f64`, median of 5,
+  counting to a fixed **true**-residual τ=1e-4 — a currency whose floor is ~1e-8 in f64 and therefore
+  does not degrade over this range:
+
+  | n | 64 | 120 | 240 | 480 | 960 |
+  |---|---:|---:|---:|---:|---:|
+  | `iters` to τ_true=1e-4 | 29 | 35 | 38 | 41 | **42** |
+  | true doublings `G` | — | — | **1.0857** | **1.0789** | **1.0244** |
+
+  `G` **decays toward 1** with n, i.e. asymptotic mesh independence, and the worst doubling is the
+  least asymptotic one. Projecting the worst sustained `G` from n=960 over `log₂(30000/960) = 4.9658`
+  doublings: `42 × 1.0857^4.9658 = ` **63.2**. With the last measured `G = 1.0244`: **47.4**. Both
+  under 64, from a MEASURED count on the correct preconditioning side.
+
+  **Superseded by the gate's own currency, which is better.** The above counts to a fixed *true*
+  residual; H3 counts to `τ_η = 1e-8` (see the ruling above), where the MEASURED ladder is
+  **36 / 42 / 43 / 41 / 39 / 37** over n=64…1 920 with true doublings **1.0238 / 0.9535 / 0.9512 /
+  0.9487** — flat, then mildly decaying. Projecting the worst (1.0238) from n=1 920 over
+  `log₂(30000/1920) = 3.9658` doublings gives **`iters(30 000) ≈ 40.6`**, a **1.6× margin** under the
+  bar of 64 rather than the near-zero margin the retracted pairing implied. This is the number to
+  quote.
+
+> **RETRACTED: these two numbers are not independent corroboration, and reading them that way was an
+> error.** 64 is a **budget ceiling** ("the most iterations 0.5 s can buy at 7.8 ms") and 63.2 is a
+> **predicted need** ("the count the measured growth implies"). They are not two estimates of one
+> quantity. Their agreement therefore means **zero margin**, not confirmation: need ≈ afford is the
+> worst case to be in, not the best. And the prediction is not robust to integer noise — the n=240
+> per-seed counts are `[38, 38, 40, 40, 38]`, a 3–2 median split, and taking 40 instead of 38 moves
+> the projection to **71.9**, over the bar. The honest statement is that the architecture's projected
+> iteration count and its affordable iteration count are the same size to within integer noise, which
+> is a **risk finding**, and §9.1 carries it as one.
+
+**Why the absolute count is primary and the ratio is not.** At the production stopping rule the
+counts are 6–8 (`e5-growth.json rs tau0.0001`), so a ±1 integer wobble moves `G` by 14–17 % — half
+the distance from 1.0 to any plausible bar. **The ratio cannot be resolved there.** This argument is
+independent of currency and it is what demotes `G`.
+
+**Companion: `G(n)` RECORDED with its quantisation interval `G·(1/iters(n) + 1/iters(2n))`; RED iff
+`G − interval ≥ 2.0`.** `β_G = 2.0` is DERIVED — `G = 2` ⟺ iteration count linear in N ⟺ no
+asymptotic advantage over a direct method — and is confirmed by two MEASURED baselines at 2.0211
+(unpreconditioned) and 2.0518 (Jacobi) at 480→960. **`β_G` is immune to the τ objection above**: the
+unpreconditioned count at n=960 is exactly 960 = the Krylov dimension, with `maxit = 2000`, i.e.
+genuine exact termination, which is τ-independent.
+
+**One measured fact that settles the currency question on its own, with no fit:** at n=960 the
+recurrence-residual count to τ=1e-8 is **17**, while the true-residual count to τ=1e-4 is **42**. The
+recurrence target is nominally four orders of magnitude *tighter* and needs **2.5× fewer**
+iterations. Every cost projection in this phase that multiplies by 17–26 is understating the
+iteration count by that factor; §3.5 uses 42.
+
+*Knock-outs.* (1) Replace `Ã⁻¹` with Jacobi ⇒ `G = 2.0518` at 480→960, band 0.0072 ⇒ 2.0446 ≥ 2.0 ⇒
+**RED**, MEASURED. (2) Replace `Ã⁻¹` with the identity ⇒ `G = 2.0211`, band 0.0064 ⇒ 2.0146 ⇒
+**RED**, MEASURED. Both are at recurrence τ=1e-8 and must be re-measured at `τ_η`; their verdict is
+robust because both terminate at the Krylov dimension, which no change of τ can move below 2.
+(3) *Must NOT trip:* H5's defective `L^{2−s}` ⇒ `gmresIters1e-4` identical within 1 at every n ⇒
+**GREEN**. H3 is blind to that defect **by design** — which is why H5 exists.
+
+*INVALID.*
+
+| predicate | what it means |
+|---|---|
+| `iters ∈ {0, 1}` | the stopping test fired before any real iteration (τ above the initial η) |
+| `iters == maxit` | the count is **censored, not measured**. Compare against `maxit`, **never** against the system dimension — `e5-growth.json none/n=960` is exactly `[960]×5` with `maxit = 2000`, which is valid exact Krylov termination |
+| **any** of the 5 directions failed to reach `τ_η` within `maxit` | a median over survivors is censored. MEASURED failure mode: `rs/left/f32` returns `None` for **5/5** seeds at τ_true=1e-4, n ≥ 480. A harness returning `None`/`nan` is not covered by `iters == maxit` |
+| `τ_η`, the preconditioning side, or `maxit` differ between n and 2n | `G` compares two different quantities |
+| `G·(1/iters(n) + 1/iters(2n)) > (G_bar − 1)/2` | the ratio is quantisation-dominated. **Pre-registered escape:** tighten `τ_η` until `iters(n) ≥ 15`, re-run the **whole** n-ladder at the new `τ_η`, and record it. Changing τ per-n would make `G` meaningless |
+
+**At the pinned `τ_η = 1e-6` the last predicate does NOT fire, and that is the whole reason `τ_η` is
+pinned there.** MEASURED counts are 31/35/36/32, so the band is `≈ 1.0 × (1/32 + 1/32) = 0.0625`
+against a threshold of `(β_G − 1)/2 = 0.5` — an 8× margin.
+
+> **The first draft got this backwards twice over, and both errors came from the withdrawn `α_G`.** It
+> claimed the predicate "fires at n=30 000 in the good case" using `iters(960) = 17` and a threshold
+> of `0.152`. The 17 is a *recurrence*-currency count this section rejects (§7.4's opening), and the
+> `0.152` is `(1.3038 − 1)/2` from the withdrawn `α_G`-derived bar — with the live companion bar
+> `β_G = 2.0` the threshold is **0.5**, so even the draft's own 0.184 band would not have fired. The
+> escape clause stays, because it is what a future τ choice would need; but it is a contingency, not
+> a prediction.
+
+### 7.5 H4a — the only gate that can certify direction quality
+
+**Bar: `min over the 5 pinned directions of cos∠_A(x̃, x*) ≥ 0.9`**, with `x*` from a CPU f64 dense
+solve. CHOSEN number; MEASURED δ=0 baseline, min over 5, τ=1e-4, left-preconditioned: **0.970381 /
+0.986126 / 0.990811 / 0.998846 / 0.999314** at n=64…960 — it **improves** with n, worst-case margin
+0.0704. #64 independently: 0.990811 / 0.998874 / 0.999239 / 0.999622 at n=240…2 000.
+
+**`ε_A` is demoted to a RECORDED value.** #59's `ε_A ≤ 2·ε_A(δ=0)` is the self-anchoring form #59
+itself retracted elsewhere, and its anchor is measurably bad: MEASURED `ε_A(δ=0)` medians are
+1.472e-01 / 1.292e-01 / 8.047e-02 / 3.086e-02 / **3.143e-02** / **2.464e-01** at n=64…1 920 — already
+**non-monotone at n=960** (+1.9 %) and then jumping **7.8×** at n=1 920. Separately, at τ=1e-4 `ε_A`
+is dominated by the *stopping tolerance* rather than by the operator, so no absolute `ε_A` bar can
+separate the two. `cos∠_A` has neither pathology.
+
+**H4a's second, irreplaceable job: it is H4b′'s calibration.** `cosHat/cos_true = 1/√(1−ε_A²)`
+exactly (DERIVED, §7.6). H4a is the only place that ratio can be measured, i.e. the only place
+H4b′'s blindness can be quantified instead of assumed. **The gate must report it.**
+
+*INVALID.* `x*` not from an f64 dense solve; or H4a's `cos` bit-equal to H4b′'s surrogate (the
+surrogate was used as the reference). #59 named no INVALID predicate for H4a at all.
+
+**Non-vacuity: H4a is vacuous above n ≈ 960, and that is its OUTPUT, not a defect** — a
+pre-registered statement that above n=960 no gate in this set certifies direction quality (§7.8).
+Hard ceiling N ≈ 5 793 from the `4N²` binding cap (§1.2); practical ceiling 960 from the f64
+reference's own measured degradation at n=1 920. Restricting the *gate* to n ≤ 960 would be a
+post-hoc fence at the edge of the data rather than a property, and it would contribute zero coverage
+in the target range — so the restriction is published as a range limit with a named consequence,
+not as a repair.
+
+### 7.6 H4b′ — the bar is retracted because the quantity could not fail
+
+**This is the most consequential correction in §7, it is algebraic, and it is confirmed on 175 raw
+samples.** It is also this repo's own instance of memory `gates-name-their-impossible-values`.
+
+#59 specifies `‖x*‖²_A = bᵀA⁻¹b` replaced by "its monotone computable lower bound `2x̃ᵀb − x̃ᵀA_σx̃`
+… so the reported cos is a **lower** bound — the safe direction for a gate." Write `a = x̃ᵀA_σx̃`,
+`c = x̃ᵀb`, `q = 2c − a`, `P = ‖x*‖²_A`:
+
+- `q ≤ P`, with gap `‖x̃−x*‖²_A`. **#59's bound is correct** — `q` is a lower bound on `P`.
+- The surrogate is `cosHat = c/√(a·q)`. Substituting a lower bound for `P` in the **denominator**
+  makes the ratio **larger**: `cosHat` is an **UPPER** bound on `cos∠_A`, not a lower one.
+- `c² − a·q = c² − 2ac + a² = (c−a)² ≥ 0`, so **`cosHat² ≥ 1` always**, with equality iff `a = c`.
+
+**`cosHat ≥ 1 ≥ 0.9` identically: the bar sits below the quantity's structural minimum, so H4b as
+specified cannot be tripped.** Its only two reachable outcomes are `q ≤ 0` (which #59 classifies as
+INVALID) and GREEN. Confirmed on raw data, not only algebra. Of the **175** left-preconditioned
+samples at τ=1e-4, **122 have `q > 0`** — and **all 122 have `cosHat ≥ 1`, zero below** — while the
+remaining **53 have `q ≤ 0`**, where `cosHat` is not even defined (`a·q ≤ 0`). So the surrogate is
+`≥ 1` on 100 % of the samples where it exists, and the other 53 are RED under the replacement bar; **1050/1050** samples satisfy the derived theorem
+`ε_A < 1 ⇒ cos_true > 0`; and there are **16 measured FALSE PASSES** at the pinned stop, worst cases
+true `cos∠_A` = **0.0281** / 0.0607 / 0.0201 (n=960, δ=1e-1/1e-1/1e-2) all reading GREEN at
+`cosHat` = 2.53 / 2.06 / 1.00. **#59's own knock-out does not fire either**: at δ=1e-3, n=960 all 5
+seeds have `ε_A > 1`, so `q ≤ 0` and #59's INVALID predicate fires in place of RED. H4b never
+returned RED on its own failure ladder.
+
+**There is no repair that keeps a 0.9 bar reference-free.** All computable quantities are functions of
+`(x̃, b, A_σx̃)`, and `cos² = c²/(aP)`, so `cos ≥ 0.9` is exactly an **upper**-bound test on
+`P = bᵀA⁻¹b`; from `x̃` alone only *lower* bounds on `P` exist (`q`, and the tighter `c²/a ≥ q`,
+DERIVED: `c²/a − q = (c−a)²/a ≥ 0`). An upper bound needs global spectral information —
+`P ≤ ‖b‖²/λ_min(A_σ)`, which is κ-loose. **A reference-free lower bound on `cos∠_A` from a single
+iterate does not exist.**
+
+**What survives is better than it sounds. Quantity: `q = 2x̃ᵀb − x̃ᵀA_σx̃`, reduced as min over the 5
+pinned directions. Bar: `min q > 0`** — structural, with **no free constant to mis-calibrate.** Two
+sound implications, both proved and both measured:
+
+- `q ≤ 0` ⟺ the quadratic model's value at `x̃` is `½a − c ≥ 0` = its value at `0` ⟺ **the step does
+  not decrease the model energy at all.** A hard, computable, reference-free defect statement.
+- `q > 0` ⟺ `ε_A < 1` ⟹ `⟨x̃,x*⟩_A = (‖x̃‖²_A + ‖x*‖²_A − ‖x̃−x*‖²_A)/2 > 0` ⟹ **`cos∠_A > 0`.**
+  GREEN therefore *certifies* a descent direction. MEASURED on 1050/1050 samples. This is #59's own
+  weaker criterion, implemented soundly for the first time.
+
+At the pinned production stop τ=1e-4, `min q > 0` is a **perfect classifier** of `min cos_true ≥ 0.9`
+on all 70 measured (n, δ, side) cells — 0 false kills, 0 misses. **The gate therefore requires
+τ ≤ 1e-4**: at τ=1e-2 it misses 18 of 35 left-preconditioned cells, because at that stop even a
+*perfect* operator has true `cos` of 0.823–0.885 — a stopping-tolerance artefact, not an operator
+defect. That is also why no H4 bar may be read at τ=1e-2.
+
+**Three caveats travel with the perfect score, because it does not transfer.**
+1. The implication is one-directional in theory (`q>0 ⇒ cos>0`, not `cos ≥ 0.9`). The perfect
+   agreement holds because the random-E failure mode is **catastrophic** — nothing in the sweep lands
+   in the `0 < cos < 0.9` band.
+2. **The real BCT's worst case does land in that band.** #64's worst MEASURED `c₁ = 0.2886` (n=2 000,
+   θ=0.5) gives a direction guarantee `2√(c₁c₂)/(c₁+c₂) = 0.8234`; for `cos = 0.8234`,
+   `ε_A ≈ 0.567 < 1` ⇒ `q > 0` ⇒ GREEN. **H4b′ cannot see 0.8234.**
+3. It cannot see the f32 wall. At n=2 000 the f32 `cos∠_A` is 0.9244 / 0.9042 / **0.7732** at
+   θ=0.5/0.25/0.1; the 0.7732 case has `ε_A ≈ 0.634 < 1` ⇒ GREEN.
+
+**Consequence for §4.1, and it is why H6 exists.** #64's recommendation — *"ship θ=0.5 with H4b as a
+mandatory per-solve guard"* — rests on H4b enforcing `cos ≥ 0.9` per solve. **That instrument does
+not exist, and no reference-free instrument can replace it.** H4b′ cannot distinguish θ=0.5 from
+θ=0.25. §4.1's ruling is therefore re-based on H4b′ (catastrophic failures, per solve) + H4c
+(end-to-end, per calibration) + **H6** (the one measurement that can discriminate).
+
+*Which matvec?* #59's cost line says "one exact matvec"; #64 says "no exact `A`". **Ruling: the
+production (θ) matvec.** `q` is then the model-energy decrease *in the hierarchical metric* — which
+is the metric the step is actually taken in — and it stays a free per-solve guard instead of a
+5.7-min-per-solve calibration measurement at N=30 000. Both are recorded at n ≤ 960 to pin the
+difference.
+
+*INVALID.* `x̃ᵀb ≤ 0` — then `cos ≤ 0` already, `q ≤ 0` adds nothing, no margin can be reported ⇒
+fall back to H4a where a reference exists. **`q ≤ 0` is RED, not INVALID** (#59 had it as INVALID,
+which is exactly why its own knock-out never fired).
+
+**Non-vacuity at n=30 000: yes.** `q > 0` is scale-free, costs one `A_σx̃` matvec and two inner
+products, and the δ=0 baselines *improve* with n (`ε_A` max over 5 at τ=1e-4: 0.2442 / 0.1687 /
+0.1373 / 0.0483 / 0.0394 at n=64…960).
+
+### 7.7 H4c — energy decrease and acceptance, not the step length
+
+#59 had **no measurement** behind H4c's bar. There is one, and **it false-positives on 8 of 15
+measured BCT arms.** Under #59's bar (median accepted τ ≥ half the f64 reference's), MEASURED at
+n=240/480 (K=20) and n=960 (K=10): 8 of 15 BCT-family arms are **RED** and 4 more pass only by
+**exact equality** — while **every one of the 15 delivers ≥ 99.691 % of the exact operator's energy
+decrease.** The ratio is also non-monotone in θ (at n=960, θ=0.1 scores 1.000 while θ=0.25 scores
+0.125). That is the tell: **τ is a step *length* in a metric that differs between arms**, so Armijo
+backtracking lands on a different power of ½. τ measures scale, not quality.
+
+**Bar, two conjuncts, both must hold:**
+1. **`R_E = ΔE_total(candidate) / ΔE_total(f64 exact) ≥ 0.95`** over K=20 steps. CHOSEN 0.95;
+   **MEASURED separation: 15/15 BCT arms ≥ 0.99691, 6/6 random arms ≤ 0.86027** ⇒ margins 1.049×
+   (green side) and 1.104× (red side). **Both sides measured** — which #59's τ bar never had.
+2. **Accepted-step fraction `== 1.0`** (no refusals in K steps). MEASURED: 15/15 BCT arms at 1.0;
+   0/6 random arms (`0/1`, `1/2`, `5/6` at n=240; `1/2`, `0/1`, `9/10` at n=480), every failure
+   `not_a_descent_direction`.
+
+> **Conjunct 1's RED side is not calibrated, and the first draft's "6/6 random arms ≤ 0.86027" must
+> not be read as one.** Those denominators *are* the arms' `K_run` — 1, 2, 6, 2, 1, 10 — because a
+> refused step ends the trajectory. Every random arm's `ΔE_total` is therefore accumulated over 1–10
+> steps and compared against a 20-step reference, which is exactly what this gate's **own INVALID
+> clause (`K_run < K`) forbids folding into a ratio.** The green side stands (15/15 BCT arms ran the
+> full K=20 and score ≥ 0.99691, giving the `≥ 0.95` bar a measured 1.049× margin there); the red side
+> is **NOT ESTABLISHED.**
+>
+> **This does not weaken the gate, because conjunct 2 is what separates the populations** — 15/15
+> versus 0/6, on a quantity that is *defined* for a truncated run and is in fact how truncation
+> manifests. Conjunct 1's job is the complementary one: catching a direction that is accepted but
+> weak. **The run that would calibrate its red side** forces a random arm through all K=20 steps by
+> accepting every trial regardless of Armijo, measuring energy delivery decoupled from acceptance;
+> §7.11 item 9 carries it.
+
+Both are needed. #59 correctly rejected energy decrease *alone* as primary (δ=1e-4 at n=960 has
+`cos = 0.4288` and is still a descent direction) — conjunct 2 covers that, because a direction that
+bad gets refused. Conversely conjunct 1 covers a direction that is accepted but weak.
+
+**K is pinned at 20, not 50.** K=50 has never been run anywhere. K=20 is MEASURED at n=240 and n=480
+with full 12-arm JSON; n=960 ran K=10 with **only 4 of its 12 arms** (`rand` and `bctdir` controls did
+not run) and its numbers exist only in `out-64-linesearch-960.log`, not in a JSON. Measured cost of
+K=20 at n=960: 801–969 s per arm.
+
+**The `reason` set has FIVE strings, not three**, verified by reading `lineSearchStepSet`
+(`src/core/sobolev/lineSearch.ts:444-583`; `LineSearchStepResult` at `:410-421`; wrapper
+`lineSearchStep` at `:593-617`): `zero_or_nonfinite_gradient_norm`, `not_a_descent_direction`,
+`tau_below_min`, `armijo_failed`, `projection_failed`, across **four** `accepted:false` exits, all of
+which set `tau: 0`. Defaults read from the same source: `c1 = 1e-4`, `shrink = 0.5`, `tau0 = 1`,
+**`tauMin = 1e-12`** ⇒ maximum backtrack count `log₂(1/1e-12) = 39.9`. All five counts are recorded.
+
+*INVALID.* `K_run < K` (the trajectory terminated early — report it as a refusal count, never fold a
+truncated run into a ratio); or `ΔE_total(reference) ≤ 0` (no reference decrease to normalise by). τ
+is RECORDED alongside `accepted` and `reason`; `records[].ms` stays a labelled non-gate value.
+
+### 7.8 H5 — preconditioner integrity, and the mixed-precision precondition
+
+**Property 1: `dim null(L^{2−s}) == 1`** (constants only). MEASURED: **1** for the vertex-collocated
+variant and **2** for the literal `[RS §5.1.1]` identity variant, at every n ∈ {64,120,240,480}.
+Mechanism: on a closed polyline `|E| = |V|`, so `U` is square and for even n annihilates the
+checkerboard `(−1)^i`; every fixture has even n.
+
+**Property 2: `κ_eig(Ã⁻¹A_σ)` flat, `|p| ≤ 0.05`** over the fixture set. **MEASURED to n=1 920 with
+an artefact** (`e0-closer-0b.json`, produced after the first draft): 10 976.50 / 11 180.93 / 11 244.96
+/ 11 262.28 / **11 267.3 / 11 269.0** at n=64…1 920 ⇒ log-log LSQ exponent **p = 0.006450** over all
+six points (**0.012152** over the first four), against the defect variant's 1.014e+15 / 4.891e+14 /
+1.875e+14 / 1.947e+13 — **11 orders high.** Either exponent clears the bar by ≥ 4×.
+
+> **Provenance, now closed — and #59's numbers were right all along.** #59 reported "measured flat to
+> n=1 920, `p = 0.0010`", but its two largest values came from `e0_sanity.py`, which wrote no JSON and
+> whose log was not saved. That artefact now exists and **reproduces #59's values exactly, including
+> the two that had no archive** — 11 267.3 and 11 269.0. What does *not* reproduce is `p = 0.0010`:
+> the real exponents are **0.006450** (all six points) and **0.012152** (four *smallest*) — but
+> `p = 0.0010` does reproduce, as **0.00099 over the four LARGEST points**. So #59 was right a second
+> time: it fitted the large-n end, which is the defensible choice for an asymptotic-flatness claim and
+> which this spec's earlier "reproduces from neither set" got wrong. The lesson is therefore much
+> narrower than "the numbers were wrong": **every number was sound and only the archive was missing**
+> — which is indistinguishable from fabrication until someone re-runs it. Every reported number needs
+> a file, and every fit needs its point set named.
+
+**Property 3 (NEW): `κ_eig(Ã⁻¹A_σ) · u_inner ≤ 1e-2`, RECORDED — a diagnostic, not a license.**
+CHOSEN threshold; MEASURED **6.716e-04** at n=1 920 (6.712e-04 at n=480, 6.715e-04 at n=960 — the
+series is flat to 4 significant figures) ⇒ **14.9× margin**, n-independent by property 2.
+
+> **This was drafted as "the gate that licenses f32-inner" on a citation that does not support it.**
+> The draft attributed the threshold to `[CH18]`'s `φ = (c₁κ∞(A)+c₂)u_s`. Checked against the source
+> (Carson & Higham, *Accelerating the Solution of Linear Systems by Iterative Refinement in Three
+> Precisions*, SISC 40(2) 2018, https://eprints.maths.manchester.ac.uk/2629/): **(i)** CH18's
+> conditions are on `κ∞(A)` — the **original** matrix, **infinity** norm — not the preconditioned
+> operator in the 2-norm; **(ii)** its `κ∞(A) ≤ 1e8` relaxation is derived specifically for **GMRES
+> preconditioned by low-precision LU factors of A**, and Phase 2H has **no factorization at all**
+> (§1.1), so the framework does not apply in either direction — this spec can borrow neither its
+> ceiling as a limit nor its `φ < 1` as a license; **(iii)** the `φ` form could not be located in
+> CH18 at all — the nearest match is `u_s‖E_i‖_∞ < 1` at eq. (3.8) of the **five**-precision successor
+> (https://www.lip6.fr/Theo.Mary/doc/GMRESIR5.pdf), so `[CH18]` is a probable misattribution of a
+> later paper and "Cor. 4.2" remains unlocated. **Do not cite `[CH18]` for this threshold.**
+>
+> **The applicable theory is inexact Krylov**, not iterative refinement: GMRES whose matvec is
+> computed approximately, analysed by Simoncini & Szyld and by van den Eshof & Sleijpen, and the
+> standard framework for FMM/BEM-accelerated Krylov solves — structurally the same problem as a
+> hierarchical approximate matvec inside GMRES. It bounds the **tolerable matvec perturbation per
+> iteration**, which is **H1-b's `δ_precision`** (§7.2), not a condition-number ceiling. **So this
+> spec already measures the right quantity and cited the wrong reason for it.** What actually licenses
+> f32-inner is (a) H1-b's measured bound on the apply perturbation and (b) the f64 outer residual
+> formed against the exact operator (§7.3 anti-trap 2) — stated as an argument in §7.9, not deferred
+> to a citation.
+>
+> **Norm caveat, MEASURED rather than conceded.** `κ∞/κ_eig` on the preconditioned operator is
+> **1.07 → 1.21** over n=64…960, fitting `n^0.045` ⇒ ≈ **1.41 at n=30 000**. Breaching a 1e-2 bar
+> would need ≥ 15×, so the conversion carries ~10× headroom; the worst-case `κ∞ ≤ n·κ₂` bound does not
+> bind here. On the *unpreconditioned* operator the ratio is flat at ≈ 3.0. **Any bar that multiplies
+> a condition number by a unit roundoff must state its norm.**
+>
+> **Notation, and it decides reproducibility.** `κ_eig` means `λ_max/λ_min` of `Ã⁻¹A_σ` (equivalently
+> `κ(Ã^{-1/2}A_σÃ^{-1/2})`) — what `e4_precond_integrity.py:37-38` computes and what governs Krylov
+> convergence. `Ã⁻¹A_σ` is a product of two SPD matrices and is **not symmetric**, so the
+> singular-value condition number `cond(Ã⁻¹A_σ, 2)` is a *different* quantity: MEASURED 1.4544e4 vs
+> 1.0977e4 at n=64, a **1.33× gap** persisting across the range. The draft wrote `κ₂`, which denotes
+> the latter. An implementer who reads `κ₂`, calls `cond(M @ A, 2)` and lands 1.33× off the ledger
+> cannot distinguish a notation mismatch from a bug. **Record both.**
+
+The table below is why property 3 is worth recording even demoted — **it is the only quantity in the
+set that is non-vacuous at n=30 000 and bears directly on precision:**
+
+| n | `κ₂(A_σ)` | `κ₂(A_σ)·u_f32` | `κ₂(Ã⁻¹A_σ)·u_f32` |
+|---:|---:|---:|---:|
+| 960 | 1.393e+06 | 8.300e-02 | **6.715e-04** (MEASURED) |
+| 1 920 | 1.404e+07 | **8.369e-01** | **6.716e-04** (MEASURED) |
+| 4 000 | 1.622e+08 | 9.668e+00 | 6.716e-04 (ASSUMED flat) |
+| 30 000 | 1.341e+11 (EXTRAPOLATED) | **7.991e+03** | 6.716e-04 (ASSUMED flat) |
+
+`κ·u_f32 ≈ 1` at **n ≈ 2 025** on the unpreconditioned operator (DERIVED from this table's own
+MEASURED 0.8369 at n=1 920; the first draft said 1 900, which the same table contradicts) — one of the four f32-wall estimates
+in §6 — **while the preconditioned number does not move at all.**
+
+*INVALID.* `dim null == 0` — structurally impossible, since the constants are in the nullspace by
+construction for every variant, so a zero nullity means the rank tolerance is mis-set. Or
+`dim null ≥ 3` ⇒ **INVALID, not RED**: the known defect gives exactly 2 (one extra mode, the
+checkerboard), so 3+ is not a known failure shape and most likely means a mis-set tolerance or a
+different operator, and must not be scored. Or `λ₂(L^{2−s})/λ_max(L^{2−s}) < 10 ×` the relative rank
+tolerance (`e4_precond_integrity.py:33` uses `|λ| < 1e-8·λ_max`) ⇒ **INVALID — scoped to the
+production (vertex-collocated) variant ONLY.** That scoping is not cosmetic: MEASURED, the
+`rs-identity` knock-out variant has `λ₂/λ_max ≈ 1e-15…1e-16` and so **trips this predicate at every
+n**, which would report the knock-out as INVALID instead of RED and defeat it — the identical error
+class as #59 classifying H4b's `q ≤ 0` as INVALID (§7.6). The knock-out's tiny ratio is *correct*
+behaviour: its nullity genuinely is 2, so `λ₂` genuinely is a null mode. **Now MEASURED
+(`e4-closer-0b.json`), and the margin is ~10⁶×**, so this predicate is a free always-pass guard rather
+than a live hazard: `λ₁ ≈ 3.55e-15` (the genuine constant mode) while `λ₂/λ_max` runs **0.204 →
+0.070** over n=64…480 against a 1e-7 threshold, decaying only as `n^-0.53` — still ≈ 8e-3, i.e. 8e4×
+above threshold, at n=30 000. **The nullity-1 result is structural, not tolerance-determined** —
+which the first draft could not assert, because `λ₂` existed in no artefact. Keep the predicate (it is
+free) and keep reporting all four values.
+
+*Knock-outs.* (1) The literal `[RS §5.1.1]` identity `L^σ v = 2Uᵀ[diag(diag(a)⁻¹Ha) − H]Uv` ⇒ nullity
+**2**, `κ₂ = 1.014e+15` ⇒ **RED on all three properties** (property 3: 1.014e15 × 5.96e-8 = 6.0e7),
+MEASURED. (2) Drop the constant-mode correction `+11ᵀ/(N·σ)` ⇒ `Ã` singular on constants ⇒ nullity
+RED; NOT MEASURED, cheap. (3) *Must NOT trip:* the correct vertex-collocated variant at every n ⇒
+nullity 1, `p = 0.006450`, `κ·u = 6.716e-04` ⇒ **GREEN** on all three, MEASURED.
+
+**Why H5 is the only gate that catches this defect.** With the defective preconditioner,
+`gmresIters1e-4` is identical within 1 at every n (H3 green), `cosAMin ≥ 0.9412` (H4a and H4b′ green),
+and `ε_A` degrades only 14–75 % — inside any plausible direction bar. MEASURED. The damage is mild at
+τ=1e-4 and bites as τ tightens or accumulates over descent steps.
+
+**Range.** Property 1 is an integer at any n (inverse iteration, matrix-free, O(N) storage).
+Property 2 needs the explicit dense preconditioned operator, so it is **limited to n ≤ 1 920**; its
+large-n observable is H3's ratio. **Property 3 inherits that range, so `κ₂(Ã⁻¹A_σ)` above n = 1 920 is
+ASSUMED flat, not measured — and that assumption is load-bearing for the entire mixed-precision
+scheme.** §7.11 item 2 names the run that closes it.
+
+### 7.9 H6 — the θ default, under an adversarial rhs
+
+**New gate. It exists because §7.6 removed the instrument §4.1's ruling was resting on**, and because
+it is the only cheap measurement that can discriminate θ=0.5 from θ=0.25.
+
+```
+Quantity: min over the adversarial rhs set of cos∠_A(x̃, x*) at θ = 0.5,
+          f64 operator, left-preconditioned GMRES, τ = 1e-4, x* from a dense f64 solve.
+Adversarial rhs: built from the generalized eigenvectors of (A_bct,σ, A_σ) whose
+          generalized eigenvalue lies below 0.9 at that n — the "bad modes".
+Gated at:  n = 960 and n = 2 000.
+Bar:       min cos∠_A ≥ 0.9.
+```
+
+**Why it can actually fail, which is what makes it a gate.** Every `cos∠_A` in the entire corpus is
+measured against **5 random rhs**, and a converged flow is exactly where the rhs stops being random.
+At θ=0.5 the MEASURED worst generalized eigenvalue is `c₁ = 0.2886` (n=2 000), giving a worst-case
+direction guarantee `2√(c₁c₂)/(c₁+c₂) = ` **0.8234** — *below the bar* — while every measured random
+rhs gives ≥ 0.9955. The gap between 0.8234 and 0.9955 is the entire θ risk, and nothing else in the
+set can see into it: H4b′ cannot (§7.6 caveat 2), and H4a has only ever been pointed at random rhs.
+
+**RED ⇒ the θ default flips to 0.25; it does not kill the phase.** θ=0.25 is MEASURED to have **zero**
+modes below 0.9 at every n from 240 to 4 000 and a worst-case guarantee of 0.9984. The cost of the
+flip is MEASURED: 2.09× near-field work (`κ_near` 108.2 → 226.2 at n=30 000) and the GPU projection
+moving from 0.10–0.51 s to 0.20–1.07 s per solve (EXTRAPOLATED, §3.6).
+
+*INVALID.* No generalized eigenvalue below 0.9 at that n (there is then no adversarial direction to
+build — report **NOT APPLICABLE** at that n, which is itself a publishable result); or `x*` not from
+an f64 dense solve.
+
+**Cost: low, and that is the point.** The bad modes are already computed by `scratch/run64_badmodes.py`,
+and the gate needs one dense f64 solve per n ≤ 2 000. #64 calls this *"cheaper and far more decisive
+than another `c₁` point"*; this spec agrees and promotes it from a deferred question to a
+pre-registered gate.
+
+**Clock: none.**
+
+### 7.10 R1 — three ceilings, not one AND-ed number
+
+R1 is a **mandatory reporting obligation, not a kill gate.** #59's form — "the largest n where H1, H2
+and H4b are simultaneously green" — now reports a falsely **HIGH** ceiling: H4b′ cannot fail on the
+real operator (§7.6), H2 is non-vacuous to n=30 000 (§7.3), and H1 has no magnitude bar (§7.2). **An
+AND of green verdicts over gates that cannot fail is not a ceiling.**
+
+```
+Publish THREE ceilings, each with (a) the gate that bound it, (b) that gate's VALUE at the
+first n where it stopped being green, (c) the precision configuration it applies to:
+
+  servedN_f32only     = 960   MEASURED. Bound by H4a (f32 cos∠_A = 0.7732 at n=2 000, θ=0.1;
+                              0.9042 at θ=0.25), corroborated by the f32 true-residual floor
+                              5.04e-3 at n=960. Four derivations put the crossing at 1 200-2 000;
+                              960 is the last MEASURED pass.
+
+  servedN_referenced  = 960   MEASURED. Bound by the dense f64 reference's own degradation
+                              (ε_A(δ=0) jumps 7.8x at n=1 920). Hard cap N ~ 5 793 (§1.2).
+                              Above this n, NO gate in the set certifies direction quality.
+
+  servedN_mixed       = NOT ESTABLISHED.  Blocked by two named measurements (§7.11 items 1 and 2),
+                              not by a red gate. Publish the words, never a number.
+
+Rules:
+  - If any contributing gate returns INVALID at or below a reported ceiling, that ceiling is
+    INVALID and is published as "NOT ESTABLISHED" together with the INVALID predicate that fired.
+  - "NOT ESTABLISHED" is a required publishable value. A ceiling that no gate binds must never be
+    reported as a number - memory `gates-name-their-impossible-values`, applied to a report.
+  - Each ceiling carries its binding gate's VALUE, not only its verdict.
+```
+
+### 7.11 Where the f32 wall sits, and what the gates can and cannot see
+
+**#59's n ≈ 3 310 is superseded.** That crossover reproduces exactly (3 310.4 from
+`α_denseF32 = 1.555e-08·n^0.3697` against `β_rand = 1621·n^-2.7605`) and is wrong for one reason: it
+substitutes the **dense `sgemv`** f32 floor for the **hierarchical apply** noise, which §7.2 shows is
+5–13× larger and grows 2–3× faster. Four independent derivations now agree on **1 200–2 000**:
+
+| # | derivation | crossover | tag |
+|---|---|---:|---|
+| 1 | MEASURED hierarchical f32 apply noise (low kernel, `n^1.176`) vs `β_rand` | **n ≈ 1 228** | EXTRAPOLATED |
+| 1b | same, high-order kernel (`n^0.829`) | **n ≈ 1 773** | EXTRAPOLATED |
+| 2 | MEASURED f32 left-prec true-residual floor `4.09e-13·n^3.364` reaching 1e-2 | **n ≈ 1 225** | EXTRAPOLATED |
+| 3 | `κ₂(A_σ)·u_f32 ≈ 1` on the unpreconditioned operator (§7.8) | **n ≈ 2 025** | DERIVED from a MEASURED law |
+| 4 | #64's direct observation: f32 `cos∠_A` = 0.9244/0.9042/**0.7732** vs f64 ≥ 0.9983 | breached **at n = 2 000** | **MEASURED** |
+
+**The one statement that needs no fit at all:** at n=1 920/2 000 the MEASURED hierarchical f32
+low-kernel apply noise (**8.123e-06**) is **5.9× ABOVE** the MEASURED random-direction tolerance
+`betaCos90Min` (**1.383e-06**); at n=960 it is **0.30×** of it (3.002e-06 vs 9.912e-06). **The
+crossing therefore happens strictly inside (960, **2 000**], measured, with no extrapolation —
+the upper end is 2 000 because `f32NoiseLow` is measured at n=2 000 while `betaCos90Min` is measured at
+n=1 920, and **no n above 960 carries both quantities.** The fit-free claim is the bracket, not its
+upper endpoint.** The
+random-direction tolerance is the right comparison *for f32 rounding specifically*, because rounding
+noise **is** generic — #64's structured-vs-random distinction applies to the compression error, not to
+the precision error.
+
+**Pre-registered statement: the f32-only configuration is OUT OF RANGE for n > 960**, 960 being the
+largest n at which an f32 left-preconditioned solve is measured to reach a fixed accuracy target at
+all. **This is the gates' output, not their failure.** Which gate says it:
+
+| gate | at the f32 wall |
+|---|---|
+| **H1-b** | **RED.** EXTRAPOLATED `δ_precision` (low kernel) = 2.06e-04 at n=30 000 against a bar of 6.76e-05. The gate that detects it *in the operator* |
+| **H2** | **does NOT detect it.** Backward error is insensitive by construction — the solve is backward-stable with respect to the operator that was actually applied |
+| **H3** | **INVALID, not RED** — a fixed `τ_η` becomes unreachable, so the censoring predicate fires. That is the correct output: the configuration cannot be costed because it cannot converge |
+| **H4a** | **RED** where a reference exists (n ≤ 960 measured; 0.9983 vs 0.7732 at n=2 000) |
+| **H4b′** | **does NOT detect it** (§7.6 caveat 3) |
+| **H5 property 3** | **GREEN**, because it measures the *preconditioned* number — which is exactly the point |
+
+> **The uncomfortable summary, stated rather than buried: above n ≈ 960 no reference-free gate in this
+> set can detect the f32 wall.** The only two detectors are H1-b (operator-level, and its n=30 000
+> value is EXTRAPOLATED) and H4a (needs a dense f64 reference, so it stops at n≈960). This is the
+> strongest single argument for keeping H4a despite its range, and for item 1 below.
+
+**What the mixed-precision scheme is gated on instead.** CLAUDE.md's constraint — the f32 BCT is the
+INNER solver, never the solver — becomes gateable as:
+
+1. **H5 property 3** (`κ₂(Ã⁻¹A_σ)·u_inner ≤ 1e-2`, MEASURED 6.716e-04, flat in n, 14.9× margin).
+   **RECORDED, not the licensing gate** — see §7.8. `κ₂(A_σ)·u_f32` would fail at n ≈ 2 025; the
+   preconditioned number does not move. **What licenses f32-inner is (a) H1-b's measured bound on the
+   apply perturbation and (b) this clause's f64 outer residual** — an inexact-Krylov argument
+   (Simoncini & Szyld; van den Eshof & Sleijpen), not an iterative-refinement one. Attainable accuracy
+   is governed by the **f64** outer residual against the exact operator, which is why
+   `κ₂(A_σ)·u_f32 = 7 991` at n=30 000 rules out **f32-only** — already out of range per §7.11 —
+   without ruling out f32-inner.
+2. **H2's anti-trap 3 promoted to a structural requirement:** the residual driving the outer
+   refinement is formed in **f64**, from `b` and the exact operator, never from the f32 BCT used
+   inside. H2's `η_exact` bit-equal to `η_bct` INVALID clause is what enforces it.
+3. **H1-b's `δ_precision` is the inner solver's accuracy budget**, recorded per θ, per n, per
+   precision.
+4. **`u_inner` and `u_outer` are recorded per run, and a bar derived at one precision pair is NOT
+   transferable to another.** This applies to H2's floor with force: **E1's outer algebra ran in f64
+   with only the matvec in f32**, so every `etaFloor` quoted in this spec is for an f64-outer /
+   f32-matvec solve. If orthogonalisation moves to f32, H2's bar must be re-derived. NOT MEASURED.
+
+**The caveat that cannot be removed, and whose sign is now known.** Every f32 arm in this entire
+corpus is a **dense f32 matvec of the hierarchical matrix** (`scratch/gmres_lab.py:67-75`), not a
+genuine f32 hierarchical apply. #59 argued that this is conservative; §7.2 shows the opposite by
+5–13× for the apply noise alone. Whether the same reversal survives once the f32 apply is driven
+through the whole solve is the single highest-value unknown in this spec.
+
+**Un-run measurements that §7 depends on**, ordered by what they could change. Each is a task in §11.
+
+| # | measurement | what it changes | cost |
+|---|---|---|---|
+| 1 | **A genuine f32 hierarchical apply driven through the whole solve** (`applyKF32` → left-prec GMRES, n=480…1 920, 5 seeds, `cos∠_A` vs dense f64 `x*`, η vs χ=0) | `servedN_mixed`; H1-b's n=30 000 verdict; whether the 1 200–2 000 bracket moves. **The one run that could invalidate §7.11's range ruling** | low |
+| 2 | ~~E0 with a JSON emitter at n=64…1 920~~ **DONE** (`e0-closer-0b.json`): flat to n=1 920, `p = 0.006450`, `κ·u = 6.716e-04`, 14.9× margin, and it reproduces #59's two unarchived values exactly. **Still open above n=1 920** — matrix-free Lanczos at n=4 000, 8 000 | H5 p2/p3's range, hence `servedN_mixed`. Flatness above 1 920 remains **ASSUMED** | low–medium; the preconditioned operator is matrix-free, so no dense matrix is needed |
+| 3 | ~~`iters(n)` to a fixed `τ_η`, left-preconditioned~~ **DONE** (`e1-closer-0b-n*.json`), and it **changed the gate**: `τ_η = 1e-4` is vacuous (26→3), `1e-6` is the usable rung (31/35/36/32). §7.4 is rewritten around it. **Still open: n=960 and 1 920 rungs** | H3's entire calibration | done for n ≤ 480 |
+| 4 | ~~The iteration index at which η reaches its floor~~ **DONE** (`etaArgminIter` = **36–60**), which moved H2's ruling from a uniform `p = 20` to a two-stage dense-then-sparse schedule (§7.3) | H2's probe schedule | done |
+| 5 | **H6's adversarial rhs** (§7.9) | the θ default | low |
+| 6 | **One wall-clock GPU matvec at n=30 000** on the pinned Quadro RTX 3000 (amortised-K protocol, ICD pinned, `nvidia-smi --query-compute-apps` confirmed inside the window — #63 makes `timestamp-query` useless here) | **H3's primary bar is only as good as the 7.8 ms it divides into**, and that number rests on zero GPU runs | low |
+| 7 | **H1-b's missing knock-out** — truncate the near-field accumulator to f16 and confirm `δ_precision` exceeds the bar (model predicts 4.7e-2, 820× over) | H1-b currently has a measured value and a measured must-NOT-trip, but no measured defect that exceeds its bar | low |
+| 8 | ~~`λ₁`, `λ₂`, `λ_max` and the rank tolerance~~ **DONE** (`e4-closer-0b.json`): `λ₂/λ_max` = 0.204→0.070 against a 1e-7 threshold, a **~10⁶× margin** decaying only as `n^-0.53`. H5 property 1's nullity is **structural, not tolerance-determined** | closed | done |
+| 9 | **H4c at n=960 with its 6 missing control arms** | H4c's bar is calibrated at K=20 on n=240/480 only | ~3 h |
+| 10a | **H3's n=960 and n=1 920 rungs at `τ_η = 1e-6`** — the ladder is measured only to n=480, so `G` currently has one true doubling (240→480) in the correct currency | H3's companion `G`, and whether `iters` stays ~32 or grows | low — same script, 2 more n |
+| 10b | **One GPU wall-clock matvec**, whenever a kernel exists | **H3's budget-derived bar is unanchored without it** (§11.2 records it as out of scope for this phase) | blocked on §1.4 |
+| 10c | **H4c conjunct 1's RED side** — a random arm forced through all K=20 steps by accepting every trial regardless of Armijo | conjunct 1 currently has a measured green side and **no** valid red side (§7.7) | low |
+| 10 | **`tangle`-class geometry, and any n > 4 000** | H1-a's monotonicity, H4a's baselines and §7.11's crossing are all single-geometry (`trefoil`), while `κ_near` spans **14.67×** across geometries | medium / high |
+
+### 7.12 Result emitter
+
+`bench/results/<date>-gpu-phase2h-gate-calibration.json`. Changes from #59 §7: `beta2x*` and
+`deltaBar` **removed** (retracted criterion, §10.2); `betaCos90*` **not added** (no δ bar survives,
+§7.2); `etaBar` replaced by `etaFloor*` plus the absolute bar; `h1a*`, `h1b*`, `h4b*`, `h4c*`,
+`h5p3*`, `h6*`, `r1` added. **Every labelled non-gate value gets an explicit key so it cannot be
+silently promoted to a gate.**
+
+```jsonc
+{
+  "issue": "utof/repulsive-test2#58",
+  "generatedAt": "<ISO>",
+  "gitShaShort": "<spec commit's parent>",       // bench/gpu/README.md "Provenance"
+  "adapterCert": { /* AdapterCertification verbatim; adapterCert.ts:47 */ },
+  "precision": { "uOuter": 1.11e-16, "uInner": 5.96e-08, "operator": "f32", "outerAlgebra": "f64" },
+  "clock": null,                                  // no gate in H1-H6 reads one (#63)
+  "fixtures": { "family": "trefoil", "leafSize": 8, "quadrature": "endpoint4" },
+  "seeds": [0, 1, 2, 3, 4],
+  "thetaLadder": [0.5, 0.25, 0.1],
+  "chiZeroStreaming": true,                       // §7.1 requirement, not a preference
+  "rows": [{
+    "n": 960, "theta": 0.5, "kappaNear": 93.3, "kappaFar": 3.68,
+    "sigma": 19168.9, "normAsigmaEst": 4.56646e4, "normAsigmaSource": "power30@theta",
+    "normAsigmaLowerBoundCheck": true,            // H2 INVALID #4
+    "kappaASigma": 1.39265e6, "kappaPrecond": 1.12673e4,
+
+    // H1 - recorded triple, per direction then min/median/max
+    "deltaCompressPerSeed": [], "deltaCompressMedian": 0, "deltaCompressMax": 0,
+    "deltaPrecisionPerSeed": [], "deltaPrecisionMax": 0,
+    "deltaTotalPerSeed": [], "deltaTotalMax": 0,
+    "h1aLadder": [{ "theta": 0.5, "deltaCompressMedian": 0 }],  // one entry per rung, SAME n
+    "h1aMonotone": true, "h1aTieFlagged": false,
+    "h1bBar": 5.78e-5, "h1bValue": 1.533e-6,
+
+    // H2 - run to floor
+    "etaFloorPerSeed": [], "etaFloorMin": 0, "etaFloorMax": 0,
+    "etaProbeEvery": 20, "etaMaxit": 600, "etaFloorIterIndexPerSeed": [],
+    "etaBct": 0,                                   // the mis-measured twin; INVALID if bit-equal
+    "recurrenceResidualAtStop": 1.0e-4,            // LABELLED NON-GATE
+    "trueRelResidualAtStop": 6.378e-1,             // LABELLED NON-GATE
+
+    // H3
+    "tauEta": 1e-8, "precondSide": "left", "h3Operator": "f64",  // 1e-4 AND 1e-6 are vacuous; f32
+                                                 // cannot reach 1e-8 at all — §7.4
+    "etaArgminIterF32": [],                      // the f32 companion, RECORDED (run-to-floor)
+    "itersPerSeed": [], "itersMedian": 0, "maxit": 400, "itersCensoredCount": 0,
+    "growthRatio": 0, "growthQuantisationBand": 0, "growthValidAtThisN": true,
+    "perIterationMsWallClock": null,               // LABELLED NON-GATE; re-derives H3's bar (item 6)
+
+    // H4
+    "h4aCosPerSeed": [], "h4aCosMin": 0, "h4aEpsAPerSeed": [], "h4aEpsAMedian": 0,
+    "h4bQPerSeed": [], "h4bQMin": 0, "h4bCosHatPerSeed": [],  // cosHat RECORDED, never gated
+    "h4bOverstatementRatio": [],                   // cosHat/cos_true = 1/sqrt(1-epsA^2); H4a calibrates H4b
+    "h4bMatvec": "theta", "h4bQChiZero": 0,        // both recorded at n <= 960 (§7.6)
+    "h4cK": 20, "h4cAcceptedFraction": 1.0, "h4cDeRatio": 0.99909,
+    "h4cTauMedian": 0.03515625, "h4cTauMedianReference": 0.09375,  // RECORDED, not gated
+    "h4cReasonCounts": { "zero_or_nonfinite_gradient_norm": 0, "not_a_descent_direction": 0,
+                         "tau_below_min": 0, "armijo_failed": 0, "projection_failed": 0 },
+
+    // H5
+    "nullDimLfrac": 1, "lfracLam1": 0, "lfracLam2": 0, "lfracLamMax": 0, "rankTol": 1e-8,
+    "kappaPrecondExponentP": 0.01215, "h5p3Value": 6.716e-4, "h5p3Bar": 1e-2,
+
+    // H6 - gated once, at n = 960 and 2000
+    "h6BadModeCount": 0, "h6CosMin": null, "h6Applicable": true,
+
+    "verdicts": { "H1a": "GREEN", "H1b": "GREEN", "H2": "GREEN", "H3": "GREEN", "H4a": "GREEN",
+                  "H4b": "GREEN", "H4c": "GREEN", "H5": "GREEN", "H6": "GREEN" },
+    "seconds": 0
+  }],
+  "r1": {
+    "servedNF32Only": 960, "servedNF32OnlyBoundBy": "H4a", "servedNF32OnlyValue": 0.7732,
+    "servedNReferenced": 960, "servedNReferencedBoundBy": "dense f64 reference range",
+    "servedNMixed": null, "servedNMixedStatus": "NOT ESTABLISHED",
+    "servedNMixedBlockedBy": ["genuine f32 hierarchical apply unmeasured",
+                              "kappaPrecond unmeasured above n=1920"]
+  }
+}
+```
+<!-- GATES:END -->
+
+---
+
+## 8. The constraint fork (#62)
+
+### 8.1 The problem, verified in source
+
+`src/core/sobolev/constraintSet.ts:206-250` (`edgeLengthsBlock`), lines `:211-213`:
+
+```ts
+const n = vertices.length;
+const m = edges.length;
+const phi = new Array<number>(m).fill(0);
+const C: number[][] = Array.from({ length: m }, () => new Array<number>(3 * n).fill(0));
+```
+
+So `C` is `|E| × 3n`. **On a closed polyline `|E| = n`, so `k = O(n)` exactly** — not a loose bound.
+With `barycenterBlock` stacked, `k = |E| + 3`. The set is assembled at `src/core/dispatch.ts:244`.
+
+With a dense factorization, `k+1` backsolves against an already-computed factor are cheap — the
+factor is the expensive part and it amortises. **With an iterative solve there is no factor to
+amortise**: each of the `k+1` systems is a fresh GMRES run with its own matvecs and preconditioner
+applications. At `k = O(n)` the per-step cost goes from `O(N·iters)` to `O(N²·iters)` — **worse than
+the dense path it replaced.**
+
+**And the escape hatch is gone.** `[DESIGN §1:112-115]` declared `perEdge` out of scope on the
+grounds that *"perEdge steps run the Phase 1 path (GPU dE, CPU factor)"*. That is only available
+while a CPU factor exists. #51 retires the factor, so the workaround retires with it.
+
+### 8.2 The ruling: a hybrid, Schur for `O(1)` blocks and nullspace for `edgeLengths`
+
+```
+barycenterBlock   (3 rows)        → Schur complement. k = O(1), Schur is cheap here.
+pointBlock        (3 rows/pin)    → Schur complement. Same reason.
+totalLengthBlock  (1 row)         → Schur complement.
+edgeLengthsBlock  (|E| rows)      → NULLSPACE route.
+```
+
+Two facts make the hybrid the natural answer rather than a compromise:
+
+- `k = O(1)` blocks are exactly where the Schur complement is cheap, so there is nothing to gain by
+  moving them.
+- `docs/superpowers/specs/2026-07-03-sobolev-constraints-design.md:153` records that
+  `totalLengthBlock` and `edgeLengthsBlock` are **MUTUALLY EXCLUSIVE in one set**. So the
+  combinations that must actually work are: `{barycenter, totalLength, pins}` (all-Schur, the
+  existing path) and `{barycenter, edgeLengths, pins}` (hybrid). **There is no set in which both
+  routes must handle `O(n)` rows simultaneously.**
+
+### 8.3 What the implementation must settle
+
+1. **Represent the nullspace implicitly.** Never form a `3n × (3n−k)` basis. For `edgeLengths` on a
+   closed polyline the Jacobian has a one-row-per-edge structure whose nullspace projection is an
+   O(n) operator — specify it as a matvec, like everything else in §5.
+2. **Order of projection and preconditioning.** Both are linear operators applied per GMRES
+   iteration, and **the order decides whether the projected operator stays symmetric positive
+   definite**. Get this wrong and GMRES converges on a non-symmetric operator while every residual
+   looks fine — the §5.3 failure mode again. The projected-preconditioned operator must be verified
+   SPD on the constrained subspace before any convergence number is quoted.
+3. **`[G6]`'s separate exclusion still applies.** `[DESIGN]:49-51` excluded `perEdge` for a
+   **conditioning** reason — `κ·u_f32 > 0.1 at N ≥ 480` — which is independent of the solve
+   architecture. **A nullspace route does not inherit an exemption just because it avoids the Schur
+   complement.** It must be checked against that bound separately, and §6's mixed-precision ruling
+   is what it has to lean on.
+
+Reference: `[YSC]` (arXiv:2006.07859) constraint handling; Repulsor at `DOM_DIM=1`.
+
+---
+
+## 9. Risks not covered by gates
+
+### 9.1 GPU cost (highest)
+
+Every GPU figure is extrapolated through an unmeasured 40–200× bandwidth factor (§3.6), and the
+near-field precompute (~3.5 s on one CPU thread, §3.3) has **no GPU estimate at all**. §7 contains
+no timing gate because there is nothing honest to set one against.
+
+**The measurement protocol, when a kernel exists.** #63 is the reason it is not the obvious one:
+Firefox **advertises `timestamp-query` and returns all zeros**, and zeros are indistinguishable from
+a very fast kernel — it fails silently in the direction that *confirms* an optimistic prediction.
+
+1. Wall clock only. Amortise: K ≈ 50–200 matvecs, **one** `mapAsync` at the end, minus a K=0
+   baseline, ÷K.
+2. Separately measure single-matvec-plus-readback. **The gap is the per-iteration readback tax GMRES
+   pays for its dot product** — which is the main GPU design risk for this phase, and the reason #51
+   expected Phase 3's zero-readback work to land with or before 2H.
+3. **Pin the Vulkan ICD.** Unpinned, Firefox runs WebGPU on the **Intel UHD 630**, not the Quadro
+   RTX 3000 — about an order of magnitude less bandwidth, and with blank `adapterInfo` **nothing in
+   the result JSON reveals it**. Confirm with `nvidia-smi --query-compute-apps` *inside* the
+   measurement window. `bench/gpu/adapterCert.ts` is the sanctioned route; `classifyAdapter` rules a
+   blank record `'software'` **by design — do not relax it.**
+
+### 9.2 Measurement gaps, ranked by what they could change
+
+| gap | why it matters | cost to close |
+|---|---|---|
+| **Genuine f32 hierarchical apply** driven through the whole solve | both f32 walls rest on a *dense* f32 stand-in (§6); this decides where the mixed-precision switch goes, and it is the one run that could invalidate §7.11's whole range ruling | low — §11 **task 10** |
+| **Adversarial rhs** that excites θ=0.5's 0.4–2.2 % bad modes | every `cos∠_A` is against 5 random rhs; a converged flow is exactly where the rhs stops being random. #64 calls this "cheaper and far more decisive than another `c₁` point" | low — **promoted to gate H6** (§7.9) and §11 **task 0c**, because §7.6 removed the instrument §4.1 was resting on |
+| **`κ₂(Ã⁻¹A_σ)` above n = 1 920** | MEASURED flat only to n=480 in JSON; **ASSUMED** flat above 1 920, and that assumption carries the entire mixed-precision scheme via H5 property 3 | low–medium — §11 **task 0b(iv)** + matrix-free Lanczos; needs no dense matrix |
+| **One wall-clock GPU matvec at n=30 000** | **H3's primary bar is 0.5 s ÷ 7.8 ms, and the 7.8 ms rests on zero GPU runs** (§3.6) | low — §11 **task 11** |
+| **Accuracy on tangle-class geometry** | all direction/SPD/line-search results are on `trefoil` alone; κ_near spans 14.67× across geometries | medium |
+| **Accuracy at n > 4 000** | every BCT error number is n≤4 000 (θ=0.5) or n=960 (θ sweep); nothing at the 30 000 target | high — the exact reference is O(N²) |
+| `c₁(θ=0.5)` at n ≥ 8 000 | θ=0.5's residual risk is an oscillation of unknown period | high |
+| A real optimiser trajectory | all fixtures are synthetic; a curve mid-flow may be worse than tangle | medium |
+
+### 9.3 Cheap unexplored wins
+
+- **Leaf size.** Swept once, at one n, one θ, with no timing. leaf=8 is a convention (§5.5).
+- **The adjacency certificate** is conservative and costs +15.4 % (trefoil) / +199 % (circle) — but
+  measured **only at θ=0.5**, and it vetoes nothing at θ≤0.4. A sharp O(1) alternative (per-cluster
+  min/max edge index + wrap flag) is proposed, unimplemented, unmeasured.
+- **Split plane.** Median split is what creates the power-of-two oscillation that weakens every fit
+  in this document (§3.2, §4.3). SAH is untested.
+
+### 9.4 What the GPU port must not break
+
+The near field must stay an array-of-structs / CSR-like layout with the two per-kernel value arrays
+**separately bound** (§3.4), because that is what keeps the largest single binding at 12.38 MiB
+(trefoil) / 36.93 MiB (tangle) instead of 24.8 / 73.9 MiB. And `(−Δ)⁻¹` is a *sequential* two-sweep Thomas
+solve — it is 0.83 % of the matvec on CPU, but it does not parallelise, so on GPU it may stop being
+negligible. Measure it before assuming the CPU split transfers.
+
+---
+
+## 10. Provenance and corrections
+
+### 10.1 Everything in this spec that is not measured
+
+| claim | status |
+|---|---|
+| all GPU timings (1–5 ms, 3–16 ms, 0.10–0.51 s) | **EXTRAPOLATED**, zero GPU runs |
+| 12-thread CPU (~1.0 s) | **ASSUMED** — no multithreaded run exists |
+| `~33 MiB` / `34.3 MiB` f32 memory | **EXTRAPOLATED** (two estimators) |
+| `L_{2−s}` cost (+43 ms) and memory (+12 MiB f32) | **DERIVED** from a 3/12 column ratio; never implemented |
+| GMRES iteration count at n=30 000 | **EXTRAPOLATED** from n≤960. The n≤960 counts are now MEASURED in the correct configuration (§5.3.1a) and grow ×1.28–1.45 over that range, so "flat" is withdrawn. This is what H3 gates |
+| `c_far = 7.2 ns` as a constant | **not constant**: 4.87 → 7.20 ns over n=5 000…30 000. Far is 7 %, so immaterial, but do not call it a constant |
+| 33.9 % quadrature disagreement | **report-only**, no saved artefact (§5.4) |
+| "near pairs go as leaf²" | **unsupported**; per-vertex it is linear in leaf size (§3.2) |
+| "bad modes track BVH leaf alignment" | **hypothesis** — the mechanism is measured for `κ_near`, inferred for `c₁` |
+| `[RS §5.1.5]`'s O(N²)-time/O(N)-storage exact reference | **ESTABLISHED by derivation** (§7.1), not cited — RS says only "the action of H is evaluated exactly". The O(N) storage holds **only if the χ=0 path streams**; precomputing near values at χ=0 costs **3.60 GB** at N=30 000, which is the dense storage this phase exists to escape. Measured constant 63.58 ns per pair·column ⇒ 343 s per exact matvec at N=30 000 |
+| **`κ₂(Ã⁻¹A_σ)` flat above n = 1 920** | **ASSUMED.** MEASURED flat to n=480 (JSON) and *reported* to 1 920 with no surviving artefact. **This assumption carries the entire mixed-precision scheme** via H5 property 3 (§7.8). §11 task 0b(iv) |
+| **H3's per-iteration 7.8 ms**, which its primary bar divides the 0.5 s budget into | **EXTRAPOLATED** from a bandwidth argument with **zero GPU runs**. The bar is a pre-registered constant, so the gate reads no clock — but the bar is only as good as this number. §11 task 11 |
+| **Every f32 arm in the entire corpus** | a **dense f32 matvec of the hierarchical matrix** (`scratch/gmres_lab.py:67-75`), not a genuine f32 hierarchical apply. #59 called this conservative; §7.2 falsifies that by 5–13× in the **unsafe** direction. §11 task 10 |
+| H1-b's knock-out, H5's rank-tolerance margin, H4c at n=960 with controls, any `tangle` or n>4 000 accuracy | **NOT MEASURED.** Each is a numbered item in §7.11 with the run that closes it |
+
+### 10.2 Retracted claims — do not quote these
+
+| retracted | by what | replaced with |
+|---|---|---|
+| "GMRES iteration count is unmeasured at any n" (#57) | reading #59's JSON, in the same directory | 21–26 to 1e-2, 28→39 to 1e-4, flat n=64…960 |
+| "f32 is free here, so trap 3 is not a 2H blocker" (#57) | #59's bisection; #64 §7.1 | f32 walls at **n≈1 200–2 000**, θ-independent (§6, §7.11). **Wrong in the dangerous direction** |
+| "θ=0.5 is probably not a usable operating point" (#57 §0, §7.9, §9.2) | #64 | VIABLE at θ=0.5 guarded by H4b′ + H4c + H6 (§4.1). **#57's body was never amended — do not quote it on θ** |
+| `β` self-anchoring "≤ 2× the δ=0 baseline" criterion (#59) | its own n=1 920 point, off by **28×** | absolute `cos∠_A ≥ 0.9`. Cause: the δ=0 anchor itself jumps 7.8× at n=1 920, so the rule silently loosened exactly where the solve was failing. **A relative criterion cannot gate a quantity whose anchor is degrading** |
+| `c₁(θ=0.5) ∝ n^{-0.583}` ⇒ recommend θ=0.25 (#64) | its own fifth data point | no trend; R²=0.216 (§4.3) |
+| "a real BCT's β comes out lower than the random model" (#59's flagged prediction) | #64 | **655× to 921 600× higher** |
+| "bad modes sit at self-approach regions" (#64's own hypothesis) | #64's own measurement | falsified; they sit where the curve is *farther* from itself (§4.3) |
+
+**Gate bars retracted in this spec's recalibration** (evidence:
+`.superpowers/sdd/2026-09-11-phase2h-queue/reports/gate-recalibration.md`; rulings: §7):
+
+| retracted | by what | replaced with |
+|---|---|---|
+| **H4b: `cos ≥ 0.9` on "a monotone computable lower bound"** (#59) | algebra — `c²−a·q = (c−a)² ≥ 0` ⇒ the surrogate is `≥ 1` **identically**, so it is an UPPER bound and the bar sits below its structural minimum. Confirmed on 122/122 of the samples where the surrogate is defined (53 more have `q ≤ 0`, where it is
+undefined); **16 measured false passes** with true `cos` down to **0.0281**; #59's own knock-outs return INVALID, never RED | `min q > 0` — structural, no free constant. `q ≤ 0` is **RED, not INVALID** (§7.6). This is the repo's own instance of memory `gates-name-their-impossible-values` |
+| **#64: "ship θ=0.5 with H4b as a mandatory per-solve guard"** | the above | θ=0.5 guarded by H4b′ (catastrophic only) + H4c (end-to-end) + **H6** (the sub-0.9 modes). **H4b′ cannot distinguish θ=0.5 from θ=0.25** (§4.1, §7.9) |
+| **H1: `δ_total ≤ δ_bar = √(α·β)`** (#59) | all three candidate anchors need a **dense** matrix ⇒ unmeasurable above N≈5 793; and `√(αβ) = 4.41e-04` vs a *correct* operator's measured `δ_total = 2.236e-02` at n=960 ⇒ permanent AMBER | **no bar on δ's magnitude.** H1-a gates θ-monotonicity; H1-b gates the precision band (§7.2) |
+| **H2: `β_η = 0.43·β_H1`** (#59) | a **perfect** operator (δ=0) is RED at every n by 1.58–3.68× at the 1e-4 stop, and still RED for n≥240 at 1e-6; the 0.43 transfer was measured for random E only | `η ≤ 50·u_f32 = 2.98e-6`, **run to the floor**, independent of H1 (§7.3) |
+| **H2's INVALID `η < u_f32/10`** (#59) | as written it rules **every correct f64 run** INVALID — the f64 arms reach `etaFloorMin` of 2.047e-16 | `η < u_op/10`, scoped to the operator's own precision (§7.3) |
+| **H3's `α_G`** — both 1.1034 (#59) and the D1-corrected 1.1379 | 64→120 is ×1.875, so neither is an instance of `G = iters(2n)/iters(n)`; **and both count to a fixed recurrence τ whose optimism grows `n^3.056`** — the exact error #59 retracted for H1's β | `α_G` **WITHDRAWN**. Primary bar `iters(30 000) ≤ 64`; companion `G ≥ 2.0 ⇒ RED` (§7.4) |
+| **H4a: `ε_A ≤ 2·ε_A(δ=0)`** (#59) | the self-anchoring form #59 itself retracted; its anchor is non-monotone **at n=960** and jumps **7.8×** at n=1 920 | `cos∠_A ≥ 0.9` absolute; `ε_A` RECORDED. `cos∠_A(δ=0)` *improves* with n, 0.9704 → 0.9993 (§7.5) |
+| **H4c: median accepted τ ≥ ½ the reference's** (#59) | **8 of 15** measured BCT arms RED, 4 more passing only by exact equality, while **every one delivers ≥ 99.691 %** of the exact energy decrease; the ratio is non-monotone in θ. τ measures step *scale*, not quality | `R_E ≥ 0.95` **and** accepted fraction `== 1.0`; both sides MEASURED (15/15 ≥ 0.99691 vs 6/6 ≤ 0.86027). τ RECORDED (§7.7) |
+| **H4c at K=50** (#59) | K=50 has never been run anywhere | **K=20**, the measured configuration (§7.7) |
+| **"the hierarchical f32 floor is lower than the dense `sgemv` — conservative in the safe direction"** (#59) | #57's own JSON: hierarchical apply noise 1.06e-6 / 3.00e-6 vs dense 2.23e-07 at n=960, growing `n^0.829`/`n^1.176` vs `n^0.370` | **falsified by 5–13× in the UNSAFE direction.** This is what moves the f32 wall from n≈3 310 to n≈1 228–1 773 (§6, §7.11) |
+| **H5 property 2 "measured flat to n=1 920, `p = 0.0010`"** (#59) | `e0_sanity.py` writes no JSON and its log is not saved; the value appears in no artefact, and `p = 0.0010` reproduces from neither point set | **"measured flat to n=480 (JSON); reported to n=1 920 (no artefact)"**, `p = 0.01215` re-derived. Bar `\|p\| ≤ 0.05` survives by ≥4× (§7.8) |
+| **H3's `τ_η = 1e-4`** (first draft) | MEASURED after the draft: the count collapses `26 → 3` over n=64…480, so `iters(30 000) ≤ 64` is satisfied by **3** with no INVALID predicate to catch it. The reasoning error: a non-degrading residual *floor* does not imply a non-degrading *level* — η's level at fixed iteration count falls as `n^-2.90` | superseded twice; see the next row |
+| **H3's `τ_η = 1e-6` on the f32 operator** (second draft — **my own error, 20 min after the first**) | picked from the n ≤ 480 rungs alone (31/35/36/32, apparently flat). The n=960 and n=1 920 rungs are **19 and 12** — the same collapse, one octave out. And it is structural: the f32 η floor is ≈3e-8, so no fixed `τ_η` is both reachable and non-degenerate in f32 | **`τ_η = 1e-8` on the f64 operator**: 36/42/43/41/39/37 over n=64…1 920, doublings 1.0238/0.9535/0.9512/0.9487, `iters(30 000) ≈ 40.6` vs the bar 64. H3's scope narrows to the preconditioner's **spectral** mesh-independence; precision is H1-b's and H4a's job. f32 run-to-floor RECORDED as a companion (§7.4) |
+| **"`p = 0.0010` reproduces from neither point set"** (first draft, inherited from the recalibration) | it reproduces as **0.00099 over the four LARGEST points** — the defensible choice for an asymptotic-flatness claim. #59 was right a second time | `p` always quoted with its point set (§7.8) |
+| **H5 p1's rank-tolerance INVALID predicate, unscoped** (first draft) | the `rs-identity` **knock-out** has `λ₂/λ_max ≈ 1e-15` and trips it at every n, so the knock-out would report INVALID instead of RED — the same error class as #59 classifying H4b's `q ≤ 0` as INVALID | scoped to the production vertex-collocated variant only (§7.8) |
+| **"the two derivations landing on 63.2 and 64 is the strongest single fact in this section"** (first draft) | 64 is a **budget ceiling**, 63.2 a **predicted need** — not two estimates of one quantity. Agreement means **zero margin**, not corroboration. And the n=240 per-seed counts `[38,38,40,40,38]` are a 3–2 median split; taking 40 moves the projection to **71.9**, over the bar | a risk finding in §9.1, not a corroboration claim (§7.4) |
+| **H5 property 3 as "the gate that licenses f32-inner"**, on `[CH18]`'s `φ = (c₁κ∞(A)+c₂)u_s` (first draft) | CH18's conditions are on `κ∞(A)` — original matrix, infinity norm — and its `κ∞(A) ≤ 1e8` relaxation is derived for **GMRES preconditioned by low-precision LU factors**, which this architecture does not have. The `φ` form is not in CH18; nearest match is eq. (3.8) of the **five**-precision successor | property 3 **RECORDED as a diagnostic**; the f32-inner license re-anchored on H1-b + the f64 outer residual, citing **inexact Krylov** (§7.8, §7.9) |
+| **`κ₂(Ã⁻¹A_σ)` as the notation for H5 p2/p3** (first draft) | `Ã⁻¹A_σ` is a product of two SPD matrices, hence not symmetric, so `cond(·,2)` (singular values) ≠ `λ_max/λ_min` (eigenvalues) — MEASURED 1.4544e4 vs 1.0977e4 at n=64, a **1.33× gap**. The artefact computes the eigenvalue ratio; the notation denoted the other one | **`κ_eig`**, with both recorded (§7.8) |
+| **"the crossing is strictly inside (960, 1 920], measured"** (first draft) | the apply noise is measured at n=**2 000** and the tolerance at n=**1 920**; no n above 960 carries both | **(960, 2 000]** (§7.11) |
+| **`δ_precision` margin anchored on 1.533e-06** (first draft) | that value is console-only (`run-64-verify.ts:129`), written to no JSON | the archived `f32NoiseHi`/`f32NoiseLow` give the same 19–54× (§7.2) |
+| **H2's "≤ 7.6 % error in a denominator"** (first draft) | measured at **θ=0.25**; production is θ=0.5, where the generalized spectrum reaches `c₁ = 0.2886`, i.e. ≤ 71 % | re-based on `lamMaxBct/lamMaxA ≤ **0.53 %**` — the norm ratio, not the spectral spread (§7.3) |
+| **H4c conjunct 1's red side "6/6 random arms ≤ 0.86027"** (first draft) | those arms have `K_run` = 1,2,6,2,1,10 against K=20, which the gate's **own** INVALID clause forbids folding into a ratio | red side **NOT ESTABLISHED**; conjunct 2 carries the separation (§7.7) |
+| **"42 iterations" as the production budget** (first draft) | conflates three counts differing ≥14×. `min cos∠_A ≥ 0.9` is MEASURED at **2 iterations (n=480) / 3 (n=960)** | production **3**; 32 is H3's gate currency; 42 is the backward-error budget (§3.5) |
+| **Repulsor's `H1Metric.hpp` / `SetH1MassWeight` as the source of the 1e-3 mass default** (first draft) | **neither symbol occurs anywhere in this repo outside this spec** — no URL, no commit, no path | attribution withdrawn; mass weight **decided = 1** by measurement, since 1e-3 breaches a 1e-9 residual on 7 of 9 cases at n ≥ 10 000 by up to 182× (§11.2, §12 q1) |
+| **"`PreparedSaddle` is the one member that breaks" / "task 8 is the only task touching production code"** (first draft) | `FrozenSaddleOperator.a` is a second required dense carrier, and `projectOntoConstraintSet` (`lineSearch.ts:259-267`) is a second consumer with no hierarchical route. The `A?` delta does not compile: TS18048 at `optimizer.ts:291`, TS2322 at `gradient.ts:127` | a `kind`-tagged **discriminated union** on both interfaces, task 8 across **five** files, plus task 8b for the producer (§5.1, §11.2) |
+| **R1 as "the largest n where H1, H2, H4b are simultaneously green"** (#59) | with the re-specified gates this reports a falsely **HIGH** ceiling — H4b′ cannot fail, H2 is non-vacuous to 30 000, H1 has no magnitude bar | **three** ceilings, each with its binding gate's VALUE; `servedN_mixed` = **NOT ESTABLISHED** (§7.10) |
+
+### 10.3 Numbers in the source reports that their own raw data contradicts
+
+Carried here so they are not re-imported. Full lists in `digest-57.md` §11 and `digest-59.md` §0.
+
+- matvec fit exponent: report **0.907**, JSON **1.0464**. `0.907` appears in no scratch file.
+- H3's `α_G`: report takes iters=32 at n=120; `e5-growth.json` median is **33**. The report also
+  prints three different values for one bar (1.4855 / 1.5086 / 1.5163), and **1.5163 reproduces from
+  no JSON** — the nearest reconstruction, `√(1.1034 × 2.0833) = 1.5162`, would be a
+  cross-contamination of the RS and *Jacobi* tables. Unresolved; do not quote it. All three are moot
+  (§10.2: `α_G` withdrawn).
+- **H5 property 2's n=960 and n=1 920 values exist in no artefact.** `e0_sanity.py` writes no JSON
+  and its log is not saved; a grep for its values across all of `scratch/*.log` returns nothing. The
+  four JSON-verifiable values match #59 exactly; the two largest do not exist outside report prose.
+- **`lineSearchStepSet` has FIVE failure `reason` strings, not three** (#59 names two): source read
+  at `lineSearch.ts:444-583` gives `zero_or_nonfinite_gradient_norm`, `not_a_descent_direction`,
+  `tau_below_min`, `armijo_failed`, `projection_failed`, across three `accepted:false` exits, all
+  setting `tau: 0`. Also undocumented anywhere: **`tauMin = 1e-12`**, so the maximum backtrack count
+  is `log₂(1/1e-12) = 39.9`.
+- `AdapterCertification.classification` is at `bench/gpu/adapterCert.ts:48` (digest-59 cites `:29`,
+  which is inside the module docstring).
+- **`GPU_SOLVE_MAX_N` does not exist in `src/**` or `bench/**`** — only in plan and spec docs. The
+  N ≈ 5 793 cap that CLAUDE.md describes as "enforced" is currently **unenforced in code**.
+- "3–16 ms": labelled per-iteration in one table, per-matvec everywhere else. **This spec says per
+  matvec.**
+- "0.10–0.51 s at n=30 000": not in #57 at all (#57 says 0.08–0.4 s); it is #64's `cost64.py`.
+- largest single f32 buffer: report **25 MB**, actual **12.38 MiB** per array (25 is the sum of the
+  two) — **and the reported per-array figure is in MB where the device limit is in MiB** (§3.4's
+  unit correction, re-derived here from `stats.nearPairs`).
+- near-field precompute at n=30 000 θ=0.5: **3 512.5 ms** in the same run as the 194 ms matvec
+  (`-prenear.json` `build.precomputeNearMs`), vs 3 182.9 ms in #64's separate run. Neither report
+  put either number in a budget.
+- "4× optimistic": that is 12 columns vs 3; vs one scalar apply it is 12×.
+- tangle f32 total: report ~97 MB, JSON 93 562 104 B = **89.23 MiB** (quoted in the source as 93.6 MB).
+- the handoff's "6.55e-6 at n=480" is `beta2xMin` from the **retracted** criterion; the gate's own
+  `betaCos90Min` at n=480 is **7.156e-5**.
+- `structuredSaddleResidual` is at `linsolve.ts:860` (reports say `:855` and `:848`).
+- **"GMRES iterations 21–26, flat n=64→960"** (#51, the handoff, every cost table) is E1's
+  `rs/**right**/f64` row. The architecture mandates **left** preconditioning, which this spec
+  measured for the first time (§5.3.1a): **25/27/26/32/32** to τ_true=1e-2, i.e. ~28 % more at n=960
+  and mildly growing. And since H4b′ is only a valid classifier at **τ ≤ 1e-4** (§7.6), the
+  *production* multiplier is the 1e-4 column: **29/35/38/41/42**. **The correct budget multiplier is
+  42, not 26** — a 1.6× cost understatement in every prior projection.
+- **The recurrence/true currency gap, in one measured pair, no fit:** at n=960 the recurrence count
+  to τ=1e-8 is **17** while the true-residual count to τ=1e-4 is **42**. The recurrence target is
+  nominally four orders *tighter* and needs **2.5× fewer** iterations (§7.4).
+- **E1 and E5 report iteration counts against different residuals** (true vs recurrence) and
+  disagree by ~10× at τ=1e-2. Neither report says which it used. §5.3.1.
+
+### 10.4 Process note that earned its place
+
+**Every agent in this phase's measurement round self-corrected after reading a sibling's output, not
+after being challenged.** #57 retracted two claims; #59 retracted a criterion its own n=1 920 point
+falsified 28×; #64 retracted the fit its own fifth point killed. And #64 records that had its sweep
+stopped at n=2 000 — where two earlier attempts died — it would have recommended the wrong θ for a
+falsified reason.
+
+**Extend every sweep one point past where the fit looks clean.** That is the single most valuable
+procedural lesson available to whoever implements this spec.
+
+> **It has now failed twice inside this document, both times on H3.** #59 pinned `α_G` on a 64→120
+> step that is not a doubling. This spec then pinned `τ_η = 1e-6` on four rungs that looked flat and
+> collapsed at the fifth and sixth (19, 12). Writing the lesson down demonstrably does not prevent
+> it — **the only thing that did was running the next two rungs.** Treat any flat series of four
+> points as unverified until there are six, and treat a gate calibrated on a partial ladder as
+> provisional no matter how clean it looks.
+
+---
+
+## 11. Implementation
+
+No separate plan document (ruled 2026-10-09). The task sequence, its ordering constraints and its
+verification are here.
+
+### 11.1 Ordering constraints, each with a reason
+
+1. **`L_{2−s}` and `Ã⁻¹` before any ITERATION COUNT is measured.** §5.2's trap: measure iterations
+   against an unpreconditioned operator and the result looks like a regression in the wrong
+   component. Restated from the first draft's "before the BCT", which the task numbering contradicts
+   (task 3 is `bct.ts`, task 6 is `lowOrder.ts`/`precond.ts`); the numbering is correct and satisfies
+   the real constraint, because the first iteration count is measured in task 7 (`gmres.ts`).
+2. **The `endpoint4` bit-level pin (§5.4 item 4) before any accuracy number is quoted.** It is the
+   only standing check that the near field agrees with `assembleAFlat`, and the 33.9 % figure it
+   replaces has no saved artefact.
+3. **The linearity check on the apply before anything built from basis-vector applies.** #64 gated
+   its own harness this way and it is why its densification results are trustworthy: applying the
+   operator to `N` unit vectors is only legitimate if the apply is linear, and nothing else would
+   catch a data-dependent branch or a per-vector renormalisation.
+4. **f32 and f64 as accumulator variants of one traversal from the start** (§5.6). Retrofitting this
+   is how an f64 simulation of an f32 kernel ends up reporting zero error.
+
+### 11.2 Tasks
+
+| # | task | files | verification |
+|---|---|---|---|
+| ~~0a~~ | ~~Close the iteration-count gap~~ — **DONE while authoring this spec.** `scratch/e1b_left_f64.py` → `e1b-left-f64.json`, control reproduces E1 at all five n | `scratch/` only | ✅ §5.3.1a. Budget multiplier is **32** (1e-2) / **42** (1e-4), not 26 |
+| 0b | **Calibration closers** — four edits totalling ~8 lines, each unblocking a gate that §7 ships WITHOUT a measured anchor. (i) `e1_gmres.py`: `first_below(et, t)` alongside the existing `first_below(tr, t)` ⇒ `iters(n)` at fixed `τ_η`, H3's companion band (§7.11 item 3); (ii) same file, `argmin` of η ⇒ H2's probe schedule (item 4); (iii) `e4_precond_integrity.py`: record `λ₁`, `λ₂`, `λ_max`, `rankTol` ⇒ makes H5 property 1 falsifiable instead of tolerance-dependent (item 8); (iv) `e0_sanity.py`: add a JSON emitter and re-run at n=64…1 920 (caches exist) ⇒ restores H5 property 2's missing support (item 2a) | `scratch/` only | H3's `G` resolvable (`iters ≥ 15` at the chosen `τ_η`); H2's probe `p` chosen from data rather than assumed; `λ₂/λ_max ≥ 10·rankTol`; `p` re-fitted on 6 real points |
+| 0c | **H6 — the adversarial rhs** (§7.9). Build `b` from the sub-0.9 generalized modes at n=960 and 2 000, θ=0.5; measure `min cos∠_A` and `q`. **This decides §4.1's θ default**, so it runs before task 3 fixes a default. Eigenvectors already exist in `scratch/run64_badmodes.py` | `scratch/` only | `min cos∠_A ≥ 0.9` ⇒ default stays 0.5; `< 0.9` ⇒ default flips to 0.25 and §4.1/§4.4 are amended. Also records `q` on the same rhs, which is the **first** test of H4b′ outside the random-rhs regime |
+| 1 | `laplacian.ts` — Sherman–Morrison cyclic tridiagonal `(−Δ)⁻¹`, **mass weight 1 (decided, §12 q1)** | new + test | O(N) scaling. **Per-case bars from `out-tridiag.json`, mass=1**: `closed-cyclic` ≤5e-11 at n=30 000, ≤5e-10 at n=100 000; `open-tridiag` and `closed-circle-cyclic` on their own measured rows. **The flat `≤1e-9` bar is withdrawn** — see below |
+| 2 | `bvh.ts` — R⁶ tangent-point BVH, median split, leaf=8. **PORT from `scratch/bvh.ts`** (see the prototype ruling below) | new + test | leaf count = power of two; mean leaf size in 4.88–7.81 at the five reference sizes |
+| 3 | `bct.ts` — block lists, Eq. 28 admissibility, adjacency veto, **χ/θ as a runtime parameter whose minimum is the exact all-inadmissible path**, and that χ=0 path must **stream** (§7.1) | new + test | `κ_near` reproduces 108.20 at n=30 000 θ=0.5 and 93.3 at n=960; `adjacencyVetoed` = 0 at θ≤0.4; the `circle` 0.5→0.25 `κ_near` tie is *flagged*, not swallowed. Memory-assert that χ=0 allocates no `O(N²)` near array. **H1-a is NOT verified here** — `δ_compress` is a norm ratio of two *applies*, so it cannot be computed from block lists alone; it moves to task 4. The inverted-admissibility knock-out (`≥ θ·\|x_A−x_B\|`, one sign flip) is authored here and asserted there |
+| 4 | `nearField.ts` + `apply.ts` — `endpoint4` near assembly, the 12-column traversal, **f32/f64 accumulator variants of one path** | new + test | **§5.4's bit-level pin**; the §11.1 linearity check; `A_bct·1 = 0` exactly for the apply; f32-vs-f64 apply ≈1.5e-6. **H1-b**: `δ_precision ≤ 10(κ_near+κ_far)u_f32` (bar 5.78e-5 at n=960, measured 1.5e-6), and **produce the missing knock-out** — truncate the near accumulator to f16 and confirm it exceeds the bar (model predicts 4.7e-2, 820×; §7.11 item 7) |
+| 5 | `operator.ts` — `SobolevOperator`, `σ = tr(A_bct)/n`, `K1`/`K⁰1` | new + test | SPD: Cholesky of `A_bct,σ` succeeds; symmetry defect ≤1.6e-16; `tr(A_bct)/tr(A)` in 0.989–1.000 |
+| 6 | `lowOrder.ts` + `precond.ts` — `L_{2−s}`, `Ã⁻¹`, constant-mode correction | new + test | **H5, all three properties** (§7.8): `dim null(L^{2−s}) == 1` (defect variant gives 2); `\|p\| ≤ 0.05`; **`κ₂(Ã⁻¹A_σ)·u_inner ≤ 1e-2`** — the precondition of the whole mixed-precision scheme. Both knock-outs trip; `λ₁`/`λ₂`/`λ_max`/`rankTol` reported so nullity is falsifiable; nullity ≥ 3 ⇒ INVALID, not RED |
+| 7 | `gmres.ts` — left-preconditioned GMRES exposing `x̃`, `b`, `iters`, `maxit`, `tol`, the per-iteration recurrence residual **and an `η` probe hook on the χ=0 matvec with a recorded probe stride** (§7.3) | new + test | **H2 + H3** on one instrument. The right-preconditioning knock-out must trip (`cos∠_A = 0.142` at n=480 while recurrence reads 1e-4); the recurrence-residual-as-η knock-out must trip RED at 34× the bar; **`η_exact` must never be bit-equal to `η_bct`** (both computed); `iters == maxit` and any-direction-censored ⇒ INVALID, and compare against `maxit`, **never** against `n` |
+| 8 | Seam: the `kind`-tagged `PreparedSaddle` and `FrozenSaddleOperator` unions, `HierarchicalSaddleSolver`, operator-shaped `structuredSaddleResidual`, **and the `projectOntoConstraintSet` hierarchical route** (§5.1) | `linsolve.ts`, `gradient.ts`, **`optimizer.ts`**, **`lineSearch.ts`**, **`src/gpu/saddle.ts`** | **the dense branch stays byte-identical** — existing goldens are the gate; `kind: 'dense'` ⇒ bit-identical, and `optimizer.ts:291`'s dense throw message is pinned by `test/gpu/saddleSeam.test.ts:287-295`. `bunx tsc --noEmit` clean is a hard gate here: the first-draft `A?` delta produced TS18048 + TS2322 |
+| 8b | **`hierarchicalSaddle.ts` — the producer.** A `makeHierarchicalSaddle(vertices, …): HierarchicalPreparedSaddle` factory plus its wiring through `dispatch.ts` → `optimizer.ts` `opts.saddle` | new + `dispatch.ts` | **without this the phase ships an unreachable feature**: tasks 1–8 widen a public type that nothing in the repo ever writes, and the dense path stays bit-identical only because it is still the only path. End-to-end: one `sobolevStepSet` on the hierarchical route at n=960, `cos∠_A ≥ 0.9` against the dense f64 reference |
+| 9 | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately |
+| 9b | `schur.ts` — the `k=O(1)` half of §8.2's hybrid (barycentre, 3 rows; per-pin, 3 rows; tangent, 1 row) | new + test | the hybrid is a two-branch ruling and the first draft gave a task to only one branch. Dispatch on `k`: Schur for `k=O(1)`, nullspace for `edgeLengths`' `\|E\|` rows. Verify each branch reproduces the dense path's `x` to 1e-10 at n=960 on its own constraint set |
+| 10 | Mixed precision: f32 inner, f64 outer (§6) | `gmres.ts`, `apply.ts` | **a genuine f32 hierarchical apply through the whole solve** (§9.2's top gap) — locate the wall, do not inherit it |
+| — | ~~GPU wall-clock probe~~ | — | **NOT a task in this phase.** §7.11 item 6 wants one wall-clock matvec at n=30 000 to anchor H3's budget half, but §1.4 puts the GPU apply out of scope and §9.1 concedes the protocol needs "a kernel, when one exists" — so there is nothing to time. **Consequence, pre-registered: H3's budget-derived bar stays unanchored for this phase**, and its only live support is the CPU-f64 projection (§7.4), which §7.4 itself marks as integer-noise-sensitive. Do not quote `0.5 s ÷ 7.8 ms` as measured |
+| 11 | Gate harness, emitting §7.12's schema to `bench/results/<date>-gpu-phase2h-gate-calibration.json`. **TypeScript, not Python** (`bench/gpu/hCalibration.ts`) for H1-a, H1-b, H2, H3, H4a, H4b′, H4c — those gates are defined against the TS instruments built in tasks 3–8 (`applyA`, `lineSearchStepSet`, the GMRES `η` hook) and a `.py` harness cannot reach them. H5 and H6 stay in `scratch/*.py`, where their dense-eigenvalue instruments already live | new | every gate in §7 reports its **VALUE, not only its verdict**; every INVALID predicate reachable in a test; **R1 publishes three ceilings** and `NOT ESTABLISHED` where no gate binds; `clock: null` |
+
+**The prototype ruling: PORT tasks 2–4, do not re-derive.** `scratch/` already contains **3 823 lines
+of TypeScript** — `bct.ts` (811), `operators.ts` (455), `bvh.ts` (330), `curves.ts` (224),
+`tridiag.ts` (171) and nine `run-*.ts` drivers — and **this is the code that produced every measured
+constant this spec quotes**: `κ_near = 108.20`, the 194 ms matvec, every `out-bct-*.json` and
+`out-64-*.json`. §0's `ls src/core/sobolev/hierarchical/` check is true but misleading, and the first
+draft's "new + test" on tasks 2–4 asked an implementer to reproduce `108.20` from §5.5's prose —
+which only works if they guess the same split tie-breaks, leaf stopping rule and adjacency veto. That
+is reverse-engineering against a hidden answer key, not TDD.
+
+> **Port, with eyes open about what a port inherits.** The measurements are only valid for the code
+> that produced them, so re-deriving would invalidate every constant in §7 as a test oracle. But a
+> port inherits the prototype's bugs, and **one is already known**: `tridiag.ts` is where task 1's
+> `closed-circle-cyclic` residual comes out **159× over** the first draft's bar (see the mass-weight
+> ruling). So: port module-by-module, and for each one state whether a measured constant is being
+> used as an **oracle** (the port must reproduce it bit-for-bit) or as a **target** (the port may
+> improve on it). Tasks 2–4 use them as oracles; task 1 does not, because its number is wrong.
+
+**The mass-weight ruling: mass = 1, and §12 q1 is CLOSED.** The first draft left it open and set
+task 1's bar at a flat `≤1e-9`. Those are inconsistent, because the parameter decides the bar.
+MEASURED (`out-tridiag.json`, `relResidual`):
+
+| n | case | mass=1e-3 | mass=1 |
+|---:|---|---:|---:|
+| 10 000 | `closed-cyclic` | 2.1408e-09 ✗ | 3.2063e-12 ✓ |
+| 10 000 | `closed-circle-cyclic` | 2.4350e-08 ✗ | — |
+| 30 000 | `closed-cyclic` | 1.6968e-09 ✗ | **2.1214e-11 ✓** |
+| 30 000 | `closed-circle-cyclic` | **1.5881e-07 ✗ (159×)** | — |
+| 100 000 | `closed-cyclic` | 1.8245e-07 ✗ (182×) | 1.9401e-10 ✓ |
+
+**At mass=1e-3, 7 of the 9 measured cases at n ≥ 10 000 breach `≤1e-9`, by up to 182×. At mass=1
+every measured case passes with ≥ 5× margin.** `circle` is one of the three fixture geometries used
+throughout §3–§4, so this is not an exotic corner. And there is no verified external reason to prefer
+1e-3: the first draft attributed the 1e-3 default to Repulsor's `SetH1MassWeight` / `H1Metric.hpp`,
+and **neither symbol occurs anywhere in this repo outside this spec** — no URL, no commit, no path.
+That attribution is withdrawn (§10.2). Per CLAUDE.md's swappable-strategies rule the weight stays a
+parameter, **default 1**, with the 1e-3 arm's failures recorded above so nobody re-defaults it
+silently.
+
+**Task 0a was executed during spec authoring** (§5.3.1a) because §5.3.1 found the cost model's
+central multiplier to be sourced from a configuration this architecture forbids, and one CPU run
+settled it. It touched only `scratch/`.
+
+**Tasks 0b and 0c are scratch-only and run first.** Between them they are about 8 lines of edits plus
+one new short script, and they close four of the five gaps §7 currently ships with: H3's companion
+green band has no measured anchor without 0b(i), H2's probe schedule is assumed without 0b(ii), H5
+property 1 is tolerance-dependent without 0b(iii), H5 property 2 has no artefact without 0b(iv), and
+**§4.1's θ default is undecided without 0c.** None of them touch `src/**`, so they carry no
+regression risk and do not wait on tasks 1–11.
+
+> **§7.11 items 1, 9 and 10 are deliberately NOT tasks here.** Item 1 (a genuine f32 hierarchical
+> apply through the whole solve) *is* task 10 — it cannot be done earlier because it needs the real
+> apply. Item 9 (H4c's 6 missing control arms at n=960, ~3 h) and item 10 (`tangle` geometry and
+> n > 4 000) are calibration-breadth work that belongs after task 11 exists to run them, and both are
+> recorded in §9.2 as standing measurement gaps rather than silently dropped.
+
+**Task 8 is the only one that touches pre-existing production code.** Everything else is new files. That is
+deliberate: it keeps the blast radius of the architecture change to one seam, and it means tasks
+1–7 can be verified against measured constants without any risk to the dense path.
+
+### 11.3 TDD, and what "red" means here
+
+Standard order per task: a failing test that encodes a **measured** constant, then the
+implementation. Three rules specific to this spec:
+
+- **A test that pins a measured constant must cite it** — file, JSON key, and the conditions
+  (`n`, θ, leaf, quadrature, precision). A bare `expect(x).toBeCloseTo(108.2)` is unmaintainable;
+  the next reader must be able to find where 108.2 came from.
+- **Never assert an exactly-zero value without saying why it is structural.** `A_bct·1 = 0` for the
+  apply is structural (§2.2) and must be asserted exactly; a *row-sum* zero would mean the test
+  harness is faking it. CLAUDE.md's "gates name their impossible values" applies to tests too.
+- **Tolerances come from §7's measured α floors**, not from taste. If a test needs a tolerance that
+  no measurement supports, that is a finding, not a number to pick.
+
+### 11.4 Done
+
+- `bun test` green, `bunx tsc --noEmit` clean.
+- Every §7 gate runs and **records its value**; every INVALID predicate has a test that reaches it.
+- The dense path is bit-identical with `op` absent (existing goldens, unmodified).
+- `git diff` on `src/core/tangentPointEnergy.ts` is **empty** (@issue utof/repulsive-test2#52 —
+  `bun run check` autofixes repo-wide and has silently rewritten `Math.pow` → `**` in that hot path;
+  commit `52c3569` is the guard).
+- R1's served-N ceiling published (§7).
+
+---
+
+## 12. Open questions deferred to implementation
+
+1. ~~**The mass weight in `(−Δ)`.**~~ **CLOSED: mass = 1.** The operator is stiffness
+   `(w/ℓ)[[1,−1],[−1,1]]` plus mass `(w·ℓ/6)[[2,1],[1,2]]`; pure stiffness is **singular on a closed
+   curve**, so the mass term is load-bearing. The weight is decided by measurement in §11.2's
+   mass-weight ruling: at 1e-3, 7 of 9 measured cases at n ≥ 10 000 breach a 1e-9 relative residual by
+   up to 182×; at 1 every case passes with ≥5× margin. The `H1Metric.hpp` / `SetH1MassWeight`
+   attribution for the 1e-3 default is **withdrawn** — neither symbol exists anywhere in this repo
+   outside this spec (§10.2). It remains a runtime parameter; only the default is decided.
+2. **Where exactly the mixed-precision switch goes**, pending task 10's measurement.
+3. **Whether θ=0.5's bad modes are fixable** (§4.3) — an open investigation, not a known patch.
+   Note this is now *downstream* of H6 (§7.9, task 0c): H6 decides whether the bad modes matter in
+   practice before anyone spends effort on fixing them.
+4. **Whether the per-iteration GPU readback tax forces Phase 3's zero-readback work** into this
+   phase (§9.1 item 2). #61 ruled Phase 3 stays after 2H; that ruling was about ordering, and the
+   readback tax could reopen it.
+5. **Leaf size, split plane, adjacency certificate** (§9.3) — all cheap, all unexplored.
