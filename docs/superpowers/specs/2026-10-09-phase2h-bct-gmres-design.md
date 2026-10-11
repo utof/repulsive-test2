@@ -750,9 +750,24 @@ quadrature argument (§5.4) refers to.
 
 Five orders of magnitude of conditioning growth removed, flat to within 2.7 % over a 30× size range.
 
-> **Trap, measured, do not rediscover.** The RS preconditioner is **worse than no preconditioner
-> below n ≈ 223.** Unpreconditioned GMRES needs 45 iterations at n=64 where RS needs 29, but the
-> crossover is real and the dense path stays the right answer at small n. Also: unpreconditioned CG
+> **Trap, measured, do not rediscover.** ~~The RS preconditioner is **worse than no preconditioner
+> below n ≈ 223.**~~ **A28, RULED 2026-10-11 (task 7b): `n ≈ 223` is REFUTED by 2.8×. The crossover is
+> bracketed in `n ∈ [72, 80]`.** The trap's *direction* survives — there is a small-n regime where RS
+> does not pay — but the band is a third of the size claimed, and the original figure came from a
+> wall-clock ratio contaminated by the residency effect A29 describes.
+>
+> Settled on **load-independent integers** instead of wall-clock: RS is cheaper ⟺
+> `r < iters_none/iters_rs − 1`, both counted to the same `τ_η` on the same currency, where `r` is the
+> cost ratio of one RS iteration to one unpreconditioned iteration. **At n=240 the break-even `r` is
+> 8.0, and no `r` anyone has measured on this machine exceeds 2.82** — so across the whole
+> `80 ≲ n ≤ 223` band that this trap called "worse", **RS is cheaper by 1.6–6.3×**. The wall-clock
+> reading survives only at `n ≤ 72`. RS cost per iteration, exact from the counters:
+> **1 × `A_σ` apply + 6 × `solveLaplacian` + 1 × `applyLowOrderColumns`**.
+>
+> The operational half of the trap is UNCHANGED and is the part that matters: **build the BCT before
+> the preconditioner and you will measure a regression and blame the wrong component.** That stands on
+> its own, independent of where the crossover sits. The dense path also remains the right answer at
+> small n for the separate reason in §1 (N ≤ 5 793 fits a dense `A_σ`). Also: unpreconditioned CG
 > is measured at **1 217 iterations at n=960** growing superlinearly, and Jacobi buys 9.6 %. **Build
 > the BCT before the preconditioner and you will measure a regression and blame the wrong
 > component.** The preconditioner lands first or together, never after.
@@ -1387,11 +1402,44 @@ for n ≥ 240. **So the stopping rule is not a detail: H2 is only meaningful run
 | margin to the 50 u bar, DERIVED | 66× | 52× | 45× | 35× | **25×** |
 
 `etaFloorMax ≈ 1.081e-08·n^0.3406` (R² 0.981, EXTRAPOLATED) ⇒ 3.62e-07 = 6.08 u at n=30 000, **margin
-8.2×**. The `n^0.34` growth is consistent with Carson & Higham (2018) `[CH18]` Cor. 4.2's `η ≲ p·u`
-for low-degree `p`. The fit is deliberately **not** in the bar; the bar is a constant and the fit is
-only the non-vacuity argument. **The ×50 is CHOSEN** to sit at roughly the log-scale centre of the
-850× gap between the worst measured floor (1.98 u) and the nearest real defect (knock-out 1 at
-1 678 u), rounded to one significant figure.
+8.2×**. The fit is deliberately **not** in the bar; the bar is a constant and the fit is only the
+non-vacuity argument.
+
+> **A26, RULED 2026-10-11 (task 7b) — EVERY NUMBER IN THE TABLE AND THE FIT ABOVE IS A LAB NUMBER AND
+> DOES NOT TRANSFER. THE ×50 BAR SURVIVES; ITS STATED JUSTIFICATION IS ARITHMETICALLY WRONG AND IS
+> REPLACED HERE. THE SIGN OF THE EXPONENT FLIPS.** Re-measured on the SHIPPED operator (θ=0.5,
+> `{kind:'lists'}`, leaf 8, shipped `makePreconditioner` default `30/ext²`, left, trefoil at native
+> extent ≈5.4716, seeds 0–4, `tol:0` run-to-floor, min over 106 probes):
+>
+> | | n=64 | 120 | 240 | 480 | 960 | 1920 | 3840 |
+> |---|---:|---:|---:|---:|---:|---:|---:|
+> | `etaBctFloorMax` f32, MEASURED | 2.4547e-08 | 2.3229e-08 | 2.0522e-08 | 2.0114e-08 | 1.8552e-08 | 1.9453e-08 | 1.8245e-08 † |
+> | in `u_f32`, DERIVED | **0.412** | 0.390 | 0.344 | 0.337 | **0.311** | 0.326 | 0.306 † |
+> | margin to the 50 u bar | **121×** | 128× | 145× | 148× | **161×** | 153× | 163× † |
+>
+> † n=3840 f32 is **one seed**, not worst-of-5 (487.8 s/solve ⇒ 41 min for the full cell; the budget
+> went to the f64 arm and an extra H3 octave). Flagged, not hidden.
+>
+> **The shipped floor is 1.8–6.4× LOWER than the lab's and it FALLS with n**: fit
+> `3.294e-08·n^(−0.0774)`, R² 0.843, against the lab's `n^(+0.3406)`. EXTRAPOLATED to n=30 000:
+> **0.249 `u_f32`, margin 201×** — 24× more margin than the 8.2× above, from the opposite sign of the
+> exponent. The f64 arm's floor is flat at 3.3–5.3 `u_f64` (R² 0.026, no resolvable trend) and is the
+> floor H3's rung must be judged against (A27).
+>
+> **Three consequences, all of which are corrections to the prose above, not to the bar:**
+> 1. *"3.62e-07 = 6.08 u at n=30 000, margin 8.2×"* does not reproduce. **Do not quote it.**
+> 2. **The `n^0.34` consistency remark with `[CH18]` Cor. 4.2 loses its observation entirely** — there
+>    is no growth to explain. The shipped floor is flat-to-mildly-decaying and below 0.5 `u_f32` at
+>    every n. `[CH18]` remains the precondition reference at `:1116`; it is no longer evidence here.
+> 3. **The ×50's non-vacuity arithmetic is restated.** The gap between the worst measured floor
+>    (**0.412 u**, not 1.98 u) and the nearest real defect (knock-out 1 at 1 678 u) is **4 073×**, not
+>    850×, and its log-scale centre is **≈26 u**, not 50 u. **×50 STAYS** — it sits comfortably inside
+>    a wider gap than advertised (121–163× above the floor, 33× below the defect), and a bar with more
+>    margin than claimed is not a reason to move it. Tightening to 26 u would buy sensitivity against
+>    no known defect: §3.4's calibration shows nothing lives between the floor and knock-out 1.
+>
+> **Both extrapolations are EXTRAPOLATED** from n ≤ 3840 — a 7.8× range extension. A20's two-point
+> mass-weight extrapolation missed by five rungs; treat these the same way.
 
 *Knock-outs.* (1) Report the **recurrence** residual as η at n=960, δ=0, stop 1e-4: recurrence reads
 1.0e-04 = 1 678 u while the correct η is 6.733e-06 and the **true** relative residual is 6.378e-01 ⇒
@@ -1409,15 +1457,80 @@ knock-out of anything: the BCT form **is** the gate. The reverse substitution is
 operator and is dead). (4) *Must NOT trip:* δ=0 run to floor at every n=64…960 ⇒ **GREEN**, ≥25×
 margin, MEASURED.
 
-**One knock-out must be ADDED, and task 7b owns it.** With (2) demoted and (3) void, H2 is left with
+~~**One knock-out must be ADDED, and task 7b owns it.** With (2) demoted and (3) void, H2 is left with
 a single MEASURED knock-out, and that one (substituting the recurrence residual) tests the
 *instrument's plumbing* rather than the *solver*. Register and MEASURE a genuine solver defect that
 `η_bct` can see — the natural candidate is **skipping the final Givens update** (or otherwise
 returning an `x̃` that is not the Arnoldi least-squares minimiser over `K_k`), which leaves `η_bct`
-at the pre-update level while every recurrence quantity still looks converged. **Do not register a
-number for it here: 7b measures it.** Rationale: memory `gates-name-their-impossible-values` — a
-gate whose only live knock-out is a plumbing substitution has not been shown to detect the thing it
-is named for.
+at the pre-update level while every recurrence quantity still looks converged.~~
+
+> **A27, RULED 2026-10-11 (task 7b MEASURED it) — THE REGISTERED KNOCK-OUT DOES NOT TRIP, AND NO
+> MUTANT OF ITS SHAPE CAN. H2's KNOCK-OUT SET IS CLOSED AT ONE, WITH THE REASON STATED RATHER THAN
+> LEFT AS A VACANCY.**
+>
+> Measured, three faithful readings of the phrase above, f32 and f64, seeds 0–4:
+>
+> | mutant | effect on the gated `η_bct` floor, **per-seed paired** | verdict |
+> |---|---|---|
+> | undo rotation `k−1` on `R`'s last column and on `g` (recurrence, `g`, `iters`, basis all bit-identical to the shipped run) | f32 n=240 **1.016–1.221×**, f64 n=240 2.80–5.69×; f32 n=960 1.0001–1.0263×, f64 n=960 7.10–13.52× | **does not trip — the bar is 134× above the worst f32 mutant, which reaches 7.48e-03 of it** |
+> | return the minimiser over `K_{k−1}` instead of `K_k` | f32 **0.9768–1.0591×** (seed 0 is **BELOW 1**), f64 1.0000–1.0341× | **does not trip at all** |
+> | `y[k−1] = 0` | f32 **1.0000× at all five seeds**, f64 1.0000–1.0313× | **does not trip at all** |
+>
+> **The f32 arm has NO resolving power for these mutants, and one seed proves it the hard way:**
+> `prev` at f32 seed 0 floors **lower than the correct run** (0.9768). A defect cannot genuinely improve
+> the backward error; this is the f32 plateau of §6 showing up as noise that swamps the signal. **Only
+> the f64 arm carries signal here, and even there the largest effect is ~9 decades under the bar.** So
+> the conclusion is stronger than "the knock-out does not trip": on the arm H2 is gated on, these
+> mutants are not measurable at all.
+>
+> **These are PER-SEED PAIRED ratios (each seed's mutant against its own control), corrected
+> 2026-10-11 from 7b's own first pass**, which divided range endpoint by range endpoint and so reported
+> f32 1.07–1.09× and "exactly 1.00× at every seed" for the latter two. **No verdict changes** — the
+> worst mutant is still two orders of magnitude under the bar — but the earlier spread was not a
+> statistic, and one `prev` seed lands *below* 1, which an endpoint ratio cannot show. The
+> n=240 cells were re-measured from scratch into `scratch-7b/ko-givens-240.json` after 7b found that
+> `ko.ts` had keyed its output file on mode alone, letting the n=960 run silently overwrite n=240; the
+> re-run reproduces the delivered ranges exactly (f64 1.021e-15–1.838e-15, f32 1.920e-08–2.230e-08).
+> The figures were right and briefly **unfalsifiable**, which is the real defect — an absent artefact
+> reads exactly like a present one, the same shape as `gates-name-their-impossible-values`.
+>
+> **Why no mutant of this shape can trip, derived and then confirmed to 2 %.** H2 is defined
+> *run-to-floor* with the gated value the **minimum over 106 probes**. At the floor the Arnoldi
+> least-squares problem is solved to roundoff, so a defect worth one rotation is a defect worth
+> roundoff (undoing rotation `k−1` scales `y[k−1]` by `1/cs[k−1]²`, and `cs → 1` at the floor).
+> Calibrating with `x̃ = (1+ε)x*` gives `η_bct = 1.208e-3·ε` at n=240, so the **detection threshold**
+> is
+>
+> ```
+> ε_crit  ≈  bar · (‖A_σ‖·‖x̃‖ + ‖b‖) / ‖b‖
+> ```
+>
+> = **2.47e-3 at n=240** (predicted 2.420e-3, 2 % agreement) and **0.156 — a 16 % relative solution
+> error — at n=960**: a **63× degradation over one factor of 4 in n**. With `κ₂(A_σ) ∝ n^3.334`,
+> **`ε_crit` at n=30 000 is O(1e4)**.
+>
+> **THE LIMITATION THIS STATES, WHICH IS THE POINT OF THE AMENDMENT:** *"`x̃` is not the least-squares
+> minimiser"* is a **FORWARD**-error defect and H2 gates a **BACKWARD** error. A small backward error
+> bounds the forward error only through `κ·η` (Rigal–Gaches / Higham *ASNA* Thm 7.1, which §7.3 cites
+> correctly). **So at target scale the 50·`u_f32` bar on `η_bct` permits an unbounded relative
+> solution error, and H2 must not be read as certifying solution or direction quality. H4a
+> (`cos∠_A`) is the gate that owns that, and it carries the load alone.** This is not a defect in H2;
+> it is what backward error means. The knock-out §7.3 wanted **does exist** — at ε = 2.42e-3 the
+> `η_bct` reaches 0.979× the bar while the recurrence residual still reads 1.140e-07, exactly the
+> "every recurrence quantity looks converged" condition — it simply needs ~2.5e-3 of solution error,
+> not the ~1e-6 that one skipped rotation produces.
+>
+> **Two alternatives considered and REJECTED, in writing.** (a) Register the `(1+ε)` mutant with an
+> **n-dependent** `ε_crit` from the identity above: rejected because a gate whose knock-out magnitude
+> grows with `n` is self-describing weakness — it would document the gate's blindness as if it were a
+> gate. (b) A knock-out that moves the **backward** error (residual formed against the wrong `σ`, or
+> against `A_bct` at the wrong θ): rejected for now because it is **unmeasured**, and registering an
+> unmeasured knock-out is precisely the defect A24 was raised for. Either may be revisited by task 10,
+> which owns the f32 direction work and will have `cos∠_A` instrumentation in hand.
+>
+> **Memory `gates-name-their-impossible-values` is therefore answered, not satisfied:** H2's single
+> live knock-out tests the instrument's plumbing, and that is now a *stated and justified* scope
+> rather than an unexamined gap. The gate measures what it measures.
 
 *INVALID.* **`η_bct == 0` or `η_exact == 0` exactly while `‖b‖ > 0`** — the residual was not
 computed at all. **A21 RE-SCOPES this clause's original rationale.** It read *"`η == 0` exactly (the
@@ -1543,8 +1656,140 @@ G(n) = iters(2n) / iters(n)
 > the gate reachable, and it costs nothing: the ladder **36 / 42 / 43 / 41 / 39 / 37** and the
 > projection `iters(30 000) ≈ 40.6` are already `η_bct` numbers.
 
-**H3 is measured on the f64 operator at `τ_η = 1e-8`, and that choice is forced.** MEASURED over the
-full ladder to n=1 920 (`e1-closer-0b-n*.json`, `rs/left`, median of 5, per-seed minimum in brackets):
+**H3 is measured on the f64 operator at `τ_η = 1e-12`** (was `1e-8`; see A31 immediately below, which
+supersedes the ladder and the ruling in this subsection).
+
+> **A31, RULED 2026-10-11 (task 7b MEASURED the deciding octave) — THE RUNG MOVES FROM `1e-8` TO
+> `1e-12`. THIS IS A GATE-DEFINITION CHANGE, AND IT IS THE THIRD TIME THIS GATE HAS BEEN RE-PINNED.**
+>
+> Shipped-operator ladder, f64, θ=0.5, left, shipped preconditioner default, trefoil native extent,
+> seeds 0–4, median [per-seed min]. **Every number in the table below this box is a LAB number and is
+> 22–31 % high; do not quote it for the shipped path** (A30).
+>
+> | `τ_η` | 64 | 120 | 240 | 480 | 960 | 1920 | 3840 | **7680** | n=7680 as % of peak | verdict |
+> |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+> | 1e-6 | 21 | 23 | 23 | 23 | 12 | 6 | 3 | **1** | 2 % | collapsed by n=960 |
+> | 1e-8 | 26 | 29 | 30 | 29 | **32** | 27 | 19 | **15** | **47 %** | **COLLAPSING — fails the predicate** |
+> | 1e-10 | 30 | 36 | 38 | 38 | **39** | 35 | 37 | **29** | **74 %** | **DECLINING — rejected, see below** |
+> | **1e-12** | 35 | 43 | 46 | 47 | **48** | 45 | 43 | **47** | **98 %** | **FLAT — SELECTED** |
+> | 1e-14 | 40 | 49 | 54 | 56 | 58 | 54 | 51 | not measured | 88 % @ 3840 | rejected on the bar, below |
+>
+> **Why `1e-10` is rejected even though the pre-registered predicate passes it.** The predicate
+> ("median at the largest n ≥ 15 AND ≥ 0.5 × peak") passes 1e-10 at 29 ≥ 19.5. **The predicate is a
+> threshold on a LEVEL and the disqualifying property is a TREND**: 1e-10 falls **39 → 35 → 37 → 29**
+> over the last three doublings, monotone apart from one blip. **That blip is the whole lesson** — at
+> n=3840 1e-10 read 37 against a peak of 39 and looked flat; it was a non-monotonicity in a falling
+> series, and had the ladder stopped there 1e-10 would have been ruled usable. §10.4's *"extend one
+> point past where the fit looks clean"* is what caught it, for the third time in this document.
+>
+> **A falsifiable prediction was pre-registered and it decided this.** The controller's collapse-walk
+> (onset moves 4× in n per two decades of τ, from 1e-6 at n≈960 and 1e-8 at n≈3840) predicted 1e-10 at
+> **≈30** at n=7680 and put its onset at **n ≈ 15 360 — inside the 1 000–30 000 target**. 7b's
+> competing mechanism (collapse set by `η`'s normaliser inflating as `‖A_σ‖ ∝ n^2.3`, so two decades of
+> τ should buy `100^(1/2.3) ≈ 7.4×` in n) predicted **37–39** and onset at ≈28 000. **MEASURED: 29,
+> per-seed 29/27/28/29/31.** The walk's prediction holds; **the normaliser mechanism is REFUTED by 8
+> iterations, far outside the per-seed spread.** Recorded as a refutation rather than reinterpreted:
+> whatever sets collapse onset, it is not normaliser inflation alone.
+>
+> **Why `1e-14` is not selected.** Its conservative projection to n=30 000 is **68.0, over the bar of
+> 64**, on the only ladder it has (n ≤ 3840, a 7.8× extension), which is not comparable with the rows
+> that now reach n=15 360. **1e-12 holds both kill clauses and is flat at 96 % of peak, so there is no
+> need for 1e-14 and no reason to prefer it.** Selecting it would also mean adopting a less conservative
+> projection route than the one used to clear 1e-12, or relaxing a kill-gate bar while tightening its
+> target — both are how a gate stops being falsifiable.
+>
+> > **CORRECTED 2026-10-11 — MY STATED REASON WAS WRONG, and it was a capability claim I committed to a
+> > spec without checking.** This paragraph read *"no further measurement can rescue it … worst-`G` is a
+> > maximum over doublings, so adding n=7680 can only hold or raise it; 1e-14 therefore cannot pass the
+> > conservative route no matter what is measured next."* **The premise is correct and the conclusion
+> > does not follow.** The projection is not `G_worst`; it is
+> >
+> > ```
+> > iters(30 000) = iters(n_last) · G_worst ^ log2(30 000 / n_last)
+> > ```
+> >
+> > and **adding an octave also doubles `n_last`, which cuts the exponent by exactly 1.** A rising base
+> > against a shrinking exponent can move either way. **This is falsified by the very measurement that
+> > confirmed 1e-12:** adding n=15 360 left 1e-12's `G_worst` at exactly **1.0930** and its projection
+> > fell **56.0 → 50.1** (margin 1.14× → **1.28×**), purely because the exponent went 1.966 → 0.966.
+> >
+> > **1e-14's outcome is therefore genuinely unmeasured, and roughly even.** The decision boundary is a
+> > single number: **1e-14 clears the 64 bar iff `iters(7680) ≤ 52.9`** — i.e. iff it is flat or
+> > declining. Even *exactly flat* at 51 clears, projecting 61.7. Its neighbours bracket the boundary:
+> > 1e-12 grew 9 % over that doubling (which would put 1e-14 at ≈55.7 and fail), 1e-10 fell 22 % (≈40,
+> > clearing easily).
+> >
+> > **Consequence for clause 4 below — the part that matters.** The fallback *"the rung moves to 1e-14
+> > and the 64 bar is re-derived"* **rests on behaviour nobody has measured.** If that fallback is ever
+> > taken, **measuring 1e-14 at n ≥ 7680 (≈10 min) is the FIRST step, before any re-derivation.**
+> > Memory `capability-claims-need-falsifying` names this exact failure — *"X cannot be computed here"
+> > is as checkable as a number.* I did invite the attack when dispatching the measurement, and the
+> > measuring agent took it; the error was writing the claim into the spec before it was tested.
+>
+> **What `1e-12` is selected ON, stated so the trade is auditable.** Two independent arguments agree,
+> which is the strongest position this ladder supports: (i) its data are flattest — 98 % of peak at the
+> largest n measured; (ii) the collapse-walk puts its onset at ≈61 000, outside the target range.
+> Projections to n=30 000: **56.0 via worst `G`, 56.0 via last `G`, 50.2 via the power fit — all under
+> 64.**
+>
+> **Three honest costs of this choice, none of which changes it:**
+> 1. **The margin is thin and got THINNER when the octave was added.** 1e-12 is the only surviving rung
+>    still *growing*: its worst `G` is now its **last** doubling (3840→7680, 43→47, `G = 1.0930`),
+>    displacing the old worst of 1.0698, so the conservative projection moved 52.5 → **56.0** and the
+>    margin to the bar fell from 1.22× to **1.14×** — 14 % headroom over a 3.9× extrapolation. A20's
+>    two-point precedent applies here as much as anywhere.
+> 2. **This does NOT satisfy §7.4's own floor-proximity criterion.** Applied to the f64 floor
+>    (2.8e-16…5.9e-16, the arm H3 actually runs on — §7.4 used the **f32** floor, A30) that criterion
+>    selects ≈1e-14. 1e-12 sits **1.9e3×** above the f64 floor. **The trade is explicit: non-degeneracy
+>    and bar margin were preferred over floor proximity**, because a rung that collapses stops
+>    measuring anything while a rung that is merely loose still measures mesh-independence.
+> 3. **The power fits are not evidence** (R² = 0.479 / 0.008 / 0.327; the 1e-10 fit explains ~none of
+>    the variance because the ladder rises then falls and a monomial cannot represent that). The `p`
+>    column survives only for continuity with §7.4's method. **The `G`-based routes are the defensible
+>    ones**, and `last G` is actively misleading for the collapsing rungs (0.79 reads as "shrinking
+>    nicely" when the gate is dying).
+>
+> **PRE-REGISTERED KILL CONDITION for `1e-12`** (registered because it is the only rung still growing
+> and 1.14× is thin): at **n = 15 360**, 1e-12 is INVALID as a gate rung if either its median falls
+> **below 0.5 × 48 = 24**, or its worst-`G` projection to n=30 000 **exceeds 64**. If either fires the
+> rung moves to 1e-14 and **the 64 bar must be re-derived rather than relaxed to fit.**
+>
+> > **DISCHARGED 2026-10-11 — BOTH CLAUSES HOLD, verdicted mechanically with no interpretation
+> > required.** n = 15 360, same regime, 5 seeds:
+> >
+> > | clause | threshold | MEASURED | verdict |
+> > |---|---|---|---|
+> > | (a) median collapse | median < 24 | **46** (per-seed 46/46/48/46/46) | **HOLDS — 1.92× clear** |
+> > | (b) projection | worst-`G` proj > 64 | `46 × 1.0930^0.966` = **50.1** | **HOLDS — 1.28× clear** |
+> >
+> > **The margin IMPROVED rather than eroding: 1.14× → 1.28×**, and 1e-12's three projection routes now
+> > agree to within 11 % (45.1 / 48.8 / **50.1**). The extrapolation to 30 000 is down to **1.95×** —
+> > the lowest it will ever be, since 30 000 is under one doubling from 15 360. **`G_worst` did not
+> > move** (the new 7680→15 360 doubling is `G = 0.9787`, which does not displace 1.0930); the
+> > projection fell because the exponent did. 1e-12 reads **46 at n=15 360, 96 % of its peak**.
+> >
+> > **MY SECOND PREDICTION WAS NOT MET, and it matters for how 1e-10 is rejected.** I predicted 1e-10
+> > *"at or below ~0.5 × 39 ≈ 20, i.e. clearly collapsed"* at n=15 360. **Measured 23** — above my own
+> > threshold. The walk's qualitative claim held (1e-10 declines monotonically through the target range:
+> > 39 → 35 → 37 → 29 → **23**, now 59 % of peak) but its quantitative second prediction did not.
+> > **Consequently 1e-10 at 23 STILL PASSES the pre-registered predicate (23 ≥ 0.5 × 39 = 19.5), even at
+> > n=15 360. Its rejection rests ENTIRELY on the trend, never on the predicate** — which is the
+> > limitation of the predicate noted above, restated here so nobody later reads "the predicate rejected
+> > 1e-10". It did not, at any n.
+> >
+> > **One cell-specific caveat, stated because it voids figures.** The n=15 360 cell replaced the χ=0
+> > reference operator with the BCT matvec (`A9_NO_EXACT=1`), because χ=0 makes every pair near and
+> > `precomputeNear` would need **3.77 GB** at that size against ~6 GB available. Sound for H3 and
+> > proved rather than asserted: `η_bct` is computed from `op` alone, and re-running n=7680 seed 0 with
+> > the stub reproduced the χ=0 run's `itersToTau` **and `etaBctMin` bit-for-bit** (7.416124851836749e-13)
+> > in 3.3 s against 111.6 s. **But with the stub `η_exact === η_bct` bit-for-bit, so INVALID clause 3
+> > (`exact-equals-bct`) FIRES on all five seeds — correctly, since the stub literally computes one η and
+> > uses it for both. In this cell every `η_exact` figure and clause 3 are VOID; `η_bct`, `itersToTau`,
+> > `stop`, `censored` and `degenerate` are valid.** This is clause 3's **second** structural false
+> > positive after `x̃ = 0` (§3.5) — see `@issue utof/repulsive-test2#81`.
+
+~~MEASURED over the full ladder to n=1 920~~ **(SUPERSEDED BY A31 — lab numbers, retained for
+provenance only)** (`e1-closer-0b-n*.json`, `rs/left`, median of 5, per-seed minimum in brackets):
 
 | `τ_η` | f32 operator, n=64…1 920 | f64 operator, n=64…1 920 | usable? |
 |---|---|---|---|
@@ -1614,12 +1859,19 @@ is the only one that can anchor an n-invariant count, and it unifies H2 and H3 o
   under 64, from a MEASURED count on the correct preconditioning side.
 
   **Superseded by the gate's own currency, which is better.** The above counts to a fixed *true*
-  residual; H3 counts to `τ_η = 1e-8` (see the ruling above), where the MEASURED ladder is
+  residual; H3 counts to **`τ_η = 1e-12`** (**A31** — the rung moved from `1e-8`, which collapses:
+  shipped ladder 32 → 27 → 19 → **15** at n = 960 → 7 680). **The ladder and projection in the rest of
+  this bullet are LAB numbers at the SUPERSEDED rung and are retained for provenance only
+  (A30, A31); the shipped figures are 1e-12's 35/43/46/47/48/45/43/47 projecting 50.2–56.0.** Do not
+  quote `40.6` or the `1.6× margin` — the coincidence that 1e-10's shipped projection also lands near
+  40.6 is noted in 7b's §2.5 and is **not** corroboration: different rung, different operator, longer
+  ladder. ~~The MEASURED ladder is
   **36 / 42 / 43 / 41 / 39 / 37** over n=64…1 920 with true doublings **1.0238 / 0.9535 / 0.9512 /
   0.9487** — flat, then mildly decaying. Projecting the worst (1.0238) from n=1 920 over
   `log₂(30000/1920) = 3.9658` doublings gives **`iters(30 000) ≈ 40.6`**, a **1.6× margin** under the
   bar of 64 rather than the near-zero margin the retracted pairing implied. This is the number to
-  quote.
+  quote.~~ **(End of the superseded lab passage. The number to quote is now 1e-12's conservative
+  projection, 56.0, a 1.14× margin — A31.)**
 
 > **RETRACTED: these two numbers are not independent corroboration, and reading them that way was an
 > error.** 64 is a **budget ceiling** ("the most iterations 0.5 s can buy at 7.8 ms") and 63.2 is a
@@ -2246,8 +2498,10 @@ silently promoted to a gate.**
     "trueRelResidualAtStop": 6.378e-1,             // LABELLED NON-GATE
 
     // H3
-    "tauEta": 1e-8, "precondSide": "left", "h3Operator": "f64",  // 1e-4 AND 1e-6 are vacuous; f32
-                                                 // cannot reach 1e-8 at all — §7.4
+    "tauEta": 1e-12, "precondSide": "left", "h3Operator": "f64", // A31: 1e-8 and 1e-10 DEGENERATE on
+                                                 // the shipped operator (15 and 29 at n=7680, 47 %
+                                                 // and 74 % of peak); 1e-14 projects 68.0 > the 64
+                                                 // bar. f32 cannot reach 1e-8 or tighter at any n.
     "etaArgminIterF32": [],                      // the f32 companion, RECORDED (run-to-floor)
     "itersPerSeed": [], "itersMedian": 0, "maxit": 400, "itersCensoredCount": 0,
     "growthRatio": 0, "growthQuantisationBand": 0, "growthValidAtThisN": true,
@@ -2440,6 +2694,32 @@ negligible. Measure it before assuming the CPU split transfers.
 | "a real BCT's β comes out lower than the random model" (#59's flagged prediction) | #64 | **655× to 921 600× higher** |
 | "bad modes sit at self-approach regions" (#64's own hypothesis) | #64's own measurement | falsified; they sit where the curve is *farther* from itself (§4.3) |
 
+**A30, 2026-10-11 — every LAB figure task 7b could not reproduce on the SHIPPED operator.** These are
+not errors of arithmetic; each is a number measured on the lab preconditioner (`gmres_lab.py` /
+`e1_gmres.py`, dense, no compression, `κ_excl ≈ 3000`) and quoted as if it described the shipped path
+(hierarchical at θ=0.5, shipped `makePreconditioner`, `κ_excl ≈ 20.3`, i.e. **150× better
+conditioned**). **The verdict survives in every row below; only the number dies.** Where a row says
+the *reason* dies too, the reason was load-bearing and its replacement is given.
+
+| retracted | measured on the shipped operator | what it changes |
+|---|---|---|
+| §7.3's `etaFloorMax` 0.76 → 1.98 `u_f32`, fit `n^(+0.3406)`, 6.08 u / 8.2× at n=30 000 | **0.412 → 0.311 `u_f32`**, fit `n^(−0.077)`, **0.249 u / 201×** | A26. Bar ×50 unchanged; the `[CH18]` `n^0.34` remark loses its observation; the 850× gap is **4 073×** |
+| §7.3's A21 box: `η_exact/η_bct` = 1.035–1.177 at n=240, 1.018–1.059 at n=960, and *"7b does not need to re-record the floor column"* | **3.7e3–6.9e3 at n=240, 9.5e2–2.0e3 at n=960** (f32 arm) — four to five decades | The lab has **no compression at all** (`e1_gmres.py:32-33` passes the same dense matrix as both `exact_A` and the matvec source), so its only mismatch is f32 roundoff. The box's own rule predicts this. **Its instruction to skip the floor column was wrong — the floor moved (A26)** |
+| §7.4's `τ_η = 1e-8` ladder 36/42/43/41/39/37 | **26/29/30/29/32/27, and 19 at n=3840** | 22–31 % lower at every n, and the n=3840 point is the collapse pattern — see §10.4's third failure and A31 |
+| §7.4's *"1e-6 is ~25× above the measured floor (≈4e-8)"* | `4e-8` is the **f32** floor; H3 runs on the **f64** arm, whose floor is **2.8e-16…5.9e-16** | The rung was selected for one arm using the other arm's floor. The pinned rung sits **1.9e7×** above the floor it is measured against; applying §7.4's own criterion to the correct floor selects ≈1.2e-14 |
+| §7.4's *"the unpreconditioned count at n=960 is exactly 960 = the Krylov dimension … genuine exact termination, which is τ-independent"* | **1 670** (per seed 1700/1670/1670/1800/1640) — **1.74× the Krylov dimension**, `stop='eta-target'`, not censored | **`β_G`'s verdict survives and is stronger** (knock-outs RED at 2.5313 / 2.2877 vs the spec's 2.0518 / 2.0211; production RS GREEN at 1.0309). **The stated REASON does not survive:** there is no exact termination here — Arnoldi loses orthogonality long before step `n` at `κ₂ ≈ 1.4e6`. Do not re-derive anything from "exact termination" |
+| §7.3 anti-trap 2's recurrence under-report 4.372e8 → 1.717e12, exponent +3.056 | **85.6 → 2.28e4**, exponent **≈+2.07**; 1.00e6 at n=3840 | Direction and growth reproduce; magnitudes are **6.7 decades** smaller, because the shipped `Ã⁻¹A_σ` is ~150× better conditioned. §5.3's rule stands; its number does not |
+| §7.4's `trueFloorMin` 6.68e-07 → 5.04e-03, `n^3.36` | **8.3e-02 → 8.7e-01**, `n^0.88`, **> 1 at n ≥ 1920** | Compression-dominated, not roundoff-dominated. **This REINFORCES §7.4's conclusion** that `η` is the only viable currency — a "floor" above 1 is no floor at all |
+| §7.3 / §7.4's `etaArgminIter` = 36–60 / "41–60, flat at ≈53–60 for n ≥ 240" | f64 **63–100** for n ≥ 240 (one seed 180); f32 **27–460 and a PLATEAU, not a located minimum** | *"Every iterate to k=80"* no longer brackets the f64 floor — the probe head of 80 is being pressed. **`etaArgminIterF32` is not a meaningful companion statistic on this operator** and should not be reported as one |
+| §7.3's follow-up ruling: `nFar == 0` is *"a configuration nothing currently runs"* | **`nFar = 0` at n=64, extent 1.0, θ=0.5** — reachable from production θ by rescaling the curve | The inverted clause-3 obligation can be triggered without anyone selecting χ=0. **Discharged in place:** the two η agree (3.8614e-16 both) without being bit-equal, `invalid: []` |
+| The brief's *"the lab casts only the input vector to f32"* | `gmres_lab.py:67-75` does **all three** — f32 operator, f32 input vector, f32 (sgemv) accumulation — and its own docstring says so | Reviewer B's failure to reproduce the knock-out is still explained by using the f32 *operator* alone, but the lab arm is harsher than described. Any "f32" figure must name **which** f32 |
+
+**CONFIRMED by the same campaign, recorded because confirmations matter too:** §7.3's `η_exact`
+minima at θ=0.5 (1.68e-3 / 7.28e-5 / 3.01e-5 / 2.40e-5) reproduce at **0.59–1.02×** and are identical
+on both arms to 4–5 digits, so the `δ_compress` monitor is sound; #69's `κ_near` 38.05 / `nFar` 1186 →
+64.51 / 2092 reproduce **exactly**; §7.4's *"f32 censored at every n for `τ_η` ≤ 1e-8"* reproduces
+exactly; and the INVALID-clause union over all 14 (n, arm) cells is **EMPTY**.
+
 **Gate bars retracted in this spec's recalibration** (evidence:
 `.superpowers/sdd/2026-09-11-phase2h-queue/reports/gate-recalibration.md`; rulings: §7):
 
@@ -2537,6 +2817,36 @@ procedural lesson available to whoever implements this spec.
 > it — **the only thing that did was running the next two rungs.** Treat any flat series of four
 > points as unverified until there are six, and treat a gate calibrated on a partial ladder as
 > provisional no matter how clean it looks.
+
+> **It has now failed a THIRD time, on the same gate. A27/A29's companion, RULED 2026-10-11 (task
+> 7b).** The `τ_η = 1e-8` rung that replaced the collapsed 1e-6 was itself pinned on six rungs to
+> n=1 920 and **declines 32 → 27 → 19 at n = 960 → 1 920 → 3 840** — the identical collapse pattern,
+> two octaves out, exposed by extending exactly one point further than this spec did. The lesson's
+> own correction box says *"any future change to `τ_η` must re-run the whole ladder to n=1 920"*; that
+> was not far enough. **For a gate whose target is n = 30 000, "one point past clean" means one point
+> past the LARGEST n you can afford, not one point past the previous ladder.**
+
+### 10.5 A29 — the instrument finding that invalidated three earlier wall-clock ratios
+
+**RULED 2026-10-11 (task 7b). The 6–9× one-sided `applyA` degradation recorded in this phase's ledger
+as caused by *subagent load* is caused by **CO-RESIDENCY**, and it reproduces on an idle machine.**
+MEASURED at n=960, nothing else running:
+
+| resident operators | `applyA` | vs one resident | `Ã⁻¹` |
+|---|---:|---:|---:|
+| one `HierarchicalA` | 1.717 ms | — | ×0.84 |
+| three co-resident | **10.212 ms** | **×5.95** | ×3.1 |
+| in-suite | 38.172 ms | ×22.2 | — |
+
+The working-set mechanism originally proposed is right; the **trigger** named was wrong, and the
+difference matters operationally: *"run it when no other agent is running"* does not isolate the
+instrument, because the contention is between operators inside one process. **"Isolated" has to mean
+ONE OPERATOR PER PROCESS.** 7b's own first `cost.ts` figures were wrong by **8× in `r`** for this
+reason before it re-ran them one-per-process, and the `n ≈ 223` crossover (A28) is the oldest casualty
+of the same confound. **Any wall-clock ratio in this document whose two sides were measured with
+different numbers of resident operators is void.** This is why A28 is settled on iteration-count
+integers rather than on timings, and why §7.12 emits `clock: null` with wall-clock figures quarantined
+in a block named `costWallClock_NONGATE`.
 
 ---
 
