@@ -1691,9 +1691,37 @@ supersedes the ladder and the ruling in this subsection).
 > iterations, far outside the per-seed spread.** Recorded as a refutation rather than reinterpreted:
 > whatever sets collapse onset, it is not normaliser inflation alone.
 >
-> **Why `1e-14` is not selected.** Its conservative projection to n=30 000 is **68.0, over the bar of
-> 64**, on the only ladder it has (n ≤ 3840, a 7.8× extension), which is not comparable with the rows
-> that now reach n=15 360. **1e-12 holds both kill clauses and is flat at 96 % of peak, so there is no
+> **Why `1e-14` is not selected. MEASURED 2026-10-11 (A34) — this is no longer a projection from the
+> short ladder: `iters(7680) = 56`, median of 5 (56/56/56/55/55), all `stop='eta-target'`, 0 censored,
+> 0 degenerate, 17.5 s.** The conservative projection to n=30 000 is **67.8** (worst `G` = 1.1020) or
+> **67.3** (last `G` = 1.0980) — **over the bar of 64 on both**, and the only route that clears is the
+> power fit at 61.4 (R² 0.397), which is **laxer than the worst-`G` route used to clear 1e-12** and is
+> ruled out for exactly that reason. The earlier figure of 68.0 came from the n ≤ 3840 ladder (7.8×
+> extension); **the measurement moved it 0.3 %, to 67.8 at a 3.91× extension.** Why it barely moved:
+> the measured growth `56/51 = 1.0980` almost exactly equals the in-hand `G_worst = 1.1020`, so
+> base-up (+9.8 %) and exponent-down (one doubling, −9.3 %) all but cancel — the near-degenerate case
+> of the arithmetic in the correction box below.
+>
+> **The cell is cross-checked, not taken on trust:** the looser rungs read off this run's own probe
+> array are **bit-identical** to the earlier n=7680 cell — 1e-8 `[15,16,15,14,17]`, 1e-10
+> `[29,27,28,29,31]`, 1e-12 `[47,49,47,47,48]` — so this run, the χ=0 run and the `A9_NO_EXACT` stub
+> run agree on every shared quantity.
+>
+> **1e-14 fails on COST, not on stability, and a re-derivation must be argued on cost.** It is in fact
+> **the FLATTEST rung measured — 97 % of peak**, against 1e-12's 96 %, 1e-10's 59 % and 1e-8's 25 %;
+> reachable at every n, 0 censored, 0 degenerate at every cell. Tightening the rung made the count
+> *more* stable, not less. Its only failing is the bar: ≈10 more iterations than 1e-12 at every n.
+>
+> **Clause 4's fallback is therefore VIABLE AT A KNOWN PRICE, which is the point of having measured
+> it:** *"the rung moves to 1e-14 and the 64 bar is re-derived, not relaxed to fit"* is executable, and
+> **the re-derived bar must be ≥ 68 — i.e. +6 % on 64.** It is no longer a fallback resting on an
+> unmeasured number. **It does NOT put 1e-14 on 1e-12's footing:** 1e-14 stops at n=7680 (a 3.91×
+> extension) where 1e-12 reaches n=15 360 (1.95×), so if clause 4 is ever taken, 1e-14 wants its own
+> n=15 360 cell — ≈20 s, no longer a budget question.
+>
+> **1e-12 holds both kill clauses and is flat at 96 % of peak, so there is no need for 1e-14 and no
+> reason to prefer it — and that ruling is unchanged by the measurement.** The original ladder
+> (n ≤ 3840) is still not comparable with the rows that reach n=15 360. **1e-12 holds both kill clauses and is flat at 96 % of peak, so there is no
 > need for 1e-14 and no reason to prefer it.** Selecting it would also mean adopting a less conservative
 > projection route than the one used to clear 1e-12, or relaxing a kill-gate bar while tightening its
 > target — both are how a gate stops being falsifiable.
@@ -1713,15 +1741,29 @@ supersedes the ladder and the ruling in this subsection).
 > > confirmed 1e-12:** adding n=15 360 left 1e-12's `G_worst` at exactly **1.0930** and its projection
 > > fell **56.0 → 50.1** (margin 1.14× → **1.28×**), purely because the exponent went 1.966 → 0.966.
 > >
-> > **1e-14's outcome is therefore genuinely unmeasured, and roughly even.** The decision boundary is a
+> > **~~1e-14's outcome is therefore genuinely unmeasured, and roughly even.~~ SUPERSEDED THE SAME DAY
+> > BY THE MEASUREMENT (A34): it came in at 56 and FAILED.** The boundary analysis below was correct and
+> > is kept because it is what made the cell worth running — read it as the reason for the measurement,
+> > not as an open question. The decision boundary is a
 > > single number: **1e-14 clears the 64 bar iff `iters(7680) ≤ 52.9`** — i.e. iff it is flat or
 > > declining. Even *exactly flat* at 51 clears, projecting 61.7. Its neighbours bracket the boundary:
 > > 1e-12 grew 9 % over that doubling (which would put 1e-14 at ≈55.7 and fail), 1e-10 fell 22 % (≈40,
 > > clearing easily).
 > >
+> > **DISCHARGED SAME DAY (A34): the measurement was taken and it cost 17.5 s, not 10 min.**
+> > `iters(7680) = 56 > 52.9`, so **1e-14 FAILS**, and the paragraph above is now measurement rather
+> > than projection. **The distinction worth keeping on the record: this refuted my REASONING and
+> > confirmed my CONCLUSION.** 1e-14 tracked 1e-12's +9.8 % rather than 1e-10's −22 %, which is exactly
+> > the mechanism I argued from when I pre-registered **52–58, flat-to-mildly-growing, therefore FAILS**
+> > (failure condition: ≤ 51) before the cell ran. *"No measurement can rescue it"* was still a false
+> > capability claim — the conclusion being right does not make the argument sound, and a claim that
+> > cannot be checked is the defect regardless of which way the number lands.
+> >
 > > **Consequence for clause 4 below — the part that matters.** The fallback *"the rung moves to 1e-14
-> > and the 64 bar is re-derived"* **rests on behaviour nobody has measured.** If that fallback is ever
-> > taken, **measuring 1e-14 at n ≥ 7680 (≈10 min) is the FIRST step, before any re-derivation.**
+> > and the 64 bar is re-derived"* no longer **rests on behaviour nobody has measured**: it is viable at
+> > a re-derived bar of **≥ 68**. The instruction that stood here — *"if that fallback is ever taken,
+> > measuring 1e-14 at n ≥ 7680 is the FIRST step"* — is **DISCHARGED**; the first step now is the
+> > n=15 360 cell, so 1e-14's ladder reaches the same extension as 1e-12's.
 > > Memory `capability-claims-need-falsifying` names this exact failure — *"X cannot be computed here"
 > > is as checkable as a number.* I did invite the attack when dispatching the measurement, and the
 > > measuring agent took it; the error was writing the claim into the spec before it was tested.
@@ -2601,8 +2643,10 @@ silently promoted to a gate.**
     // H3
     "tauEta": 1e-12, "precondSide": "left", "h3Operator": "f64", // A31: 1e-8 and 1e-10 DEGENERATE on
                                                  // the shipped operator (15 and 29 at n=7680, 47 %
-                                                 // and 74 % of peak); 1e-14 projects 68.0 > the 64
-                                                 // bar. f32 cannot reach 1e-8 or tighter at any n.
+                                                 // and 74 % of peak); 1e-14 MEASURED at n=7680 (56)
+                                                 // projects 67.8 > the 64 bar -- A34, no longer an
+                                                 // extrapolation. f32 cannot reach 1e-8 or tighter
+                                                 // at any n.
     "etaArgminIterF32": [],                      // the f32 companion, RECORDED (run-to-floor)
     "itersPerSeed": [], "itersMedian": 0, "maxit": 400, "itersCensoredCount": 0,
     "growthRatio": 0, "growthQuantisationBand": 0, "growthValidAtThisN": true,
