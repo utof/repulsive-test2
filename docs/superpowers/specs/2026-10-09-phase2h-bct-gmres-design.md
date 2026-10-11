@@ -2739,13 +2739,32 @@ Two facts make the hybrid the natural answer rather than a compromise:
 2. **Order of projection and preconditioning.** Both are linear operators applied per GMRES
    iteration, and **the order decides whether the projected operator stays symmetric positive
    definite**. Get this wrong and GMRES converges on a non-symmetric operator while every residual
-   looks fine — the §5.3 failure mode again. The projected-preconditioned operator must be verified
-   SPD on the constrained subspace before any convergence number is quoted.
+   looks fine — the §5.3 failure mode again. ~~The projected-preconditioned operator must be verified
+   SPD on the constrained subspace before any convergence number is quoted.~~
+   **GATE AMENDED — A37 item 2. The sentence above is not implementable as written and, taken
+   literally, REJECTS THE CORRECT ORDER:** a product of two SPD matrices is not symmetric, so the
+   shipped order's Euclidean `symDefect(Ã⁻¹A)` on the constrained subspace is **1.40e-1 and must
+   be**. Worse, a restriction-based symmetry/spectrum test is **BLIND to the one order this warning
+   is about**: `Zᵀ P = Zᵀ`, so `P Ã⁻¹ P · P A P` and `Ã⁻¹ P A P` have the same restriction, symDefect
+   and spectrum **to every digit**, and only V-leakage separates them (2.59e-13 vs 4.10e-1).
+   **Three quantities are required, all three:** (i) **leakage** `max_z ‖(I−P) K z‖ / ‖K z‖`;
+   (ii) symmetry AND positivity of `Zᵀ P A_σ P Z` — *the operator being inverted, NOT the
+   preconditioned product* (measured 6.05e-16, `λ_min = +0.651`); (iii) self-adjointness in the
+   preconditioner's own inner product. Still binding: **no convergence number before all three.**
 3. **`[G6]`'s separate exclusion still applies.** `[DESIGN]:49-51` excluded `perEdge` for a
    **conditioning** reason — `κ·u_f32 > 0.1 at N ≥ 480` — which is independent of the solve
    architecture. **A nullspace route does not inherit an exemption just because it avoids the Schur
    complement.** It must be checked against that bound separately, and §6's mixed-precision ruling
    is what it has to lean on.
+   **FRAMING INVERTED — A37 item 3: the projection is NOT the conditioning risk, the OPERATOR is.**
+   Measured: `cond(P A_σ P|V)/cond(A_σ) = 0.960 ± 0.003`, i.e. projecting *improves* conditioning by
+   4 % (Cauchy interlacing). Crossovers for `κ·u_f32 = 0.1`: the **operator** at **n ≈ 1 027**, the
+   projection solve at **n ≈ 8 956** — the operator binds **8.8× earlier**, which independently
+   reproduces §6's f32 wall at n ≈ 1 228–1 773 from a new direction. The conclusion of the paragraph
+   above is right (§6's ruling is what the route leans on); the quantity it points at is not the
+   binding one. **Separately TRUE and newly measured:** the projection solve's own
+   `cond(C_e C_eᵀ)` grows **exactly `n²`** (160× range, `cond/n² = 0.0209`) to **1.883e7 at
+   N = 30 000**, so the projection must stay **f64** above n ≈ 9 000 — cheap, but deliberate.
 
 Reference: `[YSC]` (arXiv:2006.07859) constraint handling; Repulsor at `DOM_DIM=1`.
 
@@ -3033,10 +3052,10 @@ verification are here.
 | 7 | `gmres.ts` — left-preconditioned GMRES exposing `x̃`, `b`, `iters`, `maxit`, `tol`, the per-iteration recurrence residual **and an `η` probe hook on the χ=0 matvec with a recorded probe stride** (§7.3) | new + test | **H2 + H3** on one instrument. ~~The right-preconditioning knock-out must trip (`cos∠_A = 0.142` at n=480 while recurrence reads 1e-4)~~ **RE-ASSIGNED 2026-10-11 to task 10, with a new observable — see §5.3's correction box. This task CANNOT host it:** the knock-out needs a genuine f32 matvec, and `cos∠_A = 0.142` was never the right number (it is an f32 artefact of `e2_inexact.py:120-122`, not a side effect; in f64 right-preconditioning gives `cos∠_A = 1.000000` at every n). The replacement observable is **`cos∠_A ≤ 0` for `side: 'right'` under an f32 matvec at n=960** (MEASURED −0.136 median, −0.273 min) against left's 0.9991 — falsifiable, and it has a sign change rather than a magnitude to argue about. **What task 7 DOES own instead:** the `side` plumbing differential (reviewer B: each of 3 side-plumbing mutants fails 9–17 tests) and the guard refusing `side: 'right'` without `knockOut: true`. The recurrence-residual-as-η knock-out must trip RED at 34× the bar; **`η_exact` must never be bit-equal to `η_bct`** (both computed); `iters == maxit` and any-direction-censored ⇒ INVALID, and compare against `maxit`, **never** against `n`; **the gated η is `η_bct` (A21, §7.3) and `etaTarget` must read `η_bct`** |
 | 8 | Seam: the `kind`-tagged `PreparedSaddle` and `FrozenSaddleOperator` unions, `HierarchicalSaddleSolver`, operator-shaped `structuredSaddleResidual`, **and the `projectOntoConstraintSet` hierarchical route** (§5.1) | `linsolve.ts`, `gradient.ts`, **`optimizer.ts`**, **`lineSearch.ts`**, **`src/gpu/saddle.ts`** | **the dense branch stays byte-identical** — **the existing goldens CANNOT measure this (A24, 2026-10-11); a bit-level dense-path golden was a PRE-TASK-8 deliverable and task 8 was BLOCKED until it existed** (box below). **DISCHARGED 2026-10-11 at `d3672c2`** — `test/sobolev/denseSaddleBitGolden.{test.ts,json}`, 44 tests, 26 728 numbers pinned with `Object.is`, captured with all five seam files untouched vs `main` (SHA-256 recorded in `provenance.seamFileSha256`). **Non-vacuity proven by mutation and independently reproduced by the controller:** a one-ULP perturbation of `z[0]` in `solveSaddleFrozen` turns the new gate **41/44 RED while all 54 pre-existing files stay 708/0 green**; same clean contrast for a one-ULP `x[0]` in `lineSearch.ts`'s reassemble projection branch, `Math.fround` on `structuredSaddleResidual`, and a one-ULP `a[0]` in `gradient.ts`'s Prepared arm. **Known sensitivity limit:** a 1-ULP change to an O(1e-3) projection correction is partly absorbed when added to an O(1) coordinate, so T1 (which pins the solve before absorption) is the sharp instrument, not T2/T3. **WARNING for this task, from the same mutation sweep: `test/gpu/dESeam.test.ts:91` (`expect(scaled.energy).not.toBe(baseline.energy)`) rides on ~3 ULP of rounding by its own comment's admission and flips in EITHER direction on any change to the arithmetic realisation (`@issue utof/repulsive-test2#80`). If it goes red during this task, check whether the two energies became bit-equal BEFORE concluding you caused a regression**; `kind: 'dense'` ⇒ bit-identical, and `optimizer.ts:291`'s dense throw message is pinned by `test/gpu/saddleSeam.test.ts:287-298`. `bunx tsc --noEmit` clean is a hard gate here: the first-draft `A?` delta produced TS18048 + TS2322  **SHIPPED 2026-10-11 at `a8569d8`** — 11 files, 650+/17−; `tsc` 0, suite **762/0/56**, golden fixture byte-identical to `d3672c2` (`cmp` empty), golden 44/44, all four verified by the controller. `lineSearch.ts` needed **comment only** (`+10/−0`): because `solveSaddleFrozen` dispatches on `kind` internally, `projectOntoConstraintSet`'s body is byte-for-byte unchanged, which is what §1.4 demands. Non-vacuity run not asserted: two `src` mutants each turn exactly one of the 10 new tests red (controller independently reproduced the residual-reordering mutant: 1 fail, the named test, 9 pass). **Guard shape corrected — see A25 in §5.1.** |
 | 8b ✅ **SHIPPED (`4df665b`) — see A33, A35 AND A36. A36: this row's `cos∠_A ≥ 0.9` bar CANNOT FAIL for the reason it is written about (no θ trips it — 0.9987 is the worst any θ produces, because the adjacency certificate has no θ term) and it is BLIND to a saddle built for the wrong geometry (0.999839 vs 0.999840 while `g̃` is 4.04 relative away — issue #83). Two companion cells ship with it: mod-translation relErr of `g̃` ≤ 1e-2, and an EXACTNESS differential at θ=0 where `nFar`=0, ≤ 1e-10 at n=240 (measured 2.6e-12, the only cell that can see a plumbing defect)** | **`hierarchicalSaddle.ts` — the producer.** A `makeHierarchicalSaddle(vertices, …): HierarchicalPreparedSaddle` factory plus its wiring through `dispatch.ts` → `optimizer.ts` `opts.saddle` | new + `dispatch.ts` | **without this the phase ships an unreachable feature**: tasks 1–8 widen a public type that nothing in the repo ever writes, and the dense path stays bit-identical only because it is still the only path. End-to-end: one `sobolevStepSet` on the hierarchical route at n=960, `cos∠_A ≥ 0.9` against the dense f64 reference — **BAR AMENDED, A36: met at 0.999840, but it is NOT a compression gate and NOT a wrong-geometry gate; the two companion cells above are what discriminate, and the θ=0 exactness cell is now REQUIRED**  **CROSS-TASK CONTRACT FROM TASK 8 (`a8569d8`, binding): this task MUST pass `projectionMode: 'frozen'` when it wires the hierarchical saddle through `dispatch.ts`.** `optimizer.ts:308-327` (post-8b; was `:297-318`) REFUSES a hierarchical saddle without it, pre-arm, by design: `projectOntoConstraintSet`'s other branch calls `assembleAFlat` **per projection iterate** (O(N²) f64, **7.2 GB at N=30 000**), so the combination cannot run at target scale, and below that scale it would solve the GRADIENT hierarchically while silently reassembling a DENSE Ā for every projection iterate — a step that reads as hierarchical and is not (CLAUDE.md: gates name their impossible values). An auto-upgrade was rejected because `opts` and behaviour would then disagree. **If 8b needs to pass either mode, the throw may be downgraded ONLY with the dense-projection fallback surfaced in `stats`** — nothing downstream can currently distinguish the two. **Also carried to 8b: (R2) `factorMode` is silently inert on the hierarchical arm — add the guard or the one-line TSDoc; (R4) the seam tests cover one fixture (trefoil n=24, k=4) and one step, so 8b owns the k=0 and `edgeLengths` cells against a REAL operator.** |
-| 9 | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately. **A36: this row's `k=0` / gauge cells also inherit A36 item 3 — on a translation-singular set the dense path is not a reference for the STEP either (the dense `g̃` is 82 % translation, so `lineSearch.ts` normalises it to a 1.77× shorter step and a 4.0 % energy gap, with BOTH arms `accepted: true`); a green `k=0` cell must not be read as the two arms taking the same step. A35: this row's bar inherits 9b's amendment — compare against the DD-refined truth, not the dense path, or it is unmeasurable at n=960 for the same reason. And it MUST include a `gen/−φ` cell (generic top with non-zero mean): 9b measured that a flipped multiplier sign is INVISIBLE on every `grad/0` and `zero/−φ` cell of every k=3 set, so a suite without `gen/−φ` ships a sign error.** |
+| 9 ✅ **SHIPPED (`01079a1`) — see A37. It routes the MIXED `{barycenter, edgeLengths, pins}` set by COMPOSING the projector with an UNMODIFIED `prepareSchur` (the controller's hypothesis that this breaks 9b's reduction was REFUTED: `C_edge N = 0` bit-exactly, so `N ⊂ V` and the reduction transfers verbatim). §8.3's two gates were BOTH mis-specified — see A37 items 2 and 3.** | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately. **BAR AMENDED, A37 item 6: `λ` is asserted at n ≤ 240 only and LOGGED at n=960. The edge multipliers are not solved for, they are RECOVERED post-solve through `(C_e C_eᵀ)⁻¹`, so their error carries that matrix's `cond ≈ 1.9e4` on top of `x`'s: over n = 240 → 960 `x` grows 1.9× while `λ` grows 16× on `grad/−φ` and 85× on `gen/−φ`, reaching 4.24e-10 — OVER a 1e-10 bar. At n=960 assert `x` plus `edgeConstraintResidual` instead. A36: this row's `k=0` / gauge cells also inherit A36 item 3 — on a translation-singular set the dense path is not a reference for the STEP either (the dense `g̃` is 82 % translation, so `lineSearch.ts` normalises it to a 1.77× shorter step and a 4.0 % energy gap, with BOTH arms `accepted: true`); a green `k=0` cell must not be read as the two arms taking the same step. A35: this row's bar inherits 9b's amendment — compare against the DD-refined truth, not the dense path, or it is unmeasurable at n=960 for the same reason. And it MUST include a `gen/−φ` cell (generic top with non-zero mean): 9b measured that a flipped multiplier sign is INVISIBLE on every `grad/0` and `zero/−φ` cell of every k=3 set, so a suite without `gen/−φ` ships a sign error.** |
 | 9b ⬆️ **PROMOTED AHEAD OF 8b (A33)** | `schur.ts` — the `k=O(1)` half of §8.2's hybrid (barycentre, 3 rows; per-pin, 3 rows; tangent, 1 row) | new + test | the hybrid is a two-branch ruling and the first draft gave a task to only one branch. Dispatch on `k`: Schur for `k=O(1)`, nullspace for `edgeLengths`' `\|E\|` rows. ~~Verify each branch reproduces the dense path's `x` to 1e-10 at n=960 on its own constraint set~~ **BAR AMENDED, A35: `1e-10` against the DOUBLE-DOUBLE-REFINED TRUTH of the dense matrix of the same operator.** The literal bar is unmeetable BY ANY SOLVER at n=960 — dense LDLᵀ's own error against truth grows `~n^3.3` (4e-14…1.6e-13 at n=120 → **1.4e-10…6.4e-10 at n=960**), so it crosses 1e-10 between n=480 and n=960 and the "disagreement" equals the oracle's own error to 3 digits. Shipped Schur is **3.2e-12…9.1e-12** from truth, **25–200× closer than the oracle it was told to match**. Literal LDLᵀ agreement is asserted at **n ≤ 240** (5.6e-13…5.4e-12) and LOGGED at n=960. **SHIPPED** |
 | **9c** | **The `c` re-check at n ≥ 4 000 — A20's OPEN item, which had NO OWNER until 2026-10-11. A20 points at *"task 9's calibration"*; THIS ROW is what it means.** Row 9 is `nullspace.ts` and does no calibration, and **`9b` was already taken by `schur.ts`** — the item was assigned to a task that cannot do it. Scope: `κ_excl` over a `c` grid at n ≥ 4 000 on the four shapes present at every n (arc / circle / helix / trefoil — A20 proves these carry every binding constraint), **plus `λ₂(n, m̂)` jointly, which issue #78 needs and which is the same eigensolve** | `bench` / `scratch` only — measurement, no `src` change | **Three pre-registered outputs.** (1) The minimax-absolute `c` at n ≥ 4 000, against A20's five-rung trend **15 / 20 / 20 / 25 / 30** at n = 64…960 and its extrapolated **40–45** at N = 30 000 — report whether the trend continues, flattens, or breaks; do NOT bank the extrapolation either way. (2) **Where `λ₂ = 1` falls in `(n, m̂)`** — `κ_excl = λ_max/λ₂` silently measures the wrong mode once `λ₂ < 1` (#78; measured `λ₂` at n=64: 6.62 @ m̂=30 → 0.878 @ m̂=90, and `precond.test.ts`'s module comment records `λ₂ ≈ 1.3` at n=30 000 for the OLD m̂), so if `λ₂ < 1` anywhere in the production regime **every `κ_excl` figure there is not κ_excl** and the N=30 000 conditioning claims rest on a broken instrument. (3) The `rs-identity` knock-out bar `> 100`, re-derived at whatever `c` lands: MEASURED **273.3 at m̂=30, 118.0 at 45, 66.4 at 60** (#78), so it FAILS inside A20's own projected band — re-derive it as part of changing `c`, measuring first, never after a red. |
-| 10 | Mixed precision: f32 inner, f64 outer (§6) | `gmres.ts`, `apply.ts` | **a genuine f32 hierarchical apply through the whole solve** (§9.2's top gap) — locate the wall, do not inherit it |
+| 10 ⚠️ **THREE CARRIES FROM A37 before it measures anything: (a) the PROJECTION SOLVE must stay f64 above n ≈ 9 000 (`κ·u_f32 = 1.12` at N=30 000 — an f32 projector stops being a projector), while the OPERATOR is the earlier-binding quantity at n ≈ 1 027; (b) the `rhsTop = 0` projection iterate is NOT free on the nullspace route — it costs a FULL GMRES because `d ≠ 0 ⇒ x_p ≠ 0 ⇒ b̂ ≠ 0`, so 9b's zero-apply shortcut does not exist there and a line search leaning on it will read as a regression; (c) issue #85 — `edgeLengthsBlock` allocates `C` densely, `3n²` f64 = 21.6 GB at N=30 000, so the `C: number[][]` seam is itself an O(N²) wall for every consumer except `prepareNullspace`** | Mixed precision: f32 inner, f64 outer (§6) | `gmres.ts`, `apply.ts` | **a genuine f32 hierarchical apply through the whole solve** (§9.2's top gap) — locate the wall, do not inherit it |
 | — | ~~GPU wall-clock probe~~ | — | **NOT a task in this phase.** §7.11 item 6 wants one wall-clock matvec at n=30 000 to anchor H3's budget half, but §1.4 puts the GPU apply out of scope and §9.1 concedes the protocol needs "a kernel, when one exists" — so there is nothing to time. **Consequence, pre-registered: H3's budget-derived bar stays unanchored for this phase**, and its only live support is the CPU-f64 projection (§7.4), which §7.4 itself marks as integer-noise-sensitive. Do not quote `0.5 s ÷ 7.8 ms` as measured |
 | 11 | Gate harness, emitting §7.12's schema to `bench/results/<date>-gpu-phase2h-gate-calibration.json`. **TypeScript, not Python** (`bench/gpu/hCalibration.ts`) for H1-a, H1-b, H2, H3, H4a, H4b′, H4c — those gates are defined against the TS instruments built in tasks 3–8 (`applyA`, `lineSearchStepSet`, the GMRES `η` hook) and a `.py` harness cannot reach them. H5 and H6 stay in `scratch/*.py`, where their dense-eigenvalue instruments already live | new | every gate in §7 reports its **VALUE, not only its verdict**; every INVALID predicate reachable in a test; **R1 publishes three ceilings** and `NOT ESTABLISHED` where no gate binds; `clock: null` |
 
@@ -3169,7 +3188,7 @@ kind A17 catalogued.
 
 **(5) TWO KNOCK-OUTS ARE BLIND TO THE BAR. Both are recorded rather than papered over, and one of them is a
 near-miss worth naming.**
-- **`lambda-sign` is INVISIBLE on the `grad/0` and `zero/−φ` cells of every k=3 set** (bary, pin), because
+- **`lambda-sign` is INVISIBLE on the `grad/0` and `zero/−φ` cells of every k=3 set** (bary, pin) — **NARROWED by A37 item 12: the blindness is a property of `k=3` SETS, not of gradient right-hand sides. It DISAPPEARS at `kOther=6` (`|λ|=36.6`, caught at 2.04) because `G` stops being square. Do not restate this as "sign errors are invisible on `grad` rhs."** — because
   `Gᵀλ = Nᵀb` with `G` square and invertible forces `λ ≈ 0` for a mean-free top. **A suite of `grad/0` +
   `zero/−φ` cells alone would have shipped a flipped multiplier sign.** The `gen/−φ` cell catches it and is
   now a REQUIRED cell, propagated to row 9 above.
@@ -3260,7 +3279,10 @@ compression (A35 item 8 said so) and θ's compression cannot reach it.
   At n=960 the same cell reads **2.533e-10, which independently reproduces A35 item 7's ≈2e-10
   cross-path floor from a direction A35 did not use.** Cost: 2 s. **Generalise: every compressed-path
   gate on this branch should be paired with its `nFar = 0` exact-limit cell, which is nearly free
-  because the traversal code is shared (§7.1).**
+  because the traversal code is shared (§7.1).** **QUALIFIED by A37 item 14: `fixture(48)` at the
+  default `leafSize = 8` ALREADY has `nFar = 0`, so this pairing SILENTLY MEASURES NOTHING at n = 48 —
+  the compressed and exact cells are the same cell. Take it at n ≥ 240 and assert `nFar > 0` at the
+  size you take it.**
 
 **(2) `cos∠_Ā` IS BLIND TO A SADDLE BUILT FOR THE WRONG GEOMETRY — issue #83.** A saddle built from
 `2 × vertices` and used on the originals reads **0.999839 against the clean 0.999840 — one part in
@@ -3348,6 +3370,247 @@ idles on.** (b) **A33's body was split by A35 in this file** — its item (3) an
 *below* all of A35, where they read as A35's, and A35 has its own item (3) about a different thing.
 Fixed here by moving A33's tail back under its header. **This is the sixth-instance defect again
 (A32/A22): amendment boxes are append-only prose and an insertion silently orphans whatever follows.**
+
+### ⚠️ A37 — task 9 SHIPPED, my STAGE-0a hypothesis was REFUTED, and §8.3's OWN TWO GATES are both mis-specified
+
+Ruled 2026-10-11 from task 9's report
+(`.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-9-report.md`). Delivered
+`src/core/sobolev/hierarchical/nullspace.ts` + `test/sobolev/hierarchical/nullspace.test.ts`
+(35 tests), **no pre-existing file touched**, so nothing existing can regress. This box is unusually
+long because §8 is the only section of this spec whose two normative gates were *both* wrong, and
+both were found by measurement before shipping.
+
+**(1) THE MIXED SET ROUTES BY COMPOSITION. MY HYPOTHESIS WAS REFUTED, AND IT FAILED ON ONE LINE OF
+ARITHMETIC I HAD ALREADY READ.** I wrote in 9's brief that composing the nullspace projection with
+`prepareSchur` would break 9b's exact reduction, because `P Ā P` has a strictly larger nullspace so
+`A_σ⁻¹ N = N/σ` and `G = C N` would stop holding. **Every clause of that premise is true and the
+conclusion does not follow.** The enlargement is *exactly* `V^⊥ = range(I−P)`, orthogonal to the
+subspace the iteration lives in and never entered. The fact that settles it:
+
+> **`C_edge N = 0` EXACTLY — bit-exact, not 1e-16.** Row `r` writes `+T_r[c]` at `(c,i1)` and
+> `−T_r[c]` at `(c,i2)` (`constraintSet.ts:206-250`), so each coordinate block's sum is
+> `T_r[c] + (−T_r[c])`, which is 0 in IEEE754 for any finite `T`. **Independently re-verified by the
+> controller: 0 of 144 entries at n=48 and 0 of 720 at n=240 are non-zero.**
+
+So `N ⊂ V`, `P N = N` (1.87e-15), `Nᵀ P = Nᵀ`, `nullDim(P Ā P)` is `n + 3` — `n` zeros from `V^⊥`
+plus **exactly 3** inside `V`, basis still `N` — and `P A_σ P N = σ N` to 3.55e-14 (1.7e-16
+relative). `Ĉ_o N = C_o P N = C_o N = G` and `Nᵀ b̂ = Nᵀ b` exactly, so the solvability condition
+`Gᵀλ = Nᵀb` is *the same equation* it is in 9b. **9b's `prepareSchur` is reused UNMODIFIED.**
+**RULED: option (B) ships, and row 9 owns the MIXED set `{barycenter, edgeLengths, pins}`, not only
+the pure one.** Option (A) (nullspace of the whole stacked `C`) is rejected on three measured
+grounds: `cond(CCᵀ)` 4.7–9× worse, needs a bordered non-`TriSystem` solver, and — decisively — it has
+no gauge branch so it **fails outright on the pure edge set** (1.26e3 / 5.53e2). Option (C)
+(defer the mixed set) is not needed.
+**The lesson is not "I was wrong about numerics".** I had quoted that exact row structure earlier in
+the same session, deriving the cyclic-tridiagonal Gram from it, and never asked the adjacent
+question about the constant modes. **Same source line, two questions, one asked.** Non-vacuity is
+proven, not assumed: dropping *only* the constant-mode correction moves `x` by **5.6e-2 … 3.8e+0**,
+12–14 orders above clean, so the piece my hypothesis said could not survive projection is exactly
+the piece whose removal is catastrophic.
+
+**(2) §8.3 ITEM 2's GATE, READ LITERALLY, WOULD REJECT THE CORRECT ORDER — AND IS BLIND TO THE ONE
+ORDER ITS OWN WARNING IS ABOUT.** §8.3 item 2 requires that *"the projected-preconditioned operator
+must be verified SPD on the constrained subspace before any convergence number is quoted"*. Two
+defects, both measured at n = 48/96/120:
+
+- **A product of two SPD matrices is not symmetric.** The Euclidean symmetric defect of `M⁻¹A` on `V`
+  is **1.40e-1 … 2.05e-1 for the SHIPPED order** and must be. Taken literally the gate disqualifies
+  every candidate.
+- **The restriction-based test cannot see the failure mode §8.3 names.** `Zᵀ P = Zᵀ`, so
+  `Zᵀ (M P A P) Z ≡ Zᵀ (P M P A P) Z` **identically**: the correct order O1 (`P M P A P`) and the
+  incorrect O2 (`M P A P`, preconditioner not projected) have the same restriction, the same
+  symDefect and the same spectrum **to every digit.** The only quantity that separates them is
+  **leakage out of `V`** — `2.59e-13` vs `4.10e-1`, **twelve orders**. A reviewer who checked
+  symmetry and positivity on `V`, exactly as §8.3 says, **would pass O2** — and O2 is precisely the
+  §5.3 failure mode the spec is warning about: the iterate drifts out of the constraint subspace
+  while the restricted operator looks perfect.
+
+**§8.3 ITEM 2 IS AMENDED. The three quantities that actually discriminate, all three required:**
+(i) **leakage** `max_{z∈Z} ‖(I−P) K z‖ / ‖K z‖`; (ii) symmetry **and** positivity of
+`Zᵀ P A_σ P Z` — *the operator being inverted, NOT the preconditioned product*; (iii)
+self-adjointness in the preconditioner's own inner product,
+`symDefect((Zᵀ P M P Z)⁻¹ · Zᵀ K Z)`. Shipped order **O1 `P M P A P`**: leakage 2.59e-13,
+M-selfAdjDefect 2.60e-13, and on `V` by similarity transform `λ_min = 1.0000 exactly`
+(the constant mode the `+11ᵀ/(nσ)` correction pins there — `N ⊂ V` showing up spectrally),
+λ_max 59.8/69.5/72.2, `nullDim = 0`, **all eigenvalues positive**. Disqualified with their numbers,
+recorded so a future agent cannot "simplify" the order back: **O2** leakage 4.10e-1; **O4**
+(`P A P M P`, right-preconditioned) M-selfAdjDefect 1.59e-1, *and* already gated behind `knockOut`
+by `gmres.ts` (§5.3); **O5** (`P M A P`) M-selfAdjDefect 1.81e-3.
+**O3 (`P M P A`) is not a distinct order** — `P(I−P) = 0` makes it identical to O1 to 13 digits. The
+implementation keeps both projections anyway, because `P² = P` holds only to 1.1e-15 and the
+re-projection is what bounds drift out of `V` at a cost of one `solveLaplacian` against a GMRES
+iteration's two hierarchical applies. **That is an anchored line: removing the inner projection as
+dead code is correct in exact arithmetic and wrong in floating point.**
+
+**This is the NINTH instance of the non-discriminating-gate defect on this branch, and the first
+found in this spec's own normative text rather than in a task row.** A22's saturation statistic,
+A35's row-9b bar, A36's row-8b bar, and now §8.3 item 2.
+
+**(3) §8.3 ITEM 3's FRAMING IS INVERTED: THE PROJECTION IS NOT THE CONDITIONING RISK, THE OPERATOR
+IS.** Item 3 warns that *"a nullspace route does not inherit an exemption just because it avoids the
+Schur complement"* and sends the implementation to check `[G6]`'s `κ·u_f32 > 0.1` bound. Correct as
+far as it goes, and **the quantity it implicitly points at is the wrong one.** Measured:
+`cond(P A_σ P|V) / cond(A_σ) = 0.960 ± 0.003` — the projection *improves* conditioning by 4 %, which
+is Cauchy interlacing, not luck. Crossovers for `κ·u_f32 = 0.1`: the **operator** at **n ≈ 1 027**,
+the **projection solve** at **n ≈ 8 956** — the operator binds **8.8× earlier**. So the route needs
+no conditioning exemption; it needs §6's mixed-precision ruling, which is already the spec's answer.
+**And this independently reproduces §6's f32 wall at n ≈ 1 228–1 773 from a new direction** — a third
+arrival at the same number.
+
+**(4) MY STAGE-0b MEASUREMENTS CONFIRMED, EXTENDED TO n = 7 680, WITH TWO CORRECTIONS TO MY OWN
+NUMBERS.** `cond(C_edge C_edgeᵀ)` is **exactly `n²`** over a **160× range** — 4.771e+1 at n=48 to
+**1.2340e+6 at n=7 680**, successive doubling ratios 4.03 / (×2.5)²=6.27 / 4.00 / 4.00 / 4.00 / 4.00,
+with `cond/n²` stable at **0.0209**. Mechanism: refining a fixed smooth closed curve aligns
+consecutive tangents, so the matrix tends to the ring Laplacian (λ_max → 4, λ_min ~ 1/n²).
+**Extrapolation confirmed to the digit: κ(30 000) = 1.883e+7, `κ·u_f32 = 1.12`, breaching `[G6]`'s
+0.1 bound by 11.2×, crossover n = 8 956.** In f64 the same κ gives 2.1e-9, 4.8e7× under the bound.
+Corrections to what I put in the brief:
+- **The diagonal is NOT exactly 2.** It is `2|T_r|²` with `|T_r|² = 1 + O(u)`, max deviation **4 ulps
+  (8.9e-16)**. My "exactly 2.000000" was a `toFixed(6)` artefact of my own probe — **a gate written
+  `=== 2` would fail.** (That probe had already cost me one bug: `spectrum()` MUTATES its input, so
+  my first table's `diag`/`off` columns were post-eigensolve garbage. Two defects in one 30-line
+  probe, one caught by a contradiction between my own numbers and one caught by the implementer.)
+- **The off-band entries are *identically* 0, not "below 1e-15"** — the dot product of two
+  non-adjacent edge rows has no overlapping terms at all, so there is nothing to round.
+- **A hazard I failed to name:** `solveLaplacian`'s `thomas` is **unpivoted**, justified by *strict*
+  diagonal dominance, while `C_edge C_edgeᵀ` is only *weakly* dominant as the tangents align
+  (`2|T_r|²` vs `→ 2`). Measured safe rather than assumed: min Thomas pivot **≥ 1.001 at every n**
+  (NR's `gamma = −b[0]` doubles `b[0]`), worst `triResidual` 6.72e-11 at n = 7 680 — fine in f64,
+  which is item (3)'s point. **`laplacian.ts`'s generic `TriSystem` + `solveLaplacian` are reused; no
+  new solver was written.**
+
+**(5) THE ROUTE AND THE DENSE PATH CROSS, AND A35 ITEM 1 IS NOW PINNED BY AN EXECUTABLE CHECK.**
+Shipped route vs DD-refined truth, `baryedge`, θ=0.25, `tol=1e-12`: n=48 **7.53e-13** (dense LDLᵀ
+1.95e-15, i.e. dense is **400× better**), n=240 1.97e-12 (LDLᵀ 4.28e-13), n=960 **3.787e-12** (LDLᵀ
+**1.3196e-10**, i.e. dense is **35× worse**). **The crossing is the amendment:** the dense path is a
+good oracle at n ≤ 240 and is not one at n=960. The test asserts **both halves** —
+`route < 1e-10` AND `denseLDLᵀ > 1e-10` — so A35 item 1 is now enforced by a failing-if-wrong check
+instead of by prose. **Third independent arrival at that conclusion** (9b from refinement divergence,
+8b at 2.533e-10, this from the crossing). Dense **LU** at n=960 is 2.918e-11 — inside the bar, 7.7×
+worse than the route, and disagreeing with dense LDLᵀ by more than either is from truth.
+**Keep the provenance separate:** the dense-ALGEBRA validation of the composition is 8.0e-15 (n=48) /
+5.0e-14 (n=96); the END-TO-END iterative route is 7.53e-13 … 3.787e-12. The ~2-decade gap is the
+`tol = 1e-12` stop, not a discrepancy, and conflating the two would be exactly the A17 provenance
+error.
+
+**(6) `λ` DEGRADES ~n² FASTER THAN `x`, AND IT IS STRUCTURAL — ROW 9's BAR IS AMENDED
+ACCORDINGLY.** Over n = 240 → 960, `x` grows **1.9×** while `λ` grows **16×** on `grad/−φ`
+(4.06e-12 → 6.62e-11) and **85×** on `gen/−φ` (5.01e-12 → **4.24e-10**). Mechanism: the edge
+multipliers are **not solved for, they are recovered** post-solve by
+`λ_e = (C_e C_eᵀ)⁻¹ C_e (b − Ā x − C_oᵀ λ_o)`, so their error carries `cond(C_e C_eᵀ) ≈ 1.9e4` *on
+top of* `x`'s error and on top of a cancellation in `b − Ā x`. **A 1e-10 `λ` bar at n=960 passes
+`grad/−φ` with 1.5× margin and FAILS `gen/−φ` at 4.24e-10.** RULED: assert `λ` at **n ≤ 240**
+(4e-12…9e-12 across all 12 cells); at n=960 assert `x` + `edgeConstraintResidual` (3.978e-13) and
+**log** `λ`. This is A35 item 7 / carry 3's rule applied to a quantity the rule had not been applied
+to. **Also: the saddle residual is NOT a proxy for either** — 5.87e-12 at n=48 but **1.45e-8** at
+n=240 on `baryedgepin`, 2 500× worse, while `x` moves 4×; it is a difference of `O(‖Ā‖·‖x‖)` terms
+and `‖Ā‖` grows with n, so it is scale-carrying and must be reported, never barred tightly.
+
+**(7) A SECOND O(N²) WALL, IN THE CONSTRAINT PATH — issue #85, and it is a scale-target blocker.**
+`edgeLengthsBlock` allocates `C` **densely**: `m × 3n` f64 = `3n²` doubles = **22 MB at n=960, 805 MB
+at the dense-`A` ceiling N≈5 793, and 21.6 GB at N=30 000** — of which, at 6 nonzeros per row,
+**1.4 MB is data.** **§8.1 prices the `k = O(n)` route in flops and never prices the allocation.**
+So a route whose solver is O(n) per iteration still cannot reach the target if its entry point is
+`C: number[][]`. `prepareNullspace` therefore takes the edge block **sparsely**
+(`{vertices, edges, rowStart}`, re-deriving `±T` in O(n)) and only the `O(1)` rows densely where
+`k ≤ 16` makes `k × 3n` fine. **That fixes one consumer only:** `constraintSet.ts` still materialises
+the dense `C` for `evaluateConstraintSet`, which `dispatch.ts:244` calls every step. **This is the
+same shape of wall as the `4N²` dense-`A` cap that motivated the whole phase, one layer over, and it
+was unremarked until now.** Carried to task 10.
+
+**(8) ACCEPTED DISAGREEMENT: the route's refusal is a `SolveNotCertifiedError`, not a plain
+`Error`.** My carry said *"reuse 8b's refusal, do not add a second convention."* The implementer
+reused the **convention** and not the **type**, correctly: 8b's
+`HierarchicalSaddleUnsupportedError` is a plain `Error`, which is right where 8b throws it (factory
+time, nothing downstream to fold into), but `prepareNullspace` is called on the **solve** path where
+`optimizer.ts` folds a bare `Error` into `'singular_system'` — so an open chain would be reported as
+a *singular matrix* rather than *wrong topology for this route*, which is A33 / A35 item 6's exact
+complaint. `NullspaceRouteError extends SolveNotCertifiedError`; tests assert both `instanceof`s and
+that the message names the DENSE path. **One deliberate exception:** a zero-length edge stays a plain
+`Error`, because that genuinely *is* a singular system — and it makes `laplacian.ts`'s zero-pivot
+guard **reachable and tested for the first time**, having been documented as unreachable for
+`assembleCurveLaplacian` systems and kept only to guard a hand-built `TriSystem`. This route is that
+hand-built `TriSystem`.
+
+**(9) THE IMPLEMENTER REJECTED ITS OWN VACUOUS GATE.** Its first draft threw on
+`projector.idempotenceDefect > 1e-6`; the real value in f64 is **3e-16 … 1e-15** and no admissible
+`TriSystem` on a closed ring can produce 1e-6, so the gate was structurally untrippable — it would
+read exactly like a passing gate while testing nothing. Replaced by reporting all five projector
+defects and **tripping them with an injected wrong-geometry projector (0.279)**. Recorded because
+this is the first time on this branch the defect was caught *by the implementer, before shipping*,
+rather than by a later reader — and the brief's instruction that produced it was one sentence:
+*"assume your first draft of any gate is vacuous until you have tripped it."*
+
+**(10) CARRY CHECKS THAT CHANGED SOMETHING.** The `totalLength` + `edgeLengths` exclusivity throw
+**exists and is reachable** (`assertValidConstraintSet`, citing
+`2026-07-03-sobolev-constraints-design.md` §3.4) — no issue needed — **but my worry was confirmed
+real for this route specifically:** `C_edge C_edgeᵀ` is built from the edge rows alone and stays SPD,
+so the nullspace route **would not notice** the exact rank deficiency that stacking them creates. The
+construction-time guard is the only thing protecting it, which is now stated in the module.
+And the `ell0` perturbation carry earned its place outright: without it `edgeLengths(v,e)` returns
+the current lengths, `Φ ≡ 0`, `d = 0`, `x_p = 0`, and **the `skip-particular` knock-out would have
+been a no-op** — one of the two §5.1 knock-outs would have been vacuous.
+
+**(11) SCOPE LIMITS, STATED SO THEY ARE NOT LATER READ AS GENERAL.** (a) **One fixture** — the
+trefoil at n ∈ {48, 96, 240, 960}. The *algebra* (`C_edge N = 0`, the cyclic-tridiagonal Gram,
+`P N = N`) is topology-level and holds for any natural-order closed ring; the **conditioning
+extrapolations are curve-specific**, and a near-degenerate curve with one very short edge would be
+worse than `n²` suggests. Unprobed. (b) **`θ`-compression dominates every accuracy number here**: the
+compressed cell is 3.1e-3 from the true `Ā`, so §3.1's figures mean *"the route solves the `A_bct` it
+was handed"*, never *"the route solves `Ā`"* — the n=960 cell's 3.787e-12 must never be quoted as a
+claim about the physics. (c) **`λ_e` at scale is unmeasured past n=960**: extrapolating, it passes
+~1e-8 near n ≈ 3 000 and ~1e-6 near n ≈ 10 000. Nothing in-tree consumes `λ_e` yet; if anything ever
+does quantitatively (a dual-feasibility test, a KKT stopping rule) it will need a refinement step,
+which one extra Thomas solve would likely buy back — **unmeasured, not added.** (d) `SCHUR_MAX_K = 16`
+is inherited for the `O(1)` rows, so 20 pins plus `edgeLengths` is refused even though the nullspace
+half scales fine; whether 16 is still the right ceiling once the `|E|` rows are free is a task-10
+question.
+
+**(12) A35 ITEM 5 IS NARROWER THAN I WROTE IT: the `lambda-sign` blindness is a property of `k=3`
+SETS, not of `grad/−φ` rhs.** A35 said a flipped multiplier sign *"is INVISIBLE on the `grad/0` and
+`zero/−φ` cells of every k=3 set"* and I propagated that to row 9 as a required-cell rule. Measured
+here: at `kOther = 3` it is indeed invisible on `grad/−φ` (`|λ_O(1)| = 1.11e-16`, separation
+1.06e-16) and caught on `gen/−φ` (3.18e-2) — A35 holds. **But the blindness DISAPPEARS at
+`kOther = 6`:** `|λ| = 36.6`, caught at 2.04. Mechanism: with `G` square and invertible,
+`Gᵀλ = Nᵀb` forces `λ ≈ 0` for a mean-free top; at `kOther = 6` **`G` stops being square**, the
+forcing goes away, and the sign shows up on every rhs. **RULED: the `gen/−φ` requirement stands, but
+its JUSTIFICATION is `k = 3`-specific** — do not restate it as "sign errors are invisible on
+gradient right-hand sides," which is what A35's wording invites.
+
+**(13) TWO KNOCK-OUTS PASS THE η CERTIFICATE WHILE VIOLATING THE CONSTRAINTS BY 5–7 %. No η-based
+gate can see either, and this is §5.3's failure mode with numbers on it.**
+
+| knock-out | η at stop | iterations | `edgeConstraintResidual` |
+|---|---|---|---|
+| `precond-unprojected` | **8.52e-13** | **identical to clean** | **4.57e-2** |
+| `skip-particular` | **1.46e-15** | — | **7.21e-2** |
+| clean | 8.52e-13 | 29 | 3.978e-13 |
+
+`precond-unprojected` is the O2 order of item (2) reached from the other side: it converges to the
+stated backward error, in the same iteration count, on a direction that leaves the constraint
+subspace by 4.6 %. **This is why `edgeConstraintResidual` is a RETURNED FIELD on the solve result and
+not a test-only quantity** — the certificate the whole phase leans on (`η`, A35 item 4's
+`DEFAULT_ETA_ACCEPT`) is *structurally blind* to constraint violation, because η measures the
+residual of the system the solver thinks it is solving. **Generalise, and carry to every later task:
+on a constrained route, η is necessary and NOT sufficient; a constraint residual must be reported
+alongside it.** Nothing in `src/core/` thresholds either one (`linsolve.ts:410-413`), so this is a
+reporting obligation, not yet an enforced gate.
+
+**(14) THREE OPERATIONAL TRAPS, each of which cost a measurement.**
+- **`fixture(48)` at the default `leafSize = 8` ALREADY has `nFar = 0`.** So A36 item 1's
+  exact-limit pairing **silently measures nothing at n = 48** — the "compressed" and "exact" cells are
+  the same cell. It must be done at **n ≥ 240**, and there is now a test asserting that `nFar > 0` at
+  the size the pairing is taken. **This qualifies A36 item 1**, which gave the bar (1e-10 at n=240)
+  without saying why n=48 is unusable.
+- **Two `nohup` runs pointed at the SAME log path interleave through the file offset and NUL-pad each
+  other**, producing a file that parses as a plausible log with **two `EXIT=` lines and a STALE
+  pass/fail summary.** Use a fresh path per run; **if a log contains two `EXIT=` lines, discard it.**
+  This is a worse failure than the killed-run of A36's process note, because the killed run looked
+  *unfinished* while this one looks *finished and wrong*.
+- **Provenance to keep distinct** (A17 again): `λ_min = +0.651` is for `Zᵀ P A_σ P Z`, *the operator
+  being inverted*; `λ_min = 1.0000` is for the *preconditioned product* on `V`. Both appear in task
+  9's report, they are different quantities, and quoting either for the other inverts the meaning of
+  the SPD check.
 
 > **A24, 2026-10-11 — THE DENSE BYTE-IDENTITY GATE HAS NO INSTRUMENT, AND TASK 8 IS BLOCKED UNTIL IT
 > DOES.** Row 8 and §11.4 both designate *"existing goldens"* as the gate for
