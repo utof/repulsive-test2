@@ -96,11 +96,24 @@ const NORM_POWER_ITERS = 30;
 const NORM_SEED = 20261009;
 /**
  * Happy-breakdown threshold: the new Arnoldi vector lost all but `~1e-14` of the norm it had
- * before orthogonalisation, i.e. it lies in the span within roundoff. Normalising what is left
- * would turn rounding noise into a basis vector that is NOT orthogonal to the others. The lab
- * tests `hsub == 0.0` exactly (`gmres_lab.py:270`); an exact inverse as `Ã⁻¹` leaves `hsub ~ 1e-16`
- * here, not 0 (`gmres.test.ts` pins the iteration-1 breakdown), so the threshold is relative to the
- * norm `‖M v‖` the vector had BEFORE orthogonalisation: scaling `Ã⁻¹` by 1e-20 must not change it.
+ * before orthogonalisation, i.e. it lies in the span within roundoff. The lab tests
+ * `hsub == 0.0` exactly (`gmres_lab.py:298`, the loop's terminating test; `:270` is the save of the
+ * subdiagonal and `:271` the normalisation guard); an exact inverse as `Ã⁻¹` leaves
+ * `hsub/‖M v‖ = 2.181e-16` here, not 0 (MEASURED), so the threshold is relative to the norm
+ * `‖M v‖` the vector had BEFORE orthogonalisation: scaling `Ã⁻¹` by 1e-20 must not change it.
+ *
+ * BOTH SIDES OF THE VALUE ARE PINNED BY MEASUREMENT, which is why it is 1e-14 and not "small".
+ * Below: `2.181e-16` is a real breakdown and must stay one (`gmres.test.ts`'s exact-inverse
+ * iteration-1 breakdown). Above: a `Ã⁻¹ = D A_σ⁻¹`, `D = diag(1 ± 1e-13)` fixture produces
+ * `hsub/‖M v‖ = 9.864e-14` at iteration 1 — a genuine Krylov direction, 452× over the exact
+ * inverse's — and a threshold at or above that truncates the solve at iteration 1. So the usable
+ * window is `(2.2e-16, 9.9e-14)` and 1e-14 sits inside it; `gmres.test.ts` asserts both ends.
+ *
+ * Normalising what is left would turn rounding noise into a basis vector that is NOT orthogonal to
+ * the others. That is a statement about the REPORTED basis (`GmresResult.arnoldi.basis`), not about
+ * the iteration: breakdown is in `stopNow`, so the loop always exits at the same iteration and
+ * `solution()` only reads `V[0..k-1]`. The guard is observable exactly where the comment says —
+ * `arnoldi.basis.length` is `iters` on a breakdown and `iters + 1` otherwise.
  */
 const BREAKDOWN_REL = 1e-14;
 
@@ -310,7 +323,18 @@ export interface EtaProbeOptions {
     normA2?: number;
     /** Default {@link DEFAULT_PROBE_SCHEDULE}. Recorded in the result. */
     schedule?: ProbeSchedule;
-    /** Stop at the first probe with `η_exact <= etaTarget` (H3's `τ_η`). Recorded; default none. */
+    /**
+     * Stop at the first probe with `η_BCT <= etaTarget` (H3's `τ_η`), inclusive. Recorded;
+     * default none.
+     *
+     * `η_bct` and NOT `η_exact`, per the 2026-10-11 amendment box in spec §7.3 ("the gated quantity
+     * is `η_bct`") and the matching box in §7.4 ("H3 counts on `η_bct`"): `η_exact` floors at the
+     * BCT compression error `‖E x̃‖/(‖A_σ‖‖x̃‖+‖b‖)`, which is 1.87e-03 at n=64 (MEASURED), so every
+     * `τ_η` H3 can use is unreachable on it and the count would be censored at every n. `η_exact`
+     * is still computed and recorded — it is the `δ_compress` monitor — but it is not the currency
+     * of a stop.
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3, §7.4
+     */
     etaTarget?: number;
 }
 
@@ -350,9 +374,24 @@ export interface EtaProbeReport {
     /** Probe-only applies, SEPARATE from `GmresResult.matvecs`. Both equal `records.length`. */
     exactMatvecs: number;
     bctMatvecs: number;
-    /** The gated value of H2: `min` over records of `η_exact`. */
+    /**
+     * `min` over records of `η_exact` — the `δ_compress` MONITOR, not H2's bar. Spec §7.3's
+     * 2026-10-11 amendment box: `η_exact`'s floor is exactly `‖E x̃‖/(‖A_σ‖‖x̃‖+‖b‖)` with
+     * `E = A_χ0 − A_bct`, so it carries no bar; H2's gated value is {@link etaBctMin}.
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3
+     */
     etaMin: number;
     etaMinIter: number;
+    /**
+     * The gated value of H2: `min` over records of `η_BCT` (spec §7.3's 2026-10-11 amendment box —
+     * "backward error is legitimately self-referential, that is what Rigal-Gaches means"). Exposed
+     * precomputed for the same reason {@link GmresResult.censored} is: a harness that has to derive
+     * the gated quantity from `records` while the NON-gated one is handed to it precomputed will
+     * read the wrong one, which is the defect the amendment is about.
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3
+     */
+    etaBctMin: number;
+    etaBctMinIter: number;
     /** Union of the records' violations: non-empty ⇒ INVALID. */
     invalid: EtaClause[];
 }
@@ -412,6 +451,17 @@ export interface GmresResult {
      * this is expected true and is not an INVALID trigger; under H3's count-to-`τ_η` it is (spec §7.4).
      */
     censored: boolean;
+    /**
+     * `iters <= 1` — spec §7.4's OTHER INVALID predicate, `iters ∈ {0, 1}`: "the stopping test
+     * fired before any real iteration (τ above the initial η)". Precomputed alongside
+     * {@link censored} because the two are siblings in the same INVALID table and a harness that
+     * gets one handed to it will not go looking for the other. It is NOT an error here: a legal
+     * `zero-rhs` stop (`iters = 0`) and an exact-inverse happy breakdown (`iters = 1`) both set it
+     * — H3's MEASURED collapse at `τ_η = 1e-2` is `iters` 1 at n >= 240, which is what the
+     * predicate exists to catch, and it cannot be told from these by the count alone.
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.4
+     */
+    degenerate: boolean;
     /**
      * `|g_{k+1}| / β`, one per iteration: the Givens least-squares residual relative to `beta`
      * (`‖Ã⁻¹b‖` left, `‖b‖` right). NOT the true residual when left-preconditioned (module TSDoc).
@@ -528,6 +578,7 @@ export function gmres(
         tol,
         stop,
         censored: iters === maxit,
+        degenerate: iters <= 1,
         recurrence,
         beta,
         matvecs,
@@ -665,7 +716,11 @@ export function gmres(
         recurrence[k] = Math.abs(g[k + 1]) / beta;
         iters = k + 1;
 
-        // Stop rules, in this order: recurrence tol, then η target (below), then breakdown.
+        // Stop rules, in STRICT PRECEDENCE: the η target first (it is tested inside the probe
+        // block below, before `stopTol` is acted on), then the recurrence `tol`, then breakdown.
+        // Only the reported `stop` label depends on the order — `x`, `iters`, `recurrence` and the
+        // probe are identical either way — and all three orderings are pinned in `gmres.test.ts`
+        // on runs where two of the conditions hold at the same iteration.
         // `tol > 0 &&`: tol = 0 means "no recurrence stop" (GmresOptions.tol), even at the instant
         // the recurrence reads exactly 0 — that case is a breakdown and is reported as one.
         const stopTol = tol > 0 && recurrence[k] <= tol;
@@ -673,7 +728,10 @@ export function gmres(
         if (probeOpts && (plannedSet.has(iters) || stopNow)) {
             x = solution(iters);
             const rec = probeAt(iters, !plannedSet.has(iters), x);
-            if (probeOpts.etaTarget !== undefined && rec.etaExact <= probeOpts.etaTarget) {
+            // `etaBct`, NOT `etaExact`: spec §7.3's 2026-10-11 amendment box makes `η_bct` the
+            // gated quantity, and `η_exact` floors at the compression error (1.87e-03 at n=64,
+            // MEASURED), above every usable `τ_η` (§7.4's box).
+            if (probeOpts.etaTarget !== undefined && rec.etaBct <= probeOpts.etaTarget) {
                 stop = 'eta-target';
                 break;
             }
@@ -696,11 +754,17 @@ export function gmres(
     if (probeOpts) {
         let etaMin = Number.POSITIVE_INFINITY;
         let etaMinIter = 0;
+        let etaBctMin = Number.POSITIVE_INFINITY;
+        let etaBctMinIter = 0;
         const invalid = new Set<EtaClause>();
         for (const rec of records) {
             if (rec.etaExact < etaMin || Number.isNaN(rec.etaExact)) {
                 etaMin = rec.etaExact;
                 etaMinIter = rec.iter;
+            }
+            if (rec.etaBct < etaBctMin || Number.isNaN(rec.etaBct)) {
+                etaBctMin = rec.etaBct;
+                etaBctMinIter = rec.iter;
             }
             for (const c of rec.violations) invalid.add(c);
         }
@@ -716,6 +780,8 @@ export function gmres(
             bctMatvecs,
             etaMin,
             etaMinIter,
+            etaBctMin,
+            etaBctMinIter,
             invalid: [...invalid],
         };
     }

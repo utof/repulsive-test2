@@ -208,15 +208,23 @@ function denseSolve(S: Synth, b: ArrayLike<number>): Float64Array {
 }
 
 /**
- * An 'exact' operator that differs from the iteration's by a relative 2^-30, the way the χ=0
- * matvec differs from the θ matvec. Clause 3 is about a residual formed with THE SAME operator;
- * two roundings of one operator (`Synth.exactApplyA`) land on the f64 floor, where bit-equal η is
- * a coin flip rather than a bug (MEASURED: it fired in the control).
+ * An 'exact' operator that differs from the iteration's by a relative `rel`, the way the χ=0 matvec
+ * differs from the θ matvec. Clause 3 is about a residual formed with THE SAME operator; two
+ * roundings of one operator (`Synth.exactApplyA`) land on the f64 floor, where bit-equal η is a
+ * coin flip rather than a bug (MEASURED: it fired in the control).
+ *
+ * `rel` is a knob because the two η's separate only below the perturbation: at `2^-30` they agree
+ * to 3 digits down to 6e-8 and differ only at 3.6e-10 vs 1.7e-16 (MEASURED), which is under every
+ * usable `τ_η`, whereas at `1e-2` `η_exact` floors at 3.86e-3 and `η_bct` keeps falling — the
+ * fixture power the `etaTarget` currency test needs.
  */
-function perturbedExact(S: Synth): (u: ArrayLike<number>, out: Float64Array) => void {
+function perturbedExact(
+    S: Synth,
+    rel = 2 ** -30,
+): (u: ArrayLike<number>, out: Float64Array) => void {
     return (u, out) => {
         S.exactApplyA(u, out);
-        for (let i = 0; i < out.length; i++) out[i] *= 1 + 2 ** -30;
+        for (let i = 0; i < out.length; i++) out[i] *= 1 + rel;
     };
 }
 
@@ -434,7 +442,7 @@ describe('estimateNorm2 — the 30-iteration power estimate (spec §7.3)', () =>
         for (let k = 1; k < est.history.length; k++) {
             expect(est.history[k]).toBeGreaterThanOrEqual(est.history[k - 1]);
         }
-        const lamMax = spectrum(S.As, 8).lambdaMax;
+        const lamMax = spectrum(new Float64Array(S.As), 8).lambdaMax;
         log('power estimate / λ_max', est.norm / lamMax);
         expect(est.norm).toBeLessThanOrEqual(lamMax * (1 + 1e-14));
         expect(est.norm).toBe(est.history[29]);
@@ -509,6 +517,12 @@ describe('exact-arithmetic convergence (synthetic, M = I)', () => {
         expect(res.iters).toBe(1);
         expect(res.matvecs).toBe(1);
         expect(res.precondApplies).toBe(2); // Ã⁻¹b once, then once per iteration
+        // §7.4's `iters ∈ {0, 1}` INVALID predicate: legal here, and flagged anyway, because a
+        // count of 1 cannot be told from "τ was above the initial η" by the count alone.
+        expect(res.degenerate).toBe(true);
+        // Both conditions hold at iteration 1 (recurrence 1.3e-16 <= tol 1e-13 AND breakdown), and
+        // the recurrence tol takes precedence over breakdown.
+        expect(res.stop).toBe('tol');
         const star = denseSolve(S, b);
         const errStar = distance(res.x, star) / norm(star);
         log('exact-inverse x error vs dense solve', errStar);
@@ -543,8 +557,13 @@ describe('scale invariance (GMRES is invariant to a scalar scaling of Ã⁻¹)',
                 );
             }
             log(`scale ${c}: worst recurrence relative difference`, worst);
-            expect(worst).toBeLessThan(1e-11); // MEASURED 2.3e-13
-            expect(distance(r.x, ref.x) / norm(ref.x)).toBeLessThan(1e-11);
+            // MEASURED 1.379e-15 (c=1e-20) and 2.293e-13 (c=1e+20); the bound is 8.7x the worse.
+            expect(worst).toBeLessThan(2e-12);
+            const xGap = distance(r.x, ref.x) / norm(ref.x);
+            log(`scale ${c}: ‖x̃ − x̃_ref‖/‖x̃_ref‖`, xGap);
+            // MEASURED 3.760e-16 (c=1e-20) and 3.667e-16 (c=1e+20) — scale invariance of `x̃` is
+            // exact to f64 roundoff, 13x under this bound, NOT merely "small".
+            expect(xGap).toBeLessThan(5e-15);
         }
     });
 });
@@ -674,6 +693,10 @@ describe('stop reasons and censoring (spec §5.3, §7.4: compare against maxit, 
         expect(res.iters).toBeGreaterThanOrEqual(S.n);
         expect(res.iters).toBeLessThan(12);
         expect(res.censored).toBe(false);
+        // The smallest count that is NOT §7.4's `iters ∈ {0, 1}`: a `degenerate` that fired at 2
+        // would mark this healthy exact-termination run INVALID (MEASURED iters = 2, stop 'tol').
+        expect(res.iters).toBe(2);
+        expect(res.degenerate).toBe(false);
     });
 
     test('happy breakdown: an exact inverse exhausts the Krylov space at iteration 1', () => {
@@ -682,6 +705,78 @@ describe('stop reasons and censoring (spec §5.3, §7.4: compare against maxit, 
         expect(res.iters).toBe(1);
         expect(res.stop).toBe('breakdown');
         expect(res.censored).toBe(false);
+        expect(res.degenerate).toBe(true);
+    });
+
+    test('stop precedence: η target over recurrence tol over breakdown, when all three hold at once', () => {
+        // An exact inverse makes iteration 1 satisfy every stop rule simultaneously: the recurrence
+        // is 1.3e-16 <= tol, `hsub/‖Mv‖` is 2.2e-16 <= BREAKDOWN_REL, and η is at the f64 floor.
+        // Only the reported label distinguishes the orderings, which is why it needs its own test.
+        const S = synth(8, 7);
+        const exact = inversePrecond(S, 7);
+        const b = randVec(24, 11);
+        const all = gmres(S.op, exact, b, {
+            tol: 1e-13,
+            probe: {
+                exactApplyA: S.exactApplyA,
+                uOp: U_F64,
+                schedule: { head: 4, stride: 1 },
+                etaTarget: 1e-3,
+            },
+        });
+        expect(all.iters).toBe(1);
+        expect(all.stop).toBe('eta-target');
+        // Without the η target, `tol` wins over breakdown; with neither, breakdown is reported.
+        expect(solveSynth(S, exact, b, { tol: 1e-13 }).stop).toBe('tol');
+        expect(solveSynth(S, exact, b, { tol: 0 }).stop).toBe('breakdown');
+    });
+
+    test('on breakdown the REPORTED basis is not extended with the noise vector', () => {
+        // The `!breakdown` guard before pushing `V[k+1]` cannot change the iteration (breakdown is
+        // a stop condition and `solution()` reads `V[0..k-1]`), so `arnoldi.basis.length` is the
+        // only place it is observable — which is exactly what the guard's comment claims.
+        const S = synth(8, 7);
+        const b = randVec(24, 11);
+        const broke = solveSynth(S, inversePrecond(S, 7), b, { tol: 0, retainArnoldi: true });
+        expect(broke.stop).toBe('breakdown');
+        expect(broke.arnoldi?.basis.length).toBe(broke.iters); // 1, NOT 2
+        const ran = solveSynth(S, inversePrecond(S, 21), b, {
+            tol: 0,
+            maxit: 5,
+            retainArnoldi: true,
+        });
+        expect(ran.stop).toBe('maxit');
+        expect(ran.arnoldi?.basis.length).toBe(ran.iters + 1);
+    });
+
+    test('the breakdown threshold is below a GRADED subdiagonal that is still a real Krylov direction', () => {
+        // `Ã⁻¹ = D A_σ⁻¹` with `D = diag(1 ± 1e-13)`: the iteration-1 Arnoldi subdiagonal is a
+        // chosen 1e-13 of the pre-orthogonalisation norm instead of the exact inverse's 2.2e-16.
+        // That pins BREAKDOWN_REL's UPPER side, which is otherwise unconstrained: a threshold at or
+        // above this ratio truncates the solve at iteration 1 (MEASURED: `iters` 1, `degenerate`).
+        const S = synth(8, 7);
+        const exact = inversePrecond(S, 7);
+        const graded = {
+            n: 8,
+            apply: (R: ArrayLike<number>, out: Float64Array): void => {
+                exact.apply(R, out);
+                for (let i = 0; i < out.length; i++) out[i] *= 1 + (i % 2 === 0 ? 1e-13 : -1e-13);
+            },
+        };
+        const res = solveSynth(S, graded, randVec(24, 11), {
+            tol: 0,
+            maxit: 6,
+            retainArnoldi: true,
+        });
+        const h0 = res.arnoldi?.hessenberg[0] ?? new Float64Array(2);
+        const ratio = h0[1] / Math.hypot(h0[0], h0[1]);
+        log('graded fixture: iteration-1 hsub / ‖M v₀‖', ratio);
+        // MEASURED 9.864e-14, against 2.181e-16 for the same preconditioner un-graded (452x).
+        expect(ratio).toBeGreaterThan(5e-14);
+        expect(ratio).toBeLessThan(2e-13);
+        // ... and at the shipped 1e-14 this is NOT a breakdown, so the iteration runs its budget.
+        expect(res.iters).toBe(6);
+        expect(res.degenerate).toBe(false);
     });
 
     test('every stop reason is reachable (a reason no test can produce is a dead branch)', () => {
@@ -714,6 +809,25 @@ describe('stop reasons and censoring (spec §5.3, §7.4: compare against maxit, 
         expect(res.x.every((v) => v === 0)).toBe(true);
         expect(res.matvecs).toBe(0);
         expect(res.censored).toBe(false);
+        expect(res.degenerate).toBe(true); // §7.4's `iters ∈ {0, 1}`: the other end of it
+    });
+
+    test('degenerate is §7.4s `iters ∈ {0,1}` and is FALSE on a healthy run (censored is the sibling)', () => {
+        const S = synth(8, 7);
+        const b = randVec(24, 11);
+        const healthy = solveSynth(S, inversePrecond(S, 21), b, { tol: 1e-6 });
+        expect(healthy.iters).toBe(7);
+        expect(healthy.degenerate).toBe(false);
+        expect(healthy.censored).toBe(false);
+        // The two predicates are independent: a 1-iteration budget is both.
+        const capped = solveSynth(S, inversePrecond(S, 21), b, { tol: 0, maxit: 1 });
+        expect(capped.iters).toBe(1);
+        expect(capped.degenerate).toBe(true);
+        expect(capped.censored).toBe(true);
+        // ... and a run that is censored at a real count is NOT degenerate.
+        const long = solveSynth(S, identityPrecond(8), b, { tol: 0, maxit: 3 });
+        expect(long.censored).toBe(true);
+        expect(long.degenerate).toBe(false);
     });
 
     test('a preconditioner that annihilates b is an error, not a NaN carried through the loop', () => {
@@ -851,24 +965,35 @@ describe('η probe (spec §7.3)', () => {
         const r = distance(b, denseMatvec(S, res.x));
         const eta = r / (normA2 * norm(res.x) + norm(b));
         log('terminal η', eta);
-        expect(Math.abs((last?.etaExact ?? 0) - eta) / eta).toBeLessThan(1e-9);
+        // MEASURED 1.146e-14: the probe's η and a dense recomputation of the same formula differ
+        // only by the two summation orders. The bound is 8.7x that, so a multiplicative error in
+        // either denominator term cannot hide here (it was 0.956 for a swapped-argument mutant).
+        expect(Math.abs((last?.etaExact ?? 0) - eta) / eta).toBeLessThan(1e-13);
         expect(Math.abs((last?.xNorm ?? 0) - norm(res.x)) / norm(res.x)).toBe(0);
         // The clause-4 lower bound ‖A_σx̃‖/‖x̃‖, recomputed densely: a RATIO, not ‖A_σx̃‖.
         const lb = norm(denseMatvec(S, res.x)) / norm(res.x);
-        expect(Math.abs((last?.lowerBound ?? 0) - lb) / lb).toBeLessThan(1e-12);
+        // MEASURED exactly 0 — bit-identical. The allowance is ONE f64 eps and not a round number,
+        // because the two routes sum in different orders (`Synth.exactApplyA` accumulates over
+        // columns, `denseMatvec` over rows) so bit-equality is not structural.
+        expect(Math.abs((last?.lowerBound ?? 0) - lb) / lb).toBeLessThanOrEqual(2 ** -52);
         // The fixture has power only if ‖A_σx̃‖ and ‖A_σx̃‖/‖x̃‖ are far apart (here ‖x̃‖ ≈ 0.04).
         expect(Math.abs(lb - norm(denseMatvec(S, res.x))) / lb).toBeGreaterThan(0.5);
         expect(last?.lowerBound ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
             res.probe?.normA2 ?? 0,
         );
-        // ‖A‖₂ is the 30-iteration power estimate: within 1 % of λ_max, and never above it.
-        const lamMax = spectrum(S.As, 8).lambdaMax;
+        // ‖A‖₂ is the 30-iteration power estimate, and it is a LOWER bound that tightens.
+        // `spectrum` DESTROYS its argument (`denseSpectrum.ts` `tridiagonalize`), so it gets a copy:
+        // `S` is shared by this whole describe block and `S.As` is the oracle of other tests in it.
+        const lamMax = spectrum(new Float64Array(S.As), 8).lambdaMax;
         expect(normA2).toBeLessThanOrEqual(lamMax * (1 + 1e-14));
-        expect(normA2).toBeGreaterThan(0.99 * lamMax);
+        // MEASURED ratio 0.998790, i.e. a shortfall of 1.21e-3; the bound allows 2.5x that. The
+        // shortfall is the quantity with a floor (the near-degenerate top eigenvalues, spec §7.3),
+        // so it is what carries the margin, not the ratio.
+        expect(normA2).toBeGreaterThan(0.997 * lamMax);
         expect(res.probe?.normA2Matvecs).toBe(30);
     });
 
-    test('etaMin / etaMinIter are the minimum of η_EXACT over the records (the gated value)', () => {
+    test('etaMin is the minimum of η_EXACT (the δ_compress monitor) and etaBctMin of η_BCT (H2s gated value)', () => {
         const res = gmres(S.op, P, b, {
             tol: 0,
             maxit: 8,
@@ -886,6 +1011,11 @@ describe('η probe (spec §7.3)', () => {
         expect(minBct).toBeLessThan(min / 10);
         expect(res.probe?.etaMin).toBe(min);
         expect(recs.find((r) => r.etaExact === min)?.iter).toBe(res.probe?.etaMinIter);
+        // Both currencies are reported, and they are NOT the same number — spec §7.3's amendment
+        // box makes η_bct the gated one and leaves η_exact as the δ_compress monitor.
+        expect(res.probe?.etaBctMin).toBe(minBct);
+        expect(recs.find((r) => r.etaBct === minBct)?.iter).toBe(res.probe?.etaBctMinIter);
+        expect(res.probe?.etaBctMin).not.toBe(res.probe?.etaMin);
     });
 
     test('etaTarget stops at the FIRST probe at or below it and says so', () => {
@@ -901,10 +1031,57 @@ describe('η probe (spec §7.3)', () => {
         const recs = res.probe?.records ?? [];
         expect(res.stop).toBe('eta-target');
         expect(res.iters).toBe(lastRecord(res)?.iter ?? -1);
-        expect(lastRecord(res)?.etaExact).toBeLessThanOrEqual(1e-4);
-        for (const r of recs.slice(0, -1)) expect(r.etaExact).toBeGreaterThan(1e-4);
+        expect(lastRecord(res)?.etaBct).toBeLessThanOrEqual(1e-4);
+        for (const r of recs.slice(0, -1)) expect(r.etaBct).toBeGreaterThan(1e-4);
         expect(res.probe?.etaTarget).toBe(1e-4);
         expect(res.probe?.uOp).toBe(U_F64);
+    });
+
+    // The currency of the stop is η_BCT, per the 2026-10-11 amendment box in spec §7.3 ("the gated
+    // quantity is `η_bct`") and §7.4 ("H3 counts on `η_bct`"). The fixture above cannot see which
+    // η is read — on an unperturbed exact operator the two cross 1e-4 at the same iteration 6
+    // (MEASURED) — so the currency needs a fixture where only one of them is reachable.
+    describe('etaTarget reads η_BCT, not η_exact (spec §7.3 / §7.4, the 2026-10-11 amendment)', () => {
+        // relative 1e-2: η_exact floors at 3.856e-3 at iteration 5 and never falls again, so
+        // NO target below it is reachable on η_exact; η_bct passes 1e-4 at iteration 6 and
+        // 2.176e-4 at iteration 5 (MEASURED, all five seeds of the fixture are deterministic).
+        const coarse = perturbedExact(S, 1e-2);
+        const runTarget = (etaTarget?: number) =>
+            gmres(S.op, P, b, {
+                tol: 0,
+                maxit: 20,
+                probe: {
+                    exactApplyA: coarse,
+                    uOp: U_F64,
+                    schedule: { head: 20, stride: 1 },
+                    etaTarget,
+                },
+            });
+
+        test('a target unreachable on η_exact but reachable on η_bct DOES stop the solve', () => {
+            const res = runTarget(1e-4);
+            // Reading η_exact here gives `stop: 'maxit'` at `iters: 20` (MEASURED on the mutant).
+            expect(res.stop).toBe('eta-target');
+            expect(res.iters).toBe(6);
+            const recs = res.probe?.records ?? [];
+            // The fixture has power only if the target is out of η_exact's reach at EVERY iterate.
+            expect(res.probe?.etaMin).toBeGreaterThan(1e-4);
+            expect(Math.min(...recs.map((r) => r.etaExact))).toBeGreaterThan(1e-4);
+            expect(lastRecord(res)?.etaBct).toBeLessThanOrEqual(1e-4);
+            // ... and η_exact at the stopping iterate is four decades above it (MEASURED 3.86e-3).
+            expect(lastRecord(res)?.etaExact).toBeGreaterThan(1e-3);
+        });
+
+        test('the etaTarget comparison is INCLUSIVE, on η_bct: the iteration-5 value stops at 5', () => {
+            const recs = runTarget().probe?.records ?? [];
+            const edge = recs[4].etaBct; // MEASURED 2.175739e-4
+            expect(edge).toBeGreaterThan(0);
+            const res = runTarget(edge);
+            expect(res.iters).toBe(5);
+            expect(res.stop).toBe('eta-target');
+            // A strict `<` would carry on to iteration 6 (MEASURED on the mutant).
+            expect(lastRecord(res)?.etaBct).toBe(edge);
+        });
     });
 
     test('a supplied normA2 is used verbatim and costs no power-iteration matvecs', () => {
@@ -1003,7 +1180,7 @@ describe('INVALID clauses, integrated (spec §7.3)', () => {
     });
 
     test('clause 4: an under-estimated ‖A_σ‖₂ is caught against the free lower bound', () => {
-        const lamMax = spectrum(S.As, 8).lambdaMax;
+        const lamMax = spectrum(new Float64Array(S.As), 8).lambdaMax;
         const bad = run({ normA2: 0.01 * lamMax });
         expect(bad.probe?.invalid).toContain('norm-below-lower-bound');
         const ok = run({ normA2: lamMax });
@@ -1061,9 +1238,18 @@ describe('real operator: structural counters against Preconditioner.solves', () 
 });
 
 describe('real operator: correctness against a dense solve (n=64)', () => {
-    test('left-preconditioned GMRES reaches the dense A_σ⁻¹ b to the conditioning limit', () => {
+    // STOPPED ON THE η PROBE, NOT ON THE RECURRENCE RESIDUAL, and that is the whole design of this
+    // test. Left-preconditioned the recurrence is `‖Ã⁻¹r‖/‖Ã⁻¹b‖` (spec §5.3), so a run stopped at
+    // `tol = 1e-13` stops at a backward error that scales with `κ(Ã⁻¹A_σ)` — the quantity the mass
+    // weight moves (@issue utof/repulsive-test2#72) — and the forward error inherits it. MEASURED
+    // on exactly that rule: `err` = 9.34e-15 / 6.15e-14 / 1.50e-12 / 2.83e-11 at
+    // `massWeight` = 10 / 1 / 0.1 / 0.001, a 3 000x spread over four decades of a parameter still
+    // under adjudication. Stopping on `η_bct <= 1e-10` instead FIXES the backward error, so the
+    // same sweep gives `err` = 1.28e-10 / 8.33e-11 / 9.97e-11 / 8.24e-11 — a 1.55x spread — and
+    // every bound below is a bound on a quantity the preconditioner cannot move.
+    test('left-preconditioned GMRES reaches the dense A_σ⁻¹ b at the backward error it stopped on', () => {
         const n = 64;
-        const { H, op, P } = real(n);
+        const { H, op, P, exactApplyA } = real(n);
         const Ab = densify(n, (u, out) => applyAScalar(H, u, out));
         const As = new Float64Array(Ab);
         for (let i = 0; i < n * n; i++) As[i] += op.sigma / n;
@@ -1076,14 +1262,43 @@ describe('real operator: correctness against a dense solve (n=64)', () => {
             cholSolve(L, n, col);
             for (let i = 0; i < n; i++) star[c * n + i] = col[i];
         }
-        const res = gmres(op, P, b, { tol: 1e-13 });
+        const ETA_TARGET = 1e-10; // reachable at every massWeight in 1e-3..10 (MEASURED floors 3e-16..4e-12)
+        const res = gmres(op, P, b, {
+            tol: 0,
+            maxit: 60,
+            probe: {
+                exactApplyA,
+                uOp: U_F64,
+                schedule: { head: 60, stride: 1 },
+                etaTarget: ETA_TARGET,
+            },
+        });
         const err = distance(res.x, star) / norm(star);
-        log('n=64 left GMRES iters to 1e-13 recurrence', res.iters);
+        // The true relative residual against the DENSIFIED A_σ this test already builds — the
+        // same quantity η is formed from, without η's `‖A‖‖x̃‖` denominator term.
+        const ax = new Float64Array(3 * n);
+        for (let c = 0; c < 3; c++) {
+            for (let i = 0; i < n; i++) {
+                let acc = 0;
+                for (let j = 0; j < n; j++) acc += As[i * n + j] * res.x[c * n + j];
+                ax[c * n + i] = acc;
+            }
+        }
+        const trueRes = distance(b, ax) / norm(b);
+        log('n=64 left GMRES iters to η_bct 1e-10', res.iters);
         log('n=64 relative error vs dense solve', err);
+        log('n=64 true relative residual vs the densified A_σ', trueRes);
+        log('n=64 min η_exact over the probes (the δ_compress monitor)', res.probe?.etaMin);
+        expect(res.stop).toBe('eta-target');
         expect(res.censored).toBe(false);
-        // MEASURED 6.1e-14. The ceiling a priori is κ(A_σ)·u ≈ 1e-10 at n=64; GMRES with a good
-        // preconditioner lands three decades under it.
-        expect(err).toBeLessThan(4e-13);
+        expect(res.degenerate).toBe(false);
+        expect(res.probe?.etaBctMin).toBeLessThanOrEqual(ETA_TARGET);
+        // MEASURED 8.33e-11 at the shipped massWeight and 1.28e-10 worst over 1e-3..10; bound 3.9x
+        // the worst. The a-priori ceiling is `κ₂(A_σ)·η·(‖A‖‖x̃‖+‖b‖)/‖b‖` = 200 · 1e-10 · 41 =
+        // 8e-7 (Rigal-Gaches), so this lands 4 decades under what the conditioning allows.
+        expect(err).toBeLessThan(5e-10);
+        // MEASURED 2.54e-9 at the shipped massWeight, 3.43e-9 worst over the same sweep; bound 2.9x.
+        expect(trueRes).toBeLessThan(1e-8);
     });
 });
 
@@ -1107,63 +1322,118 @@ describe('real operator: the recurrence residual is optimistic (spec §5.3)', ()
 });
 
 describe('real operator: the recurrence residual is SIDE-DEPENDENT (spec §5.3; gmres_lab.py:230-234)', () => {
-    // `'right'` solves A M⁻¹ u = b, so its recurrence residual IS the true residual in exact
-    // arithmetic; `'left'` solves M⁻¹A x = M⁻¹b, so its recurrence is in the M⁻¹ norm and is NOT.
-    // Asserting BOTH on the same operator and rhs is a differential check that the side switch is
-    // plumbed: an implementation that ignored `side`, or put the preconditioner on the wrong side,
-    // fails exactly one of the two halves. The under-report numbers of spec §7.3 anti-trap 2 are
-    // LEFT-preconditioned numbers; nothing here compares a right-preconditioned run against them.
+    // `'right'` solves A M⁻¹ u = b, so its recurrence residual IS `‖r‖/‖b‖` in exact arithmetic;
+    // `'left'` solves M⁻¹A x = M⁻¹b, so its recurrence is `‖Ã⁻¹r‖/‖Ã⁻¹b‖` and is NOT. What is
+    // asserted is that EXACT ALGEBRAIC IDENTITY per side, plus the CROSS term — each side's
+    // recurrence against the other side's quantity — which is what makes this a differential: an
+    // implementation that ignored `side`, or applied `Ã⁻¹` on the wrong side, fails one half by
+    // O(1) (MEASURED: a side-ignoring mutant reads 0.23 and 0.997 here).
+    //
+    // WHAT IS DELIBERATELY *NOT* ASSERTED, AND WHY — do not re-promote it. The direction of the
+    // left gap REVERSES with the preconditioner's mass weight (@issue utof/repulsive-test2#72).
+    // MEASURED `min / max (true / recurrence)` over 20 iterates:
+    //   massWeight 10    : 0.8459 / 1.217   (n=64)   0.6447 / 0.8715  (n=240)  ⇐ PESSIMISTIC
+    //   massWeight 1     : 1.0277 / 301.6            1.3136 / 8 423
+    //   massWeight 0.1   : 4.299  / 1.221e4          5.930  / 1.133e5
+    //   massWeight 0.001 : 16.77  / 9.242e4          16.64  / 5.630e5
+    // So "left is optimistic at every iterate" is true at the shipped weight with a 2.8 % margin
+    // and FALSE at massWeight 10. The ratios are RECORDED below instead, and the identity — which
+    // is exact algebra — carries the gate. §5.3's "it under-reports" is a statement about the
+    // shipped configuration, not about the preconditioner family.
+    const HEAD = 3;
+    const K = 20;
     for (const n of [64, 240]) {
-        test(`n=${n}: right == true residual at roundoff, left optimistic at EVERY iterate`, () => {
+        test(`n=${n}: the recurrence IS its own side's residual identity, and NOT the other side's`, () => {
             const { op, P, exactApplyA } = real(n);
             const b = randVec(3 * n, 29);
-            const run = (side: 'left' | 'right') =>
+            const bNorm = norm(b);
+            const pb = new Float64Array(3 * n);
+            P.apply(b, pb);
+            const betaLeft = norm(pb);
+            const run = (side: 'left' | 'right', maxit = K, probe = true) =>
                 gmres(op, P, b, {
                     tol: 0,
-                    maxit: 20,
+                    maxit,
                     side,
                     knockOut: side === 'right',
                     // normA2 is irrelevant to this test (η is not read), so it is supplied to skip
                     // 30 power-iteration matvecs.
-                    probe: {
-                        exactApplyA,
-                        uOp: U_F64,
-                        normA2: 1,
-                        schedule: { head: 20, stride: 1 },
-                    },
+                    probe: probe
+                        ? { exactApplyA, uOp: U_F64, normA2: 1, schedule: { head: K, stride: 1 } }
+                        : undefined,
                 });
-            // Compared against the residual of the operator the ITERATION used (resNormBct): that
-            // is the one the recurrence is about.
-            const gaps = (res: GmresResult) =>
-                (res.probe?.records ?? []).map((r) => {
-                    const truth = r.resNormBct / norm(b);
-                    const rec = res.recurrence[r.iter - 1];
-                    return {
-                        truth,
-                        rec,
-                        ratio: truth / rec,
-                        relGap: Math.abs(truth - rec) / truth,
-                    };
-                });
-            const right = gaps(run('right'));
-            const left = gaps(run('left'));
-            expect(right.length).toBe(20);
-            expect(left.length).toBe(20);
-            const rightWorst = Math.max(...right.map((g) => g.relGap));
-            const leftMinRatio = Math.min(...left.map((g) => g.ratio));
-            const leftMaxRatio = Math.max(...left.map((g) => g.ratio));
-            log(`n=${n} right: worst |true - recurrence| / true over 20 iterates`, rightWorst);
+            // `‖r_k‖/‖b‖` at every iterate comes free from the probe (`resNormBct` is the residual
+            // of the operator the ITERATION applied, recomputed from `b`).
+            const trueRel = (res: GmresResult) =>
+                (res.probe?.records ?? []).map((r) => r.resNormBct / bNorm);
+            // `‖Ã⁻¹r_k‖/‖Ã⁻¹b‖` needs `r_k` itself, so `x̃_k` is recomputed by re-running to
+            // `maxit = k` — only over the HEAD window, which is all the identity needs.
+            const precondRel = (side: 'left' | 'right'): number[] => {
+                const ax = new Float64Array(3 * n);
+                const rv = new Float64Array(3 * n);
+                const pr = new Float64Array(3 * n);
+                const out: number[] = [];
+                for (let k = 1; k <= HEAD; k++) {
+                    const sub = run(side, k, false);
+                    applyAsigma(op, sub.x, ax);
+                    for (let i = 0; i < 3 * n; i++) rv[i] = b[i] - ax[i];
+                    P.apply(rv, pr);
+                    out.push(norm(pr) / betaLeft);
+                }
+                return out;
+            };
+            const relGap = (q: number, rec: number) => Math.abs(q - rec) / q;
+            const worst = (xs: number[], rec: number[]) =>
+                Math.max(...xs.map((q, i) => relGap(q, rec[i])));
+
+            const right = run('right');
+            const left = run('left');
+            const recRight = Array.from(right.recurrence);
+            const recLeft = Array.from(left.recurrence);
+            expect(trueRel(right).length).toBe(K);
+            expect(trueRel(left).length).toBe(K);
+
+            // --- each side against its OWN identity, on the head window -------------------------
+            const ownRight = worst(trueRel(right).slice(0, HEAD), recRight);
+            const ownLeft = worst(precondRel('left'), recLeft);
             log(
-                `n=${n} left: min / max (true / recurrence) over 20 iterates`,
-                `${leftMinRatio} / ${leftMaxRatio}`,
+                `n=${n} identity defect over iterates 1..${HEAD}, right / left`,
+                `${ownRight} / ${ownLeft}`,
             );
-            // MEASURED 9.7e-12 (n=64) and 6.0e-12 (n=240); bound ~5x.
-            expect(rightWorst).toBeLessThan(5e-11);
-            // Optimistic at every iterate (MEASURED min ratio 1.03 at n=64, 1.31 at n=240) ...
-            expect(leftMinRatio).toBeGreaterThan(1);
-            // ... and by orders of magnitude somewhere (MEASURED max 3.0e2 at n=64, 8.4e3 at n=240).
-            // The floor of 10 is far under both: the magnitude is operator-dependent and is not pinned.
-            expect(leftMaxRatio).toBeGreaterThan(10);
+            // MEASURED worst over massWeight ∈ {10, 1, 0.1, 0.001} × n ∈ {64, 240}: 5.768e-14
+            // (at the shipped weight: 1.07e-15 / 9.45e-16 at n=64, 5.77e-14 / 1.13e-15 at n=240).
+            // Bound 8.7x the worst — the identity holds to f64 roundoff whatever the mass weight,
+            // which is why THIS is the gate and the 20-iterate figure below is not.
+            expect(ownRight).toBeLessThan(5e-13);
+            expect(ownLeft).toBeLessThan(5e-13);
+
+            // --- each side against the OTHER side's quantity: the differential ------------------
+            const crossRight = worst(precondRel('right'), recRight);
+            const crossLeft = worst(trueRel(left).slice(0, HEAD), recLeft);
+            log(
+                `n=${n} CROSS defect over iterates 1..${HEAD}, right / left`,
+                `${crossRight} / ${crossLeft}`,
+            );
+            // MEASURED min over the same 8 configurations 1.198e-1, i.e. the two quantities are
+            // never within 12 % of each other; bound 2.4x under that. A one-sided test is what
+            // lets a side-plumbing defect through, so both halves are here.
+            expect(crossRight).toBeGreaterThan(0.05);
+            expect(crossLeft).toBeGreaterThan(0.05);
+
+            // --- the 20-iterate figure: RECORDED, with a bound that survives the sweep ----------
+            const rightWorst = worst(trueRel(right), recRight);
+            const ratios = trueRel(left).map((q, i) => q / recLeft[i]);
+            log(`n=${n} right: worst |true - recurrence| / true over ${K} iterates`, rightWorst);
+            log(
+                `n=${n} left: min / max (true / recurrence) over ${K} iterates — RECORDED, not gated`,
+                `${Math.min(...ratios)} / ${Math.max(...ratios)}`,
+            );
+            // This one really does degrade with the conditioning — it is the MGS-GMRES `u·κ`
+            // accumulation (Paige-Rozloznik-Strakos), not a property of the identity. MEASURED
+            // 9.65e-12 (n=64) and 5.97e-12 (n=240) at the shipped weight but 1.09e-11 and 1.32e-9
+            // at massWeight 0.001; the bound is 7.6x the WORST of the sweep, and it is therefore
+            // NOT a tight bound at the shipped weight. Do not read it as one.
+            expect(rightWorst).toBeLessThan(1e-8);
         });
     }
 });
