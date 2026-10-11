@@ -117,6 +117,14 @@ interface Synth {
  * `spread` makes the edge weights log-uniform on `[lo, hi]` instead of uniform on `[0.1, 10]`: a
  * wider spectrum, so the Krylov space is NOT exhausted in a handful of steps (the orthogonality
  * of the basis is only a gate while hsub is not tiny).
+ *
+ * Why that holds, MEASURED with the seeds of the 'Arnoldi / Givens structure' fixture (seed 7,
+ * preconditioner seed 21, `b = randVec(3n, 5)`, `retainArnoldi`): on the default spectrum at n = 8,
+ * `‖VᵀV−I‖` is 2.2e-16 / 5.0e-12 / 9.1e-10 at K = 1 / 6 / 7 with `hsub` = 0.41 / 0.062 / 6.4e-3,
+ * and 0.92 at K = 8 = n, where the Krylov space is exhausted (`hsub` 1.2e-9, recurrence 1.5e-16):
+ * the basis is then noise and no roundoff-level bar can hold (the `u/‖r_k‖` law of the
+ * orthogonality test below). With `spread` `{ lo: 0.01, hi: 100 }` at n = 12, K = 6, `hsub` is 1.15
+ * (recurrence 4.1e-2) and the loss is 1.26e-14, which IS a gate: a dropped `v_k` is O(1e-1).
  */
 function synth(n: number, seed: number, spread?: { lo: number; hi: number }): Synth {
     const rnd = lcg(seed);
@@ -359,6 +367,36 @@ describe('INVALID clauses of H2 (spec §7.3), each fired on its own', () => {
         expect(v({ etaExact: (U_F64 / 10) * 0.5 }, U_F64)).toEqual(['eta-below-uop']);
     });
 
+    // Clauses 1 and 2 govern BOTH η, independently (spec §7.3, the 2026-10-11 follow-up ruling box):
+    // `η_bct` is the gated quantity and `η_exact` carries no bar, so a guard that read only
+    // `η_exact` watched the quantity with no bar and left the bar itself unguarded. `base.etaExact`
+    // stays healthy in every case below, so each assertion can only be moved by the `η_bct` half.
+    test('clause 1 on η_bct: η_bct == 0 with a healthy η_exact is INVALID, and ONLY clause 1', () => {
+        expect(v({ etaBct: 0 }, U_F32)).toEqual(['eta-zero']);
+        expect(v({ etaBct: Number.MIN_VALUE }, U_F32)).toEqual(['eta-below-uop']);
+    });
+
+    test('clause 2 on η_bct: the /10, the direction, and the SCOPE to the operator precision', () => {
+        const edge = U_F32 / 10;
+        expect(v({ etaBct: edge * 0.99 }, U_F32)).toEqual(['eta-below-uop']);
+        expect(v({ etaBct: edge * 1.01 }, U_F32)).toEqual([]);
+        // The same f64 floor as the η_exact case above: a correct f64 η_bct (spec §7.3, MEASURED
+        // 2.047e-16..6.001e-16) is not below u_f64/10, but is below u_f32/10.
+        expect(v({ etaBct: 3e-16 }, U_F64)).toEqual([]);
+        expect(v({ etaBct: 3e-16 }, U_F32)).toEqual(['eta-below-uop']);
+        expect(v({ etaBct: (U_F64 / 10) * 0.5 }, U_F64)).toEqual(['eta-below-uop']);
+    });
+
+    test('the two η are checked independently, and a clause is reported ONCE however many η trip it', () => {
+        // Both zero: one 'eta-zero' (clause 3 also fires, because 0 === 0 — a different clause).
+        expect(v({ etaExact: 0, etaBct: 0 }, U_F32)).toEqual(['eta-zero', 'exact-equals-bct']);
+        // Both below u_op/10 (5.96e-9): one 'eta-below-uop'.
+        expect(v({ etaExact: 1e-9, etaBct: 2e-9 }, U_F32)).toEqual(['eta-below-uop']);
+        // Disjointness is PER η: one η at 0 and the other below u_op/10 trips both clauses.
+        expect(v({ etaExact: 0, etaBct: 1e-9 }, U_F32)).toEqual(['eta-zero', 'eta-below-uop']);
+        expect(v({ etaExact: 1e-9, etaBct: 0 }, U_F32)).toEqual(['eta-zero', 'eta-below-uop']);
+    });
+
     test('clause 3: η_exact bit-equal to η_bct, and NOT merely close', () => {
         expect(v({ etaBct: base.etaExact }, U_F32)).toEqual(['exact-equals-bct']);
         const nextUp = base.etaExact * (1 + 2 ** -52);
@@ -590,6 +628,25 @@ describe('Arnoldi / Givens structure (synthetic, non-trivial left preconditioner
         log('max |VᵀV − I|', worst);
         // MEASURED 1.26e-14 at K = 6 on a spread spectrum (it is 7e-16 at K = 2: MGS loses ~u·κ
         // per step). A dropped `v_k` in the orthogonalisation is O(1e-1), 10 decades above.
+        //
+        // This bar is a statement about WHERE THE ITERATION IS, not about MGS quality, and it must
+        // not be "fixed" with reorthogonalisation. For MGS-GMRES `‖VᵀV−I‖ ≈ c·u_f64/‖r_k‖`, `c`
+        // O(1)..O(10): orthogonality is lost COMPLETELY only as the recurrence residual reaches
+        // roundoff (Greenbaum-Rozložník-Strakoš, BIT 37(3), 1997; Paige-Rozložník-Strakoš, SIAM J.
+        // Matrix Anal. Appl. 28(1), 2006), and MGS-GMRES is backward stable all the same. So once
+        // the recurrence has reached ~5e-14 (K = 38 below) the loss is O(1e-3..1e-2) and EXPECTED,
+        // not a defect. MEASURED on `real(64)` (RS-preconditioned), `b = randVec(192, 3)`,
+        // `tol = 0`, `maxit = K`:
+        //     K    ‖VᵀV−I‖    recurrence   u_f64/rec   ratio
+        //    10   1.108e-12    3.214e-4    3.454e-13    3.21
+        //    20   2.756e-10    1.469e-6    7.557e-11    3.65
+        //    30   3.164e-06    1.309e-10   8.482e-07    3.73
+        //    38   8.131e-03    4.809e-14   2.309e-03    3.52
+        //    50   6.384e-01    4.667e-16   2.379e-01    2.68
+        // — a flat prefactor over ten decades (1.06..1.49 on `randVec(192, 17)`; it depends on `b`,
+        // not on K). The consequence: at K = 50, with the basis essentially gone, `η_bct` is
+        // 6.8e-16 (≈ 6 u_f64; 4.8e-16 on seed 17), i.e. backward stable. A second orthogonalisation
+        // pass would buy nothing and cost a pass per step.
         expect(worst).toBeLessThan(6e-14);
     });
 
@@ -1177,6 +1234,51 @@ describe('INVALID clauses, integrated (spec §7.3)', () => {
             expect(r.etaExact).toBe(r.etaBct);
             expect(r.violations).toContain('exact-equals-bct');
         }
+    });
+
+    test('clause 1 on η_bct: the gated residual vanishes while η_exact does not (n = 1, A_σ = 2I)', () => {
+        // Same fixture as the η_exact clause-1 test below, but the "exact" operator is `0.25·I` off
+        // the iteration's, so x̃ = 0.5 e1 satisfies A_σ x̃ = b EXACTLY while the χ=0 residual is
+        // 0.125 (η_exact = 0.05 with the supplied ‖A_σ‖₂ = 3, which also clears the free lower
+        // bound 2.25 of clause 4). Only the `η_bct` half of the clause can see this.
+        const op1: HierarchicalOperator = {
+            n: 1,
+            sigma: 2,
+            applyA: (_u, out) => out.fill(0),
+        };
+        const res = gmres(op1, identityPrecond(1), Float64Array.of(1, 0, 0), {
+            tol: 0,
+            probe: {
+                exactApplyA: (u, out) => {
+                    for (let i = 0; i < 3; i++) out[i] = 0.25 * u[i];
+                },
+                uOp: U_F64,
+                normA2: 3,
+            },
+        });
+        const rec = res.probe?.records[0];
+        expect(rec?.etaBct).toBe(0);
+        // The fixture precondition: η_exact is healthy, so the narrow predicate reads this VALID.
+        expect(rec?.etaExact).toBeGreaterThan(U_F64 / 10);
+        expect(rec?.violations).toEqual(['eta-zero']);
+        expect(res.probe?.invalid).toEqual(['eta-zero']);
+    });
+
+    test('clause 2 on η_bct: η_bct under u_op/10 while η_exact is not (hand-supplied u_op = 1e-9)', () => {
+        // `perturbed` floors η_exact at 3.6e-10 and η_bct falls to ~1.7e-16 by iteration 8
+        // (MEASURED, the 10 records of `run({})`). A u_op of 1e-9 puts the bar u_op/10 = 1e-10
+        // between them: 3.6x under the η_exact floor, ~6 decades over η_bct. A hand-supplied u_op
+        // is legitimate because `etaViolations` takes it as a parameter; no real operator has it.
+        const uOp = 1e-9;
+        const res = run({ uOp });
+        const records = res.probe?.records ?? [];
+        // The fixture precondition: no η_exact is under the bar, so the narrow predicate reads
+        // every record VALID and only the `η_bct` half can fire.
+        for (const r of records) expect(r.etaExact).toBeGreaterThanOrEqual(uOp / 10);
+        const tripped = records.filter((r) => r.violations.includes('eta-below-uop'));
+        expect(tripped.map((r) => r.iter)).toEqual([8, 9, 10]);
+        for (const r of tripped) expect(r.etaBct).toBeLessThan(uOp / 10);
+        expect(res.probe?.invalid).toEqual(['eta-below-uop']);
     });
 
     test('clause 4: an under-estimated ‖A_σ‖₂ is caught against the free lower bound', () => {

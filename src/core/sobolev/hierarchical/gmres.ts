@@ -21,8 +21,15 @@
  * *ASNA* Thm 7.1 citation ({@link backwardError}) is correct and stays.
  *
  * LEFT PRECONDITIONING IS PRODUCTION; RIGHT IS A KNOCK-OUT INSTRUMENT (spec §5.3, §11.2 row 7).
- * Right-preconditioned f32 gave `cos∠_A = 0.142264` at n=480 WHILE ITS RECURRENCE RESIDUAL READ A
- * HEALTHY 1e-4: the direction is destroyed and the solver's own number says it succeeded. So
+ * The guard survives on the SIDE × PRECISION INTERACTION, which is monotone in n: under an f32
+ * matvec, right-preconditioned `cos∠_A` goes 0.9947 → 0.5190 → −0.1362 at n = 240 / 480 / 960 —
+ * it CROSSES ZERO, the descent direction points uphill — while left holds 0.9968 / 0.9995 /
+ * 0.9991. In f64, right preconditioning gives `cos∠_A = 1.000000` for 5/5 seeds at every n, with
+ * the recurrence residual equal to the true one to five significant figures, so the hazard is
+ * f32-specific and not a property of the side alone (MEASURED, spec §5.3's 2026-10-11 correction
+ * box). Production is f32-inner by construction (spec §6). The knock-out that trips on it is NOT
+ * hosted here (it needs a genuine f32 matvec, spec §11.2 row 7); its observable is `cos∠_A ≤ 0`
+ * for `side: 'right'` under an f32 matvec at n = 960 (MEASURED median −0.136, min −0.273). So
  * `side: 'right'` is REFUSED unless `knockOut: true`, mirroring `makePreconditioner`
  * (`precond.ts:272-277`) and `prepareA` (`apply.ts:482-490`): a configuration the code itself
  * calls a knock-out must not be production-reachable.
@@ -49,6 +56,8 @@
  * @see https://arxiv.org/abs/2107.01664 §5.2 (the preconditioner this is run with)
  * @see https://doi.org/10.1137/S1064827502406415 (Simoncini & Szyld, SIAM J. Sci. Comput. 25(2), 2003)
  * @see https://doi.org/10.1137/S0895479802403459 (van den Eshof & Sleijpen, SIAM J. Matrix Anal. Appl. 26(1), 2004)
+ * @see https://doi.org/10.1137/050630416 (Paige, Rozložník & Strakoš, SIAM J. Matrix Anal. Appl. 28(1), 2006: MGS-GMRES is backward stable)
+ * @see https://doi.org/10.1007/BF02510248 (Greenbaum, Rozložník & Strakoš, BIT 37(3), 1997: MGS-GMRES loses orthogonality only as the residual reaches its final level)
  * @see .superpowers/sdd/2026-09-11-phase2h-queue/scratch/gmres_lab.py:217-300
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §2.3, §5.3, §5.6, §7.3, §7.4, §7.10, §11.2 task 7
  * @issue utof/repulsive-test2#59
@@ -146,6 +155,10 @@ export function applyAsigma(
  * `applyA` plus the per-block rank-1 shift. ONE copy of the shift, used for the iteration's BCT
  * matvec AND the probe's χ=0 exact matvec, so the two differ only in `applyA` — a second copy of
  * the formula could drift and would turn `η_exact` into a measure of the shift mismatch.
+ *
+ * Precondition: `out` must NOT alias `u`. The shift is summed over `u` AFTER `applyA` has written
+ * `out`, so an aliased `out` would shift by the sum of already-transformed values. No caller
+ * aliases (`applyAsigma` and the probe's exact matvec each write a buffer of their own).
  */
 function shiftedApply(
     applyA: (u: ArrayLike<number>, out: Float64Array) => void,
@@ -266,7 +279,14 @@ export function estimateNorm2(
 
 /**
  * The four INVALID clauses of spec §7.3, plus the one this file adds ({@link etaViolations}).
- * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3
+ *
+ * Why one name per CLAUSE and not per `η` operand (`eta-zero`, not also `eta-bct-zero`): clauses 1
+ * and 2 govern BOTH `η`, but the union is exported and is what `EtaProbeRecord.violations` and
+ * `EtaProbeReport.invalid` carry, so a name the harness has no definition for is an INVALID it
+ * cannot interpret (the failure the clause-5 paragraph of spec §7.3 records), and widening an
+ * exported union is a hard-gate change. Nothing is lost: every `EtaProbeRecord` carries `etaExact`
+ * and `etaBct` beside its `violations`, so which `η` tripped is a comparison on the record.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3 (the 2026-10-11 follow-up ruling box)
  */
 export type EtaClause =
     | 'eta-zero'
@@ -277,16 +297,27 @@ export type EtaClause =
 
 /**
  * Which INVALID clauses of spec §7.3 one probe violates (empty ⇒ valid):
- *  1. `eta-zero` — `η == 0` exactly: the residual was formed with the operator that produced `x̃`.
- *  2. `eta-below-uop` — `0 < η < u_op/10`, `u_op` the roundoff of the OPERATOR's own precision, NOT
- *     `u_f32`: #59's unscoped `η < u_f32/10` rules every correct f64 run INVALID (spec §7.3).
+ *  1. `eta-zero` — `η == 0` exactly, for EITHER `η` (`‖b‖ > 0` is structural: {@link gmres}
+ *     returns before any probe on `b = 0`). `η_exact == 0`: the residual was formed with the
+ *     operator that produced `x̃`. `η_bct == 0`: the gated residual was never computed.
+ *  2. `eta-below-uop` — `0 < η < u_op/10` for EITHER `η`, `u_op` the roundoff of the OPERATOR's own
+ *     precision, NOT `u_f32`: #59's unscoped `η < u_f32/10` rules every correct f64 run INVALID
+ *     (spec §7.3). One threshold, two different impossibilities. `η_bct < u_op/10`: a backward error
+ *     under the precision's own roundoff means the residual was not formed in that precision.
+ *     `η_exact < u_op/10`: the monitor is not reading the χ=0 operator at all, since at θ=0.5
+ *     `δ_compress ≈ 1e-2`, five decades above any roundoff.
  *  3. `exact-equals-bct` — `η_exact` BIT-equal to `η_bct`: both are computed and recorded.
  *  4. `norm-below-lower-bound` — `‖A_σ‖₂_est < ‖A_σx̃‖/‖x̃‖`: the estimate is below a free exact
  *     lower bound, so it never entered the top eigenspace.
  *  5. `non-finite` — NOT in the spec. NaN fails every `<` and `===` above, so a NaN `η` would read
  *     as valid on all four (memory `gates-name-their-impossible-values`).
- * Clauses 1 and 2 are disjoint (`η = 0` reports only clause 1).
- * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3
+ * Clauses 1 and 2 are disjoint PER `η` (`η = 0` reports only clause 1), each is reported once however
+ * many `η` trip it, and the two `η` are checked independently: `η_exact = 0` with `η_bct` under
+ * `u_op/10` reports both. Why both `η`: `η_bct` is the gated quantity (spec §7.3, the 2026-10-11
+ * amendment box) and `η_exact` carries no bar, so guarding only `η_exact` watched the quantity with
+ * no bar and left the bar unguarded. Clause 3's `nFar` scoping is the HARNESS's obligation, not this
+ * function's (it has no `nFar`).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3 (the 2026-10-11 follow-up ruling box)
  */
 export function etaViolations(
     p: { etaExact: number; etaBct: number; lowerBound: number; normA2: number },
@@ -295,8 +326,11 @@ export function etaViolations(
     const out: EtaClause[] = [];
     if (!Number.isFinite(p.etaExact) || !Number.isFinite(p.etaBct)) out.push('non-finite');
     else {
-        if (p.etaExact === 0) out.push('eta-zero');
-        else if (p.etaExact < uOp / 10) out.push('eta-below-uop');
+        // Both η, independently: the follow-up ruling box of spec §7.3. Narrowing this back to
+        // `p.etaExact` alone unguards the gated `η_bct` (see the TSDoc above).
+        const etas = [p.etaExact, p.etaBct];
+        if (etas.some((e) => e === 0)) out.push('eta-zero');
+        if (etas.some((e) => e !== 0 && e < uOp / 10)) out.push('eta-below-uop');
         if (p.etaExact === p.etaBct) out.push('exact-equals-bct');
     }
     if (p.normA2 < p.lowerBound) out.push('norm-below-lower-bound');
@@ -684,6 +718,12 @@ export function gmres(
         const h = new Float64Array(k + 2);
         // Modified Gram-Schmidt, `i = 0..k` INCLUSIVE: leaving out `v_k` itself destroys both the
         // orthogonality and the Hessenberg shape (gmres_lab.py:263-265).
+        // NO reorthogonalisation, on purpose. Why: `‖VᵀV−I‖ ≈ c·u_f64/‖r_k‖` with `c = O(1)..O(10)`,
+        // so once the recurrence residual is ~5e-14 the basis has lost orthogonality (O(1e-3..1e-2)
+        // at K = 38 on the n=64 operator) and that is EXPECTED, not a defect: MGS-GMRES
+        // is backward stable regardless (Paige-Rozložník-Strakoš 2006; Greenbaum-Rozložník-Strakoš
+        // 1997), so a second pass per step would cost a pass and buy nothing. Numbers: the 'basis
+        // is orthonormal to roundoff' test.
         for (let i = 0; i <= k; i++) {
             const vi = V[i];
             let d = 0;
