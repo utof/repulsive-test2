@@ -18,6 +18,7 @@
  * @see oracle/tpe_stage1_oracle.py (solve_saddle)
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 5)
  */
+import type { SobolevOperator } from './hierarchical/operator';
 import { timed } from './phaseTimings';
 
 /**
@@ -435,12 +436,59 @@ export class ExternalSolveError extends Error {}
  * step, synchronously, with the C the CORE evaluated; `solve` then runs for the
  * gradient rhs and for each projection rhs. Carries closures ⇒ NOT
  * structured-cloneable ⇒ it can never travel to the worker.
+ *
+ * `kind: 'dense'` is the Phase 2H discriminant (spec §5.1). This arm is TODAY'S path and is
+ * bit-identical with it — gated by `test/sobolev/denseSaddleBitGolden.test.ts`, which pins the
+ * solve, the projection and the step bit-for-bit with `Object.is` (spec §11.2 row 8 / A24).
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
  */
-export interface PreparedSaddle {
+export interface DensePreparedSaddle {
+    kind: 'dense';
     A: Float64Array;
     factor(C: number[][]): SaddleFactorization;
 }
+
+/**
+ * The hierarchical analogue of a frozen factorization (Phase 2H): the tree and the near-field
+ * precompute are reused across solves, and each solve is a fresh preconditioned GMRES.
+ * `rhsBottom` defaults to zeros(k) exactly like {@link solveSaddleFromA}'s.
+ *
+ * Why an interface and not a function: "frozen" cannot mean "reuse the factorization" here —
+ * there IS no factorization (arXiv:2006.07859 §6.3, spec §1.1) — so the reusable object is the
+ * BUILD, and `prepare` is what hands it out. This is why {@link PreparedSaddle} became a
+ * discriminated union instead of growing optional fields.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+ */
+export interface HierarchicalSaddleSolver {
+    solve(
+        rhsTop: ArrayLike<number>,
+        rhsBottom?: ArrayLike<number>,
+    ): { x: number[]; lambda: number[]; residual: number };
+}
+
+/**
+ * Hierarchical path (Phase 2H) — no matrix and no factorization: `op` applies Ā matrix-free and
+ * `prepare(C)` returns the reusable solver for THIS step's constraint Jacobian.
+ *
+ * The producer is task 8b (`makeHierarchicalSaddle`); until it lands nothing in the repo writes
+ * this arm, which is why the dense path is still the only reachable one.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b
+ */
+export interface HierarchicalPreparedSaddle {
+    kind: 'hierarchical';
+    op: SobolevOperator;
+    prepare(C: number[][]): HierarchicalSaddleSolver;
+}
+
+/**
+ * The 2H seam: `kind`-tagged so both readers (`optimizer.ts`'s shape guard and `gradient.ts`'s
+ * solve) handle both arms EXPLICITLY. Not `A?` + `op?` — that form compiles to
+ * `'A' is possibly undefined` at the two existing `.A` readers (TS18048 / TS2322, measured in
+ * spec §5.1), i.e. it would let a hierarchical saddle reach dense code as `undefined`.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+ */
+export type PreparedSaddle = DensePreparedSaddle | HierarchicalPreparedSaddle;
 
 /**
  * Factors a flat row-major SYMMETRIC n×n matrix as P·L·D·Lᵀ·Pᵀ by
@@ -899,6 +947,74 @@ function structuredSaddleResidual(
 }
 
 /**
+ * The OPERATOR-shaped sibling of the structured residual above:
+ * `‖K·z − rhs‖₂ / max(1, ‖rhs‖₂)` with `K = [[Ā, Cᵀ], [C, 0]]` where Ā is applied matrix-free by
+ * `op` (3n → 3n, coordinate-block layout) instead of read out of a dense buffer. `z` and `rhs`
+ * are the full `3n+k` saddle vectors, exactly as the dense branch takes them.
+ *
+ * **A sibling, NEVER a rewrite of the dense branch** (spec §5.1's anchor). Two reasons it must
+ * stay two functions: (1) the dense branch's operand order is load-bearing — it is pinned
+ * bit-for-bit by `test/sobolev/denseSaddleBitGolden.test.ts`, and the dense one stays
+ * module-private because `gradient.ts`'s seam comment requires it; (2) the hierarchical branch
+ * CANNOT reproduce that order, because it never has the matrix entries (arXiv:2006.07859 §6.3).
+ *
+ * What it does preserve: the row visit order and the per-row accumulation order. The dense branch
+ * walks rows `0 … 3n−1` (block `b`, row `i` ⇒ `row = b·n + i`) and adds the `Cᵀλ` terms onto the
+ * same accumulator the Ā row-dot produced, which is what the loop below does with `op`'s output
+ * as the starting value. So an `op` that reproduces the dense row-dot bit-for-bit makes this
+ * function return the dense branch's number bit-for-bit — asserted, tolerance-free, in
+ * `test/sobolev/hierarchicalSeam.test.ts`. Do not reorder either loop.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+ * @see src/core/sobolev/hierarchical/operator.ts (SobolevOperator)
+ */
+export function operatorSaddleResidual(
+    op: SobolevOperator,
+    C: number[][],
+    z: number[],
+    rhs: number[],
+): number {
+    const n = op.n;
+    const m = 3 * n;
+    const k = C.length;
+    // Shape guard, because `tsconfig.json`'s `noUncheckedIndexedAccess: false` means a short
+    // vector reads `undefined` → NaN, and nothing in src/core/ thresholds `residual` (issue #76,
+    // and the same silent-failure class as optimizer.ts's saddle shape guard).
+    if (z.length !== m + k || rhs.length !== m + k) {
+        throw new Error(
+            `operatorSaddleResidual: z/rhs lengths ${z.length}/${rhs.length} do not match 3n+k = ${m + k}`,
+        );
+    }
+    const top = new Float64Array(m);
+    // `z` carries λ in its tail; the operator reads a 3n vector, so slice rather than rely on it
+    // ignoring the extra entries.
+    op.applyA(z.slice(0, m), top);
+    let resNormSq = 0;
+    let rhsNormSq = 0;
+    for (let row = 0; row < m; row++) {
+        // Starting the accumulator at the operator's output is what keeps this bit-comparable to
+        // the dense branch (see the TSDoc): there, `s` already holds the Ā row-dot here.
+        let s = top[row];
+        for (let r = 0; r < k; r++) {
+            s += C[r][row] * z[m + r];
+        }
+        const d = s - rhs[row];
+        resNormSq += d * d;
+        rhsNormSq += rhs[row] * rhs[row];
+    }
+    for (let r = 0; r < k; r++) {
+        const Cr = C[r];
+        let s = 0;
+        for (let j = 0; j < m; j++) {
+            s += Cr[j] * z[j];
+        }
+        const d = s - rhs[m + r];
+        resNormSq += d * d;
+        rhsNormSq += rhs[m + r] * rhs[m + r];
+    }
+    return Math.sqrt(resNormSq) / Math.max(1, Math.sqrt(rhsNormSq));
+}
+
+/**
  * The frozen saddle operator K(γ₀) = [[Ā(γ₀), C(γ₀)ᵀ], [C(γ₀), 0]], packed for
  * per-step factorization reuse (solver-perf Task 6): `fac` is the one LU that
  * the gradient solve and every projection iterate of every τ-trial share —
@@ -912,12 +1028,44 @@ function structuredSaddleResidual(
  * @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
  * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4)
  */
-export interface FrozenSaddleOperator {
+export interface DenseFrozenSaddleOperator {
+    kind: 'dense';
     a: Float64Array;
     n: number;
     C: number[][];
     fac: SaddleFactorization;
 }
+
+/**
+ * The hierarchical arm of the frozen operator (Phase 2H): `{ op, solver }` where the dense arm has
+ * `{ a, fac }`. `n` (vertex count) and `C` stay in BOTH arms — they are what
+ * {@link solveSaddleFrozen} validates the rhs shapes against, so keeping them common lets the
+ * dense arm's guards and their messages stay byte-identical.
+ *
+ * `a` could not merely have been made optional: on the dense path "frozen" means *factor once,
+ * back-substitute many times*, and there is no factorization to freeze here (spec §1.1) — each
+ * reuse solve is a fresh preconditioned GMRES over the reused tree and near-field precompute.
+ * That semantic difference is the reason this is a union (spec §5.1).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+ */
+export interface HierarchicalFrozenSaddleOperator {
+    kind: 'hierarchical';
+    n: number;
+    C: number[][];
+    op: SobolevOperator;
+    solver: HierarchicalSaddleSolver;
+}
+
+/**
+ * Either frozen operator {@link solveSaddleFrozen} can reuse, `kind`-tagged so both of its
+ * callers — `gradient.ts`'s gradient solve and `lineSearch.ts`'s frozen projection — are
+ * exhaustive. That exhaustiveness is what gives `projectOntoConstraintSet` a hierarchical route
+ * at all: its OTHER route reassembles a dense Ā per projection iterate (3.4 GB at N=30 000),
+ * which is the cost this phase exists to escape, so `optimizer.ts` REFUSES a hierarchical saddle
+ * unless `projectionMode` is 'frozen' rather than silently taking it.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+ */
+export type FrozenSaddleOperator = DenseFrozenSaddleOperator | HierarchicalFrozenSaddleOperator;
 
 /**
  * Solves K(γ₀)·[x; λ] = [rhsTop; rhsBottom] against a {@link FrozenSaddleOperator}
@@ -934,7 +1082,7 @@ export function solveSaddleFrozen(
     rhsTop: number[],
     rhsBottom?: number[],
 ): { x: number[]; lambda: number[]; residual: number } {
-    const { a, n, C, fac } = op;
+    const { n, C } = op;
     const m = 3 * n;
     const k = C.length;
     if (rhsTop.length !== m) {
@@ -948,8 +1096,17 @@ export function solveSaddleFrozen(
             `solveSaddleFrozen: rhsBottom length ${bottom.length} does not match C rows ${k}`,
         );
     }
+    // Hierarchical arm FIRST and before any dense work: the solver owns the whole solve, including
+    // its own residual (it has no matrix to certify against — operatorSaddleResidual is the shape
+    // it uses). The guards above deliberately run first: a solver's frozen `C` cannot validate a
+    // caller's rhs length, so delegating an ill-shaped rhs would hand GMRES a silently truncated
+    // right-hand side. @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+    if (op.kind === 'hierarchical') return op.solver.solve(rhsTop, bottom);
+    // Dense arm, byte-for-byte as before the 2H union: same rhs concatenation, same
+    // solveFactored, same structuredSaddleResidual operands and order. Bit-gated by
+    // test/sobolev/denseSaddleBitGolden.test.ts (spec §11.2 row 8 / A24) — do not "simplify".
     const rhs = [...rhsTop, ...bottom];
-    const z = solveFactored(fac, rhs);
-    const residual = structuredSaddleResidual(a, n, C, z, rhs);
+    const z = solveFactored(op.fac, rhs);
+    const residual = structuredSaddleResidual(op.a, n, C, z, rhs);
     return { x: z.slice(0, m), lambda: z.slice(m), residual };
 }

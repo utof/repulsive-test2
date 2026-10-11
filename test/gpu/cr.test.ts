@@ -360,7 +360,8 @@ function measure(name: string, vertices: Vec3[], edges: Edge[], withPin: boolean
     // fraction of it. Re-factorizing per rhs would cost ~13× per fixture and the ensemble
     // would not be affordable.
     const first = solveSaddleFromA(A, n, C, shapes[0].rhs.slice(0, m), shapes[0].rhs.slice(m));
-    const frozen = { a: A, n, C, fac: first.fac };
+    // `kind: 'dense'` — Phase 2H made FrozenSaddleOperator a tagged union (spec §5.1 / §11.4).
+    const frozen = { kind: 'dense' as const, a: A, n, C, fac: first.fac };
 
     let minDiagLSq = Number.POSITIVE_INFINITY;
     for (let i = 0; i < n; i++) minDiagLSq = Math.min(minDiagLSq, L[i * n + i] ** 2);

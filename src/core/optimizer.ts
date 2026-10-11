@@ -195,7 +195,13 @@ export interface SobolevStepOptions {
      * absent ⇒ every path below is bit-identical (the golden suites are the backstop),
      * exactly like `dE?`. Its `solve` self-certifies or throws ExternalSolveError,
      * which this function deliberately does NOT convert to 'singular_system'.
+     *
+     * `kind: 'hierarchical'` (Phase 2H) is a different contract, not another source: there is no
+     * `A` and no factorization, so it is NOT bit-identical to the dense arm, and it REQUIRES
+     * `projectionMode: 'frozen'` — the pre-arm guard below refuses it otherwise rather than let
+     * the projection fall back to a per-iterate dense assembly. Its producer is task 8b.
      * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b
      */
     saddle?: PreparedSaddle;
 }
@@ -288,7 +294,27 @@ export function sobolevStepSet(
     // nothing downstream thresholds: the run would auto-pause on `armijo_failed` with
     // usedGpuSolve still true.
     // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
-    if (opts.saddle && opts.saddle.A.length !== vertices.length ** 2)
+    if (opts.saddle?.kind === 'hierarchical') {
+        // Phase 2H's two pre-arm guards, both naming a value that must be impossible rather than
+        // degrading quietly (CLAUDE.md: a gate that cannot trip reads exactly like one that passed).
+        // 1. Shape: `op` is the 3n → 3n matrix-free Ā and carries the VERTEX count (operator.ts:
+        //    `n: H.n`), the same quantity the dense arm checks `A.length` against.
+        if (opts.saddle.op.n !== vertices.length)
+            throw new Error('sobolevStepSet: saddle.op.n mismatch');
+        // 2. Projection route: `projectOntoConstraintSet` reaches a hierarchical solve ONLY
+        //    through the frozen branch (lineSearch.ts, via solveSaddleFrozen's kind dispatch). Its other
+        //    branch calls `assembleAFlat` per projection iterate — O(N²) f64, 7.2 GB at N=30 000 —
+        //    so with `projectionMode` anything but 'frozen' the step would solve its GRADIENT
+        //    hierarchically and then silently reassemble a DENSE Ā for every projection iterate:
+        //    impossible at the target scale, and at small N a measurement that reads like a
+        //    hierarchical step but is not. Refuse instead.
+        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+        // @see .superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-8-seam-census.md §1
+        if (opts.projectionMode !== 'frozen')
+            throw new Error(
+                "sobolevStepSet: a hierarchical saddle requires projectionMode 'frozen'",
+            );
+    } else if (opts.saddle && opts.saddle.A.length !== vertices.length ** 2)
         throw new Error('sobolevStepSet: saddle.A length mismatch');
     // Phase-timing collection is opt-in and provably inert when off: timingsBegin
     // arms the module collector, timed('step', …) records the whole step, and the

@@ -8,6 +8,7 @@ import { trefoil } from '../../src/core/fixtures';
 import { DEFAULTS } from '../../src/core/optimizer';
 import { assembleAFlat } from '../../src/core/sobolev/innerProduct';
 import {
+    type DensePreparedSaddle,
     ExternalSolveError,
     luSolve,
     type PreparedSaddle,
@@ -54,7 +55,7 @@ function args(n = 24): DispatchDescentStepArgs {
 
 // What this proves, exactly: with `saddle` ABSENT the step is DETERMINISTIC and leaks
 // nothing across calls, with all three of this task's default-path control-flow edits
-// in place (the saddle.A shape guard at optimizer.ts:291-292, the ExternalSolveError
+// in place (the saddle.A shape guard at optimizer.ts:297-318, the ExternalSolveError
 // rethrow at :403, the timing-collector disarm at :498-507).
 // What it does NOT prove: identity with the PRE-seam code. Both arms are the post-seam
 // build, so a regression the seam introduced is present on both sides and cancels. The
@@ -92,7 +93,7 @@ test('saddle seam ABSENT: collectTimings still returns a ledger (the disarm is t
 // routing probe; the real numerics are the GPU Cholesky's ([DESIGN §4.1]). Note the
 // coordinate-major block write `K[b*n+i][b*n+j]` — Ā = I₃ ⊗ A.
 // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1
-function identityPrepared(a: DispatchDescentStepArgs): PreparedSaddle {
+function identityPrepared(a: DispatchDescentStepArgs): DensePreparedSaddle {
     const A = assembleAFlat(
         a.vertices,
         a.edges,
@@ -102,6 +103,8 @@ function identityPrepared(a: DispatchDescentStepArgs): PreparedSaddle {
         DEFAULTS.epsilon,
     );
     return {
+        // `kind: 'dense'` — Phase 2H made PreparedSaddle a tagged union (spec §5.1 / §11.4).
+        kind: 'dense',
         A,
         factor(C: number[][]): SaddleFactorization {
             const n = a.vertices.length;
@@ -125,8 +128,9 @@ function identityPrepared(a: DispatchDescentStepArgs): PreparedSaddle {
     };
 }
 
-function boomPrepared(a: DispatchDescentStepArgs): PreparedSaddle {
+function boomPrepared(a: DispatchDescentStepArgs): DensePreparedSaddle {
     return {
+        kind: 'dense',
         A: assembleAFlat(
             a.vertices,
             a.edges,
@@ -169,7 +173,7 @@ test('saddle seam PRESENT: routes through the external solve and agrees with the
 // actually reached a projection solve rather than re-testing the gradient one.
 // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
 function lateBoomPrepared(a: DispatchDescentStepArgs): {
-    prepared: PreparedSaddle;
+    prepared: DensePreparedSaddle;
     calls: () => number;
 } {
     const base = identityPrepared(a);
@@ -177,6 +181,7 @@ function lateBoomPrepared(a: DispatchDescentStepArgs): {
     return {
         calls: () => calls,
         prepared: {
+            kind: 'dense',
             A: base.A,
             factor(C: number[][]): SaddleFactorization {
                 const inner = base.factor(C);
@@ -339,7 +344,7 @@ test('solverWorker: a saddle on the step payload is rejected', async () => {
     if (response.type !== 'error') throw new Error(`expected an error, got ${response.type}`);
     // The GUARD's own message, not a loose /saddle/. Measured: with the guard
     // mis-spelled as `'saddle' in msg` (D4's dead-code form, which can never fire)
-    // the step still errors — the saddle.A guard at optimizer.ts:290-291 rejects the
+    // the step still errors — the saddle.A guard at optimizer.ts:317-318 rejects the
     // plain {} with a TypeError naming `opts.saddle.A`, whose text ALSO contains
     // "saddle". A /saddle/ assertion therefore passes on the dead spelling and
     // falsifies nothing; this one fails on it.

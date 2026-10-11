@@ -334,7 +334,8 @@ test("solveSaddleFrozen: reuses an 'ldlt' factorization for a fresh rhs — self
     );
 
     const first = solveSaddleFromA(aFlat, n, C, dEFlat, undefined, 'ldlt');
-    const op = { a: aFlat, n, C, fac: first.fac };
+    // `kind: 'dense'` — Phase 2H made FrozenSaddleOperator a tagged union (spec §5.1 / §11.4).
+    const op = { kind: 'dense' as const, a: aFlat, n, C, fac: first.fac };
     // Fresh projection-shaped rhs against the SAME frozen factorization.
     const negPhi = C.map((_, r) => 0.01 * (r + 1));
     const reuse = solveSaddleFrozen(op, new Array<number>(3 * n).fill(0), negPhi);

@@ -4,10 +4,10 @@
 // `bun test` so CR can gate the algebra BEFORE any WGSL exists ([DESIGN §5]).
 // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1, §4.2, §5 (CR)
 import {
+    type DensePreparedSaddle,
     type ExternalFactorization,
     ExternalSolveError,
     luSolve,
-    type PreparedSaddle,
     type SaddleFactorization,
 } from '../core/sobolev/linsolve';
 
@@ -341,8 +341,14 @@ export function makePreparedSaddle(
     sigma: number,
     n: number,
     onTrace?: (t: IrTrace) => void,
-): PreparedSaddle {
+): DensePreparedSaddle {
     return {
+        // `kind: 'dense'` is Phase 2H's discriminant on `PreparedSaddle` (spec §5.1). The
+        // DECLARED return narrows to the dense arm on purpose: every consumer of this factory
+        // reads `.A` / `.factor` directly, and widening the return to the union would force a
+        // narrowing at each of them for a producer that can only ever be dense.
+        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
+        kind: 'dense',
         A,
         factor(C: number[][]): SaddleFactorization {
             const m = 3 * n;

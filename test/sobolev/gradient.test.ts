@@ -171,6 +171,8 @@ function preparedFromCore(
     const A = assembleAFlat(f.vertices, f.edges, disjointPairs, f.alpha, f.beta, f.epsilon);
     let calls = 0;
     return {
+        // `kind: 'dense'` — Phase 2H made PreparedSaddle a tagged union (spec §5.1 / §11.4).
+        kind: 'dense',
         A,
         factorCalls: () => calls,
         factor(C: number[][]): SaddleFactorization {

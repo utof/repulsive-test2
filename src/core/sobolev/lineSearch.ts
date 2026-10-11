@@ -132,7 +132,17 @@ export interface ProjectConstraintSetOptions {
      * have been built at the step base point γ₀ for the SAME constraint set
      * (see solveConstrainedGradientSetFrozen). Absent → reassemble per iterate
      * (default; all committed goldens and pre-existing tests).
+     *
+     * Phase 2H: this is the ONLY route by which a projection iterate can be solved
+     * matrix-free. On a `kind: 'hierarchical'` operator "frozen" means the TREE and the
+     * near-field precompute are reused and each iterate runs a fresh iterative solve — not a
+     * back-substitution (spec §5.1); {@link solveSaddleFrozen} dispatches on `kind`, so the call
+     * site below is unchanged and this function stays byte-for-byte the dense function it was
+     * (spec §1.4). The reassemble branch is dense-ONLY and always will be — it calls
+     * `assembleAFlat` per iterate — which is why `sobolevStepSet` refuses a hierarchical saddle
+     * unless `projectionMode` is 'frozen' instead of letting it land here.
      * @see oracle/tpe_constraints_oracle.py (project_constraint_set — frozen)
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1
      */
     frozen?: FrozenSaddleOperator;
     /**

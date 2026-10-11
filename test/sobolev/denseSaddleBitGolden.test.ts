@@ -369,6 +369,7 @@ function densePrepared(
     const n = vertices.length;
     const A = assembleAFlat(vertices, edges, dp, f.alpha, f.beta, f.epsilon);
     return {
+        kind: 'dense',
         A,
         factor: (C) => solveSaddleFromA(A, n, C, zeros(3 * n), undefined, mode).fac,
     };
@@ -407,7 +408,7 @@ function runSolves(inp: SolverInputs, mode: FactorMode) {
         const { top, bottom } = rhsFor(kind, inp.n, inp.dE, inp.negPhi);
         const r = solveSaddleFromA(inp.a, inp.n, inp.C, top, bottom, mode);
         fromA[kind] = { x: r.x, lambda: r.lambda, residual: r.residual };
-        if (kind === 'gradient') op = { a: inp.a, n: inp.n, C: inp.C, fac: r.fac };
+        if (kind === 'gradient') op = { kind: 'dense', a: inp.a, n: inp.n, C: inp.C, fac: r.fac };
     }
     for (const kind of RHS_KINDS) {
         const { top, bottom } = rhsFor(kind, inp.n, inp.dE, inp.negPhi);
@@ -681,6 +682,11 @@ for (const sc of SOLVER_CASES) {
                     residual: r.residual,
                 });
                 diffSolve(diffs, `T1b frozenFn/${mode}`, asSolve(viaFrozenFn), gradPinned);
+                // Narrowing, not a cast (row 8 made FrozenSaddleOperator a `kind`-tagged union and
+                // `a` lives only on the dense arm). It is also an assertion in its own right: this
+                // call passes no `saddle`, so a dense frozen operator is the ONLY correct outcome.
+                if (viaFrozenFn.frozen.kind !== 'dense')
+                    throw new Error(`T1b frozenFn/${mode}: expected a dense frozen operator`);
                 // The returned operator is what the frozen projection reuses: pin its `a`/`C`/`n` too.
                 diffVec(diffs, `T1b frozenFn/${mode}.op.a`, viaFrozenFn.frozen.a, encVec(fx.a));
                 diffVec(
