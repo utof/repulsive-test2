@@ -380,8 +380,13 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
         }
     });
 
-    test('κ_eig of the SHIPPED Ã⁻¹A_σ, n=64..480, both definitions', () => {
-        const ns = [64, 120, 240, 480];
+    test('κ_eig of the SHIPPED Ã⁻¹A_σ, n=64..960, both definitions', () => {
+        // n=960 ADDED with the property-2 level bar (A32, #71): the gate must cover CLAUDE.md's
+        // floor of the production regime, and n=960 is where `κ_excl` peaks over the whole measured
+        // ladder (20.8632 at θ=0.5, 19.6713 here at θ=0.25 — it is NOT monotone, see the bar below).
+        // Costs ~8 s of the suite's time; n=1920 would cost 46 s and n=3840 442 s (`eig` is O(n³)),
+        // which is why the ladder stops here and A32 registers no bar that needs those points.
+        const ns = [64, 120, 240, 480, 960];
         const kInc: number[] = [];
         const kExc: number[] = [];
         for (const n of ns) {
@@ -409,9 +414,31 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
             log(`nullDim(Ã⁻¹A_σ) n=${n}`, sp.nullDim);
             // The pinned constant mode, again exactly 1, and it is the SMALLEST eigenvalue — which
             // is why the corpus's `max|λ|/min|λ|` is just `λ_max`.
+            //
+            // THESE TWO LINES ARE THE PRECONDITION OF `kappaExclConst`, NOT A SANITY CHECK — do not
+            // weaken them (A32, @issue utof/repulsive-test2#71). `κ_excl := λ_max/λ₂` means
+            // "excluding the constant mode" ONLY while the constant mode is the smallest
+            // eigenvalue. MEASURED: `Ã⁻¹A_σ·1 = 1` to 1.8652e-14 at m̂ ∈ {30,70,100,300}
+            // (bit-identical — the `+11ᵀ/(nσ)` correction is mass-independent), but at m̂=100
+            // λ₁=0.7486 and λ₂=0.7652 are BOTH below 1, so two non-constant modes sit under the
+            // constant one and `λ_max/λ₂` silently stops being the excluded-constant conditioning.
+            // Any future trip demo outside the live mass band must assert this pair or declare the
+            // quantity invalid.
             expect(Math.abs(sp.lambda1 - 1)).toBeLessThan(1e-11 * sp.lambdaMax);
             expect(sp.lambda2).toBeGreaterThan(1.5);
             expect(sp.nullDim).toBe(0);
+            // === H5 PROPERTY 2, the PRIMARY and only numeric bar (A32 supersedes A22) ===========
+            // `κ_excl ≤ 40` on the unnormalised trefoil, over a 15x range of n. Bounded `κ_excl`
+            // IS mesh independence — stated as a bound rather than a slope, which is what A22's own
+            // derivation said the property names. MEASURED max 19.6713 at n=960 here (θ=0.25) ⇒
+            // 2.03x margin, and 20.8632 at production θ=0.5 ⇒ 1.92x; the bar is robust to θ,
+            // unlike the withdrawn `R`. TRIPS m̂=100 (65.9672 at n=960), 300 and 1000; does NOT trip
+            // m̂=70 (36.7279), so the DEMONSTRATED sensitivity floor is m̂ ∈ (70, 100] — A22's "trips
+            // m̂=70 at 41.8" is the lab operator, not this one.
+            // FIXTURE-SCOPED: K=40 must NOT be applied to another curve — at this mass weight
+            // `κ_excl` reaches 138 (arc n=480) and 159 (helix n=960) against the trefoil's ~20.
+            // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8 (A32)
+            expect(sp.lambdaMax / sp.lambda2).toBeLessThan(40);
             // H5 property 3 on the SHIPPED operator for the first time (it was quoted from
             // `e0-closer-0b.json` before): `κ_eig · u_f32 <= 1e-2`. RECORDED, not a licence to
             // solve in f32 — a bounded condition number is necessary, not sufficient.
@@ -419,13 +446,32 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
             expect((sp.lambdaMax / sp.lambda1) * U_F32).toBeLessThan(1e-2);
         }
         // H5 property 2's exponent. LOGGED, NOT ASSERTED, and deliberately: the `|p| <= 0.05` bar
-        // reads RED on this operator (p = 0.0988 over all four points) AND on the lab reference
-        // under the excluded-constant definition, so it is a bar a correct operator fails.
-        // Re-registering it is an orchestrator/user decision, not a test's. The POINT SET is named
-        // because `p` depends on it: dropping n=64 moves it from 0.0988 to 0.0776.
-        log('p(kappaInclConst) over n=64,120,240,480', fitExponent(ns, kInc));
-        log('p(kappaInclConst) over n=120,240,480', fitExponent(ns.slice(1), kInc.slice(1)));
-        log('p(kappaExclConst) over n=64,120,240,480', fitExponent(ns, kExc));
+        // reads RED on this operator AND on the lab reference under the excluded-constant
+        // definition, so it is a bar a correct operator fails (#71, A22 — WITHDRAWN). The POINT SET
+        // is named because `p` depends on it: dropping n=64 moved it from 0.0988 to 0.0776 on the
+        // four-point ladder. The bar that replaced it is the level one asserted above.
+        const pts = ns.join(',');
+        log(`p(kappaInclConst) over n=${pts}`, fitExponent(ns, kInc));
+        log(
+            `p(kappaInclConst) over n=${ns.slice(1).join(',')}`,
+            fitExponent(ns.slice(1), kInc.slice(1)),
+        );
+        log(`p(kappaExclConst) over n=${pts}`, fitExponent(ns, kExc));
+        // A22's saturation statistic `R = Δκ(last) / Δκ(previous)`, LOGGED AND NEVER ASSERTED —
+        // WITHDRAWN as a bar by A32 (#71). It takes a different VERDICT on every doubling triple of
+        // the shipped operator at production θ=0.5: 0.5663 (120/240/480) passes, **1.6509
+        // (240/480/960) FAILS although the operator is correct**, and the triple A22 actually
+        // registered (480/960/1920) gives **−0.4354** — a negative R, which `R ≤ 0.75` admits
+        // unconditionally, so the bar could not be tripped there by any amount of non-monotonicity
+        // (CLAUDE.md `gates-name-their-impossible-values`). Mechanism, and why no point set fixes
+        // it: successive increments are 4-17 % of κ_excl while λ₂'s own wobble is ~15 %, so R is a
+        // ratio of two differences at the noise floor of the thing being differenced. A22's
+        // geometric-tail derivation presumes R ∈ (0,1) and is void for mixed-sign increments.
+        for (let i = 2; i < ns.length; i++) {
+            const d1 = kExc[i - 1] - kExc[i - 2];
+            const d2 = kExc[i] - kExc[i - 1];
+            log(`R(kappaExclConst) over n=${ns[i - 2]},${ns[i - 1]},${ns[i]}`, d2 / d1);
+        }
         // Cross-operator, with the extent that makes it true (A-SCALE): at extent 5.4716 the
         // shipped `κ_incl` is ~150x below the lab's ~1.1e4; at extent 1.0 it is ~2.8x.
         log(
