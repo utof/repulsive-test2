@@ -430,9 +430,10 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
             // === H5 PROPERTY 2, the PRIMARY and only numeric bar (A32 supersedes A22) ===========
             // `κ_excl ≤ 40` on the unnormalised trefoil, over a 15x range of n. Bounded `κ_excl`
             // IS mesh independence — stated as a bound rather than a slope, which is what A22's own
-            // derivation said the property names. MEASURED max 19.6713 at n=960 here (θ=0.25) ⇒
-            // 2.03x margin, and 20.8632 at production θ=0.5 ⇒ 1.92x; the bar is robust to θ,
-            // unlike the withdrawn `R`. TRIPS m̂=100 (65.9672 at n=960), 300 and 1000; does NOT trip
+            // derivation said the property names. MEASURED max 19.6713 at n=960 here (θ=0.25, which
+            // is what `bct.ts` DEFAULT_THETA ships) ⇒ 2.03x margin, and 20.8632 at θ=0.5 (spec §4.1's
+            // ruled target, pending H6 — #51) ⇒ 1.92x. It passes at BOTH, so the gate survives the
+            // day H6 flips the default; the withdrawn `R` changes SIGN between them. TRIPS m̂=100 (65.9672 at n=960), 300 and 1000; does NOT trip
             // m̂=70 (36.7279), so the DEMONSTRATED sensitivity floor is m̂ ∈ (70, 100] — A22's "trips
             // m̂=70 at 41.8" is the lab operator, not this one.
             // FIXTURE-SCOPED: K=40 must NOT be applied to another curve — at this mass weight
@@ -459,7 +460,7 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
         log(`p(kappaExclConst) over n=${pts}`, fitExponent(ns, kExc));
         // A22's saturation statistic `R = Δκ(last) / Δκ(previous)`, LOGGED AND NEVER ASSERTED —
         // WITHDRAWN as a bar by A32 (#71). It takes a different VERDICT on every doubling triple of
-        // the shipped operator at production θ=0.5: 0.5663 (120/240/480) passes, **1.6509
+        // the shipped operator at θ=0.5 (§4.1's target): 0.5663 (120/240/480) passes, **1.6509
         // (240/480/960) FAILS although the operator is correct**, and the triple A22 actually
         // registered (480/960/1920) gives **−0.4354** — a negative R, which `R ≤ 0.75` admits
         // unconditionally, so the bar could not be tripped there by any amount of non-monotonicity
