@@ -3032,8 +3032,8 @@ verification are here.
 | 6 | `lowOrder.ts` + `precond.ts` — `L_{2−s}`, `Ã⁻¹`, constant-mode correction | new + test | **H5, all three properties** (§7.8): `dim null(L^{2−s}) == 1` (defect variant gives 2); **property 2's live bar is the per-fixture level `κ_excl ≤ 40` on the unnormalised trefoil at n = 64/120/240/480/960, SHIPPED. `\|p\| ≤ 0.05` is WITHDRAWN (A22) and so is saturation `R ≤ 0.75` (A32): on the shipped operator at θ=0.5 (§4.1's ruled target; `DEFAULT_THETA` is still 0.25) `κ_excl` is non-monotone, so `R` = 1.6509 on 240/480/960 (fails on a CORRECT operator) and −0.4354 on the registered 480/960/1920 (passes vacuously). `R` is logged, never asserted**; **`κ_excl(Ã⁻¹A_σ)·u_inner ≤ 1e-2`** — the precondition of the whole mixed-precision scheme. Both knock-outs trip; `λ₁`/`λ₂`/`λ_max`/`rankTol` reported so nullity is falsifiable; nullity ≥ 3 ⇒ INVALID, not RED |
 | 7 | `gmres.ts` — left-preconditioned GMRES exposing `x̃`, `b`, `iters`, `maxit`, `tol`, the per-iteration recurrence residual **and an `η` probe hook on the χ=0 matvec with a recorded probe stride** (§7.3) | new + test | **H2 + H3** on one instrument. ~~The right-preconditioning knock-out must trip (`cos∠_A = 0.142` at n=480 while recurrence reads 1e-4)~~ **RE-ASSIGNED 2026-10-11 to task 10, with a new observable — see §5.3's correction box. This task CANNOT host it:** the knock-out needs a genuine f32 matvec, and `cos∠_A = 0.142` was never the right number (it is an f32 artefact of `e2_inexact.py:120-122`, not a side effect; in f64 right-preconditioning gives `cos∠_A = 1.000000` at every n). The replacement observable is **`cos∠_A ≤ 0` for `side: 'right'` under an f32 matvec at n=960** (MEASURED −0.136 median, −0.273 min) against left's 0.9991 — falsifiable, and it has a sign change rather than a magnitude to argue about. **What task 7 DOES own instead:** the `side` plumbing differential (reviewer B: each of 3 side-plumbing mutants fails 9–17 tests) and the guard refusing `side: 'right'` without `knockOut: true`. The recurrence-residual-as-η knock-out must trip RED at 34× the bar; **`η_exact` must never be bit-equal to `η_bct`** (both computed); `iters == maxit` and any-direction-censored ⇒ INVALID, and compare against `maxit`, **never** against `n`; **the gated η is `η_bct` (A21, §7.3) and `etaTarget` must read `η_bct`** |
 | 8 | Seam: the `kind`-tagged `PreparedSaddle` and `FrozenSaddleOperator` unions, `HierarchicalSaddleSolver`, operator-shaped `structuredSaddleResidual`, **and the `projectOntoConstraintSet` hierarchical route** (§5.1) | `linsolve.ts`, `gradient.ts`, **`optimizer.ts`**, **`lineSearch.ts`**, **`src/gpu/saddle.ts`** | **the dense branch stays byte-identical** — **the existing goldens CANNOT measure this (A24, 2026-10-11); a bit-level dense-path golden was a PRE-TASK-8 deliverable and task 8 was BLOCKED until it existed** (box below). **DISCHARGED 2026-10-11 at `d3672c2`** — `test/sobolev/denseSaddleBitGolden.{test.ts,json}`, 44 tests, 26 728 numbers pinned with `Object.is`, captured with all five seam files untouched vs `main` (SHA-256 recorded in `provenance.seamFileSha256`). **Non-vacuity proven by mutation and independently reproduced by the controller:** a one-ULP perturbation of `z[0]` in `solveSaddleFrozen` turns the new gate **41/44 RED while all 54 pre-existing files stay 708/0 green**; same clean contrast for a one-ULP `x[0]` in `lineSearch.ts`'s reassemble projection branch, `Math.fround` on `structuredSaddleResidual`, and a one-ULP `a[0]` in `gradient.ts`'s Prepared arm. **Known sensitivity limit:** a 1-ULP change to an O(1e-3) projection correction is partly absorbed when added to an O(1) coordinate, so T1 (which pins the solve before absorption) is the sharp instrument, not T2/T3. **WARNING for this task, from the same mutation sweep: `test/gpu/dESeam.test.ts:91` (`expect(scaled.energy).not.toBe(baseline.energy)`) rides on ~3 ULP of rounding by its own comment's admission and flips in EITHER direction on any change to the arithmetic realisation (`@issue utof/repulsive-test2#80`). If it goes red during this task, check whether the two energies became bit-equal BEFORE concluding you caused a regression**; `kind: 'dense'` ⇒ bit-identical, and `optimizer.ts:291`'s dense throw message is pinned by `test/gpu/saddleSeam.test.ts:287-298`. `bunx tsc --noEmit` clean is a hard gate here: the first-draft `A?` delta produced TS18048 + TS2322  **SHIPPED 2026-10-11 at `a8569d8`** — 11 files, 650+/17−; `tsc` 0, suite **762/0/56**, golden fixture byte-identical to `d3672c2` (`cmp` empty), golden 44/44, all four verified by the controller. `lineSearch.ts` needed **comment only** (`+10/−0`): because `solveSaddleFrozen` dispatches on `kind` internally, `projectOntoConstraintSet`'s body is byte-for-byte unchanged, which is what §1.4 demands. Non-vacuity run not asserted: two `src` mutants each turn exactly one of the 10 new tests red (controller independently reproduced the residual-reordering mutant: 1 fail, the named test, 9 pass). **Guard shape corrected — see A25 in §5.1.** |
-| 8b ⛔ **RUNS AFTER 9b (now SHIPPED) — see the A33 AND A35 boxes below; A35 carries the k=0-mod-translation rule, the `SolveNotCertifiedError` seam fix, the offset-targets corpus trap, and the fact that `cos∠_A` measures θ's compression and not the solve** | **`hierarchicalSaddle.ts` — the producer.** A `makeHierarchicalSaddle(vertices, …): HierarchicalPreparedSaddle` factory plus its wiring through `dispatch.ts` → `optimizer.ts` `opts.saddle` | new + `dispatch.ts` | **without this the phase ships an unreachable feature**: tasks 1–8 widen a public type that nothing in the repo ever writes, and the dense path stays bit-identical only because it is still the only path. End-to-end: one `sobolevStepSet` on the hierarchical route at n=960, `cos∠_A ≥ 0.9` against the dense f64 reference  **CROSS-TASK CONTRACT FROM TASK 8 (`a8569d8`, binding): this task MUST pass `projectionMode: 'frozen'` when it wires the hierarchical saddle through `dispatch.ts`.** `optimizer.ts:297-318` REFUSES a hierarchical saddle without it, pre-arm, by design: `projectOntoConstraintSet`'s other branch calls `assembleAFlat` **per projection iterate** (O(N²) f64, **7.2 GB at N=30 000**), so the combination cannot run at target scale, and below that scale it would solve the GRADIENT hierarchically while silently reassembling a DENSE Ā for every projection iterate — a step that reads as hierarchical and is not (CLAUDE.md: gates name their impossible values). An auto-upgrade was rejected because `opts` and behaviour would then disagree. **If 8b needs to pass either mode, the throw may be downgraded ONLY with the dense-projection fallback surfaced in `stats`** — nothing downstream can currently distinguish the two. **Also carried to 8b: (R2) `factorMode` is silently inert on the hierarchical arm — add the guard or the one-line TSDoc; (R4) the seam tests cover one fixture (trefoil n=24, k=4) and one step, so 8b owns the k=0 and `edgeLengths` cells against a REAL operator.** |
-| 9 | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately. **A35: this row's bar inherits 9b's amendment — compare against the DD-refined truth, not the dense path, or it is unmeasurable at n=960 for the same reason. And it MUST include a `gen/−φ` cell (generic top with non-zero mean): 9b measured that a flipped multiplier sign is INVISIBLE on every `grad/0` and `zero/−φ` cell of every k=3 set, so a suite without `gen/−φ` ships a sign error.** |
+| 8b ✅ **SHIPPED (`4df665b`) — see A33, A35 AND A36. A36: this row's `cos∠_A ≥ 0.9` bar CANNOT FAIL for the reason it is written about (no θ trips it — 0.9987 is the worst any θ produces, because the adjacency certificate has no θ term) and it is BLIND to a saddle built for the wrong geometry (0.999839 vs 0.999840 while `g̃` is 4.04 relative away — issue #83). Two companion cells ship with it: mod-translation relErr of `g̃` ≤ 1e-2, and an EXACTNESS differential at θ=0 where `nFar`=0, ≤ 1e-10 at n=240 (measured 2.6e-12, the only cell that can see a plumbing defect)** | **`hierarchicalSaddle.ts` — the producer.** A `makeHierarchicalSaddle(vertices, …): HierarchicalPreparedSaddle` factory plus its wiring through `dispatch.ts` → `optimizer.ts` `opts.saddle` | new + `dispatch.ts` | **without this the phase ships an unreachable feature**: tasks 1–8 widen a public type that nothing in the repo ever writes, and the dense path stays bit-identical only because it is still the only path. End-to-end: one `sobolevStepSet` on the hierarchical route at n=960, `cos∠_A ≥ 0.9` against the dense f64 reference — **BAR AMENDED, A36: met at 0.999840, but it is NOT a compression gate and NOT a wrong-geometry gate; the two companion cells above are what discriminate, and the θ=0 exactness cell is now REQUIRED**  **CROSS-TASK CONTRACT FROM TASK 8 (`a8569d8`, binding): this task MUST pass `projectionMode: 'frozen'` when it wires the hierarchical saddle through `dispatch.ts`.** `optimizer.ts:308-327` (post-8b; was `:297-318`) REFUSES a hierarchical saddle without it, pre-arm, by design: `projectOntoConstraintSet`'s other branch calls `assembleAFlat` **per projection iterate** (O(N²) f64, **7.2 GB at N=30 000**), so the combination cannot run at target scale, and below that scale it would solve the GRADIENT hierarchically while silently reassembling a DENSE Ā for every projection iterate — a step that reads as hierarchical and is not (CLAUDE.md: gates name their impossible values). An auto-upgrade was rejected because `opts` and behaviour would then disagree. **If 8b needs to pass either mode, the throw may be downgraded ONLY with the dense-projection fallback surfaced in `stats`** — nothing downstream can currently distinguish the two. **Also carried to 8b: (R2) `factorMode` is silently inert on the hierarchical arm — add the guard or the one-line TSDoc; (R4) the seam tests cover one fixture (trefoil n=24, k=4) and one step, so 8b owns the k=0 and `edgeLengths` cells against a REAL operator.** |
+| 9 | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately. **A36: this row's `k=0` / gauge cells also inherit A36 item 3 — on a translation-singular set the dense path is not a reference for the STEP either (the dense `g̃` is 82 % translation, so `lineSearch.ts` normalises it to a 1.77× shorter step and a 4.0 % energy gap, with BOTH arms `accepted: true`); a green `k=0` cell must not be read as the two arms taking the same step. A35: this row's bar inherits 9b's amendment — compare against the DD-refined truth, not the dense path, or it is unmeasurable at n=960 for the same reason. And it MUST include a `gen/−φ` cell (generic top with non-zero mean): 9b measured that a flipped multiplier sign is INVISIBLE on every `grad/0` and `zero/−φ` cell of every k=3 set, so a suite without `gen/−φ` ships a sign error.** |
 | 9b ⬆️ **PROMOTED AHEAD OF 8b (A33)** | `schur.ts` — the `k=O(1)` half of §8.2's hybrid (barycentre, 3 rows; per-pin, 3 rows; tangent, 1 row) | new + test | the hybrid is a two-branch ruling and the first draft gave a task to only one branch. Dispatch on `k`: Schur for `k=O(1)`, nullspace for `edgeLengths`' `\|E\|` rows. ~~Verify each branch reproduces the dense path's `x` to 1e-10 at n=960 on its own constraint set~~ **BAR AMENDED, A35: `1e-10` against the DOUBLE-DOUBLE-REFINED TRUTH of the dense matrix of the same operator.** The literal bar is unmeetable BY ANY SOLVER at n=960 — dense LDLᵀ's own error against truth grows `~n^3.3` (4e-14…1.6e-13 at n=120 → **1.4e-10…6.4e-10 at n=960**), so it crosses 1e-10 between n=480 and n=960 and the "disagreement" equals the oracle's own error to 3 digits. Shipped Schur is **3.2e-12…9.1e-12** from truth, **25–200× closer than the oracle it was told to match**. Literal LDLᵀ agreement is asserted at **n ≤ 240** (5.6e-13…5.4e-12) and LOGGED at n=960. **SHIPPED** |
 | **9c** | **The `c` re-check at n ≥ 4 000 — A20's OPEN item, which had NO OWNER until 2026-10-11. A20 points at *"task 9's calibration"*; THIS ROW is what it means.** Row 9 is `nullspace.ts` and does no calibration, and **`9b` was already taken by `schur.ts`** — the item was assigned to a task that cannot do it. Scope: `κ_excl` over a `c` grid at n ≥ 4 000 on the four shapes present at every n (arc / circle / helix / trefoil — A20 proves these carry every binding constraint), **plus `λ₂(n, m̂)` jointly, which issue #78 needs and which is the same eigensolve** | `bench` / `scratch` only — measurement, no `src` change | **Three pre-registered outputs.** (1) The minimax-absolute `c` at n ≥ 4 000, against A20's five-rung trend **15 / 20 / 20 / 25 / 30** at n = 64…960 and its extrapolated **40–45** at N = 30 000 — report whether the trend continues, flattens, or breaks; do NOT bank the extrapolation either way. (2) **Where `λ₂ = 1` falls in `(n, m̂)`** — `κ_excl = λ_max/λ₂` silently measures the wrong mode once `λ₂ < 1` (#78; measured `λ₂` at n=64: 6.62 @ m̂=30 → 0.878 @ m̂=90, and `precond.test.ts`'s module comment records `λ₂ ≈ 1.3` at n=30 000 for the OLD m̂), so if `λ₂ < 1` anywhere in the production regime **every `κ_excl` figure there is not κ_excl** and the N=30 000 conditioning claims rest on a broken instrument. (3) The `rs-identity` knock-out bar `> 100`, re-derived at whatever `c` lands: MEASURED **273.3 at m̂=30, 118.0 at 45, 66.4 at 60** (#78), so it FAILS inside A20's own projected band — re-derive it as part of changing `c`, measuring first, never after a red. |
 | 10 | Mixed precision: f32 inner, f64 outer (§6) | `gmres.ts`, `apply.ts` | **a genuine f32 hierarchical apply through the whole solve** (§9.2's top gap) — locate the wall, do not inherit it |
@@ -3071,6 +3071,56 @@ it.** **RE-SCOPED: 8b delivers reachability on the MAIN-THREAD / inline driver o
 in `stats` or TSDoc rather than leaving a UI path that throws. Making the hierarchical route work under
 the worker driver is **a separate, unscheduled task** — it needs the saddle BUILT INSIDE the worker from
 cloneable inputs, which is a different seam from the one tasks 1–8 widened. **Not smuggled into 8b.**
+
+**(3) `edgeLengths` is assigned to TWO rows at once — my error, and 8b loses it.** Row 8b's carry R4
+says *"8b owns the k=0 and `edgeLengths` cells against a REAL operator"*, while row 9 and §8.2 route
+`edgeLengths`' `|E|` rows through `nullspace.ts`, and §8.1 measures that an iterative solve with
+`k = O(n)` costs O(N²·iters). **R4 is CORRECTED: 8b owns the `k = 0` cell only.** The `edgeLengths`
+cell moves to **row 9**, where the route it exercises actually lives.
+
+**Four more facts the census established that 8b's brief must carry (each would otherwise be an
+implementer's wrong turn):**
+- **TOPOLOGY LIMIT — the hierarchical stack only builds on a natural-order closed ring.**
+  `assembleCurveLaplacian` accepts only edges `(i, i+1)` plus the wrap `(n−1, 0)`, and
+  `prepareLowOrder('vertex')` throws `CurveTopologyError` unless `|E| = |V|` with each vertex starting
+  exactly one edge (`laplacian.ts:13-14` says dispatch must route everything else to dense). **The
+  dense golden's fixtures (`crossing`, `junction-y`, `linked-rings`, `knot`) are not all rings**, so the
+  end-to-end cell must use `trefoil` and the dispatch must have a documented dense fallback.
+- **NO PINNED PRODUCTION `tol`, and no stop rule.** `gmres` requires `tol` (`gmres.ts:444`) and
+  `gmres.ts:51-52` states the recurrence residual is not a convergence criterion. The spec gives
+  iteration counts but never a production stop rule, and **nothing in `src/core/` thresholds the
+  returned `residual`** (`linsolve.ts:410-413`). 8b must choose one and register it; `censored` /
+  `stop` have no defined handling at the seam.
+- **Non-convergence has no typed error.** The only typed one is `ExternalSolveError`, documented for
+  external factorizations. A plain `Error` silently becomes `'singular_system'` in the gradient solve
+  (`optimizer.ts:420-450`) and `ok:false` in projection (`lineSearch.ts:322`) — i.e. **GMRES failing to
+  converge would be reported as a singular system.**
+- **`alpha`/`beta`/`epsilon` are NOT forwarded by `dispatch.ts`;** the core falls back to `DEFAULTS`, so
+  a saddle built outside `sobolevStepSet` must use the identical values or the operator and the step
+  disagree silently (`src/gpu/driver.ts:147-155` documents the same trap for the GPU engine).
+- **SCALE — added 2026-10-11, an omission in this box's first draft.** `buildBvh` **does not
+  normalise**, and its header states tree quality depends on the caller scaling to extent ≈ 1
+  (issue #69, where `κ_near` moves **1.70×** across the two scales in the corpus). **And the
+  provenance is split, which is worse than a bare precondition and is what #69 actually names:**
+  `bvh.ts:32-38` records that the spike **normalised every fixture to bbox max extent 1**
+  (`scratch/curves.ts:13-17`) and that **every `out-bct-*.json` oracle — e.g. `κ_near = 108.20` —
+  was measured that way**, while every shipped test builds from the **unnormalised** `trefoil` at
+  extent **5.4716**. The mechanism is stated there too: the split score sums squared diameters of
+  positions (curve scale) against unit tangents (scale 1), so at large scale positions swamp
+  tangents, the chosen axis changes, and tree quality — hence `κ_near` and far-field accuracy —
+  changes with it. **8b is the first code to take ARBITRARY production vertices**, whose extent is
+  whatever the user's curve happens to be. 9b is unaffected (it builds
+  from `trefoil` like its peers). **8b must either normalise before `buildBvh` and state the
+  transform, or record in `stats` the extent it built at** — silently building a tree at extent
+  5.47 and then at extent 0.01 on the next step is a quality change nothing downstream can see.
+  This is the same class as #72's mass weight, which was closed by making the quantity
+  scale-equivariant rather than by picking a better constant.
+
+**Process note.** All three defects are in the SEAM, not the numbers — which is exactly what memory
+`plan-the-seam-not-the-numbers` says to expect, and I still wrote a row whose dependency order was
+wrong. The census cost ~30 min and was recovered from a transcript after the agent could not write its
+own file; it still paid for itself three times over before a single line of 8b was written. **The rule
+to keep: census the seam before dispatching the task, not after the implementer reports it blocked.**
 
 ### ⚠️ A35 — task 9b SHIPPED, and it refuted row 9b's bar, my Schur algebra, and two of its own knock-outs
 
@@ -3170,55 +3220,134 @@ SECOND solve with a different rhs = 48 (**one GMRES, not k**), and a `rhsTop = 0
 applies**, short-circuited before `gmres`. `SCHUR_MAX_K = 16`; `edgeLengthsBlock` is refused by name with
 `SchurRouteError`.
 
-**(3) `edgeLengths` is assigned to TWO rows at once — my error, and 8b loses it.** Row 8b's carry R4
-says *"8b owns the k=0 and `edgeLengths` cells against a REAL operator"*, while row 9 and §8.2 route
-`edgeLengths`' `|E|` rows through `nullspace.ts`, and §8.1 measures that an iterative solve with
-`k = O(n)` costs O(N²·iters). **R4 is CORRECTED: 8b owns the `k = 0` cell only.** The `edgeLengths`
-cell moves to **row 9**, where the route it exercises actually lives.
+### ⚠️ A36 — task 8b SHIPPED, and ROW 8b's GATE CANNOT FAIL FOR THE REASON IT IS WRITTEN ABOUT
 
-**Four more facts the census established that 8b's brief must carry (each would otherwise be an
-implementer's wrong turn):**
-- **TOPOLOGY LIMIT — the hierarchical stack only builds on a natural-order closed ring.**
-  `assembleCurveLaplacian` accepts only edges `(i, i+1)` plus the wrap `(n−1, 0)`, and
-  `prepareLowOrder('vertex')` throws `CurveTopologyError` unless `|E| = |V|` with each vertex starting
-  exactly one edge (`laplacian.ts:13-14` says dispatch must route everything else to dense). **The
-  dense golden's fixtures (`crossing`, `junction-y`, `linked-rings`, `knot`) are not all rings**, so the
-  end-to-end cell must use `trefoil` and the dispatch must have a documented dense fallback.
-- **NO PINNED PRODUCTION `tol`, and no stop rule.** `gmres` requires `tol` (`gmres.ts:444`) and
-  `gmres.ts:51-52` states the recurrence residual is not a convergence criterion. The spec gives
-  iteration counts but never a production stop rule, and **nothing in `src/core/` thresholds the
-  returned `residual`** (`linsolve.ts:410-413`). 8b must choose one and register it; `censored` /
-  `stop` have no defined handling at the seam.
-- **Non-convergence has no typed error.** The only typed one is `ExternalSolveError`, documented for
-  external factorizations. A plain `Error` silently becomes `'singular_system'` in the gradient solve
-  (`optimizer.ts:420-450`) and `ok:false` in projection (`lineSearch.ts:322`) — i.e. **GMRES failing to
-  converge would be reported as a singular system.**
-- **`alpha`/`beta`/`epsilon` are NOT forwarded by `dispatch.ts`;** the core falls back to `DEFAULTS`, so
-  a saddle built outside `sobolevStepSet` must use the identical values or the operator and the step
-  disagree silently (`src/gpu/driver.ts:147-155` documents the same trap for the GPU engine).
-- **SCALE — added 2026-10-11, an omission in this box's first draft.** `buildBvh` **does not
-  normalise**, and its header states tree quality depends on the caller scaling to extent ≈ 1
-  (issue #69, where `κ_near` moves **1.70×** across the two scales in the corpus). **And the
-  provenance is split, which is worse than a bare precondition and is what #69 actually names:**
-  `bvh.ts:32-38` records that the spike **normalised every fixture to bbox max extent 1**
-  (`scratch/curves.ts:13-17`) and that **every `out-bct-*.json` oracle — e.g. `κ_near = 108.20` —
-  was measured that way**, while every shipped test builds from the **unnormalised** `trefoil` at
-  extent **5.4716**. The mechanism is stated there too: the split score sums squared diameters of
-  positions (curve scale) against unit tangents (scale 1), so at large scale positions swamp
-  tangents, the chosen axis changes, and tree quality — hence `κ_near` and far-field accuracy —
-  changes with it. **8b is the first code to take ARBITRARY production vertices**, whose extent is
-  whatever the user's curve happens to be. 9b is unaffected (it builds
-  from `trefoil` like its peers). **8b must either normalise before `buildBvh` and state the
-  transform, or record in `stats` the extent it built at** — silently building a tree at extent
-  5.47 and then at extent 0.01 on the next step is a quality change nothing downstream can see.
-  This is the same class as #72's mass weight, which was closed by making the quantity
-  scale-equivariant rather than by picking a better constant.
+Ruled 2026-10-11 from task 8b's report
+(`.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-8b-report.md`), commit `4df665b`.
+Delivered `src/core/sobolev/hierarchical/hierarchicalSaddle.ts` (365 lines) +
+`test/sobolev/hierarchicalSaddleReal.test.ts` (24 tests), the `SolveNotCertifiedError` seam fix, and
+the R2 TSDoc. Suite **832 pass / 0 fail / 58 files**. **The phase is now reachable:** tasks 1–9b
+widened a public seam that nothing in the repo wrote.
 
-**Process note.** All three defects are in the SEAM, not the numbers — which is exactly what memory
-`plan-the-seam-not-the-numbers` says to expect, and I still wrote a row whose dependency order was
-wrong. The census cost ~30 min and was recovered from a transcript after the agent could not write its
-own file; it still paid for itself three times over before a single line of 8b was written. **The rule
-to keep: census the seam before dispatching the task, not after the implementer reports it blocked.**
+**(1) `cos∠_Ā ≥ 0.9` IS NOT A COMPRESSION GATE — NO θ CAN TRIP IT. The bar is kept, and two cells
+that CAN discriminate are added.** Measured at n=240, bary, one shared dense reference:
+
+| θ | 0.25 | 0.5 | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|---|---|
+| `cos∠_Ā` | 0.999963 | 0.999307 | 0.998749 | 0.998749 | 0.998749 | 0.998749 | 0.998749 | 0.998749 |
+| `nFar / nNear` | 408/418 | 274/162 | 274/126 | 274/126 | 274/126 | 274/126 | 274/126 | 274/126 |
+
+θ ≥ 1 is **the same tree**, so the worst `cos∠_Ā` any θ can produce on a gradient rhs is **0.9987 —
+11 % above the bar.** **Mechanism, verified in source rather than inferred from the table:** the
+adjacency certificate (`bct.ts:24-38`, `d > r_x^A + r_x^B + (maxEll_A + maxEll_B)/2`) contains **no θ
+term**, so blocks that pass Eq. 28 but fail the certificate are split further regardless of θ and the
+near field has a θ-independent floor. **This is the same defect as row 9b's bar (A35 item 1) in a
+different costume: a bar that cannot discriminate what it claims to.** Row 8b's gate measures θ's
+compression (A35 item 8 said so) and θ's compression cannot reach it.
+
+**Two companion cells, both shipped and both asserted:**
+- **mod-translation relative error of `g̃`, bar `1e-2`.** Clean 2.226e-3 at n=960 / 2.859e-3 at n=240
+  (4.5× margin); θ=0.5 gives 2.86e-2 so the bar is loose enough for a legitimate θ. **It trips where
+  the cos bar does not:** `alpha=2` → cos **0.790**, `beta=8` → **0.878**, `maxit=1` → **0.778**, and
+  `alpha=4` / `beta=4` / `epsilon=1e-2` / `leafSize=1` trip modTrans while passing cos. Every one of
+  those is reachable through **shipped options with no knock-out flag** — they are A33's
+  *"α/β/ε are NOT forwarded by `dispatch.ts`"* trap, so the falsifiers are the real failure mode.
+- **An EXACTNESS differential at `theta: 0` (`nFar = 0`), bar `1e-10` at n=240 — ADD THIS TO ROW 8b.**
+  Measured **2.6108e-12**, i.e. **1e8 tighter than the compressed cell, and the only cell in the file
+  that can see a plumbing defect** (both other cells are dominated by θ's 1.6e-3…4.5e-3, so neither
+  can tell a correct composition from one defective by up to ~1e-3). Two independent routes to
+  `nFar = 0` — `theta: 0` and `leafSize: 64` — agree to **4 digits** (2.610814e-12 vs 2.610823e-12).
+  At n=960 the same cell reads **2.533e-10, which independently reproduces A35 item 7's ≈2e-10
+  cross-path floor from a direction A35 did not use.** Cost: 2 s. **Generalise: every compressed-path
+  gate on this branch should be paired with its `nFar = 0` exact-limit cell, which is nearly free
+  because the traversal code is shared (§7.1).**
+
+**(2) `cos∠_Ā` IS BLIND TO A SADDLE BUILT FOR THE WRONG GEOMETRY — issue #83.** A saddle built from
+`2 × vertices` and used on the originals reads **0.999839 against the clean 0.999840 — one part in
+4e-6 — while its `g̃` is 4.036 RELATIVE away.** It passes `op.n`, which is the only shape the seam
+checks. The *"`A` MUST be the Sobolev matrix of the same vertices the step receives"* rule
+(`linsolve.ts:462`, and `optimizer.ts:125` for `dE`) is **TSDoc prose with no enforcement anywhere** —
+confirmed by grep: every actual check on the seam path is a length check. This affects the **dense/GPU
+Phase-2a seam identically**, not just 2H. `cos∠_A` is a direction in a seminorm, scale-invariant in
+each argument; it cannot supply the missing enforcement and must not be read as doing so.
+
+**(3) AT `k = 0` THE GAUGE CHANGES THE REALISED STEP, NOT JUST `x` — A35 ITEM 3 WAS INCOMPLETE.**
+A35 ruled that the dense path is not a reference for `x` where the saddle is translation-singular, and
+that `cos∠_A` is blind to a translation so *"8b's stated gate survives untouched"*. Both hold. **What
+it did not say is that the STEP differs too.** n=960, k=0:
+
+| quantity | dense | hierarchical |
+|---|---|---|
+| `cos∠_Ā(g̃_h, g̃_d)` | **0.999839539** — identical to the k=3 bary cell to 9 digits | — |
+| per-block means of `g̃` | −1.019e-1, 1.750e-1, −5.773e-2 | −1.3e-17, 3.7e-17, −2.1e-17 (`A_σ` gauge, exactly mean-free) |
+| LITERAL relErr of `g̃` | **8.203e-1** | — |
+| MOD-TRANSLATION relErr | **2.2259e-3** — the k=3 cell's value | — |
+| `l2CurveNorm(g̃)` | 1.3716 | 0.7756 → **ratio 1.7686** |
+| energy after the step | 15.5321 | 14.9168 → **gap 0.6153 (4.0 %)** |
+| τ / projectionIterations / accepted | 1 / 0 / **true** | 1 / 0 / **true** |
+
+**Mechanism, traced to source:** `lineSearch.ts:499-517` normalises the direction by
+`l2CurveNorm(g̃)` before stepping. The dense k=0 `g̃` is **82 % translation**, which inflates that norm,
+so the dense arm takes a **1.77× SHORTER** step along an identical direction. Verified by
+decomposition at n=240: `g̃_h − g̃_d` is a pure translation to **1.24e-3 relative**, the energy is
+invariant under translating the result (14.991871589080532 both ways, 14 digits), and the mean-free
+parts agree to 2.859e-3 — exactly the θ error of the k=3 cell. **Neither arm is wrong — the
+translation really is free in `x`.** **RULED, and it is a reading rule, not a bug:** on a
+translation-singular set the dense path is not a reference for the **step** either, only for `x` mod
+translation; **a green `k = 0` cell must never be read as "the two arms produce the same step".**
+Both steps report `accepted: true` with finite stats, so nothing downstream flags the divergence.
+**Carried to rows 9 and 9c**, whose `k = 0` and gauge cells inherit it.
+
+**(4) A35 ITEM 6's STATED HARM DOES NOT EXIST IN CODE. The ruling stands; my justification was
+false.** I wrote that `ExternalSolveError` is *"documented as the GPU path's 'could not certify' signal
+and `driver.ts` treats it as re-run on the CPU path — the WRONG recovery for a CPU GMRES"*. Measured:
+**`src/gpu/driver.ts` has no `catch` at all** (195 lines), the only `ExternalSolveError` producer is
+`src/gpu/saddle.ts:446` whose only callers are `test/gpu/`, and no `src/` site catches either class.
+*"Re-run on the CPU path"* is `[DESIGN §4.5]` trigger 3 — **spec text, not shipped code.** The
+implementer made the change anyway on the narrower reason it could check and wrote THAT into the
+TSDoc: `SchurConvergenceError extends ExternalSolveError` would make the shipped type contradict two
+shipped TSDoc contracts (`linsolve.ts`'s *"an external solve"* and `optimizer.ts:207`) and destroy
+`instanceof ExternalSolveError` as the discriminant a future GPU fallback would be written against.
+So the harm is **latent and documentary**, and the TSDoc says so. **The lesson is A17's and A35 item
+1's again: I cited a spec's description of behaviour as though it were the behaviour.** A spec claim
+about code is as checkable as a number (memory `capability-claims-need-falsifying`), and this one cost
+one grep.
+
+**(5) A33's "not structured-cloneable by construction" claim is now MEASURED, and it held.** I
+asserted it from the presence of closures. `structuredClone({saddle})` on a real saddle throws
+`DataCloneError: The object can not be cloned.` — the first actual check. Main-thread/inline-only
+reachability is pinned **two** ways: that, plus a cloneable `{kind:'hierarchical', op:{n}}` stand-in
+posted to the real worker returning the documented refusal.
+
+**(6) Row 8b's remaining carries, as DELIVERED.** `projectionMode: 'frozen'` asserted to fire for
+`'reassemble'` AND `undefined`, with the clean config asserted to pass so neither side reads
+vacuously; extent **recorded, not normalised** (#69) and cross-checked against an **independent** bbox
+loop rather than an import of `curveExtent` (memory `common-mode-blindness`); `tol` pinned
+`=== 1e-12`; targets offset so `Φ = −1.4413 ≠ 0`; topology refused up front by
+`HierarchicalSaddleUnsupportedError` naming the dense path, asserted for open chain, junction,
+duplicated edge and `n < 3`, with the ring asserted to pass. `normA2` is cached once per factory and
+asserted **bit-identical** with `Object.is` (not a tolerance) — the one numerical liberty taken, and
+it fixes the waste 9b's report flagged.
+
+**(7) THREE ISSUES FILED, none of them inline-fixable.** **#82** — `DEFAULTS` lives in `optimizer.ts`,
+so seven modules import the step driver for four numbers and `hierarchicalSaddle.ts` is the first leaf
+numerics module to do it; the cycle goes live if the factory is ever wired in from `gradient.ts`.
+**#83** — (2) above. **#84** — `file:line` citation rot: **8 of 97** citations in `src/` are already
+detectably wrong (one overshoots `bct.ts` by 203 lines), 8b had to hand-update **13** anchors its own
+edits moved, and **2 were already stale before it started**. That last one matters structurally: this
+repo's anchoring rule tells a future agent to *"check its reference before changing it"*, and the rule
+degrades in proportion to how many references are wrong.
+
+**Process note — two failures worth keeping.** (a) **The implementer's full-suite run was killed when
+its shell was torn down at idle**, ~25 min in, and **a dead run is indistinguishable from a slow one
+in the log**: the log simply stops with no totals while `ps -C bun` is already empty. The brief's
+foreground-only instruction did not prevent it, because the agent went idle *while the foreground job
+ran*. The suite was re-run by the controller under `nohup`. **Rule: the orchestrator runs the gate
+suite, or the worker's run is detached from its shell — never a bare foreground job the agent then
+idles on.** (b) **A33's body was split by A35 in this file** — its item (3) and five carried facts sat
+*below* all of A35, where they read as A35's, and A35 has its own item (3) about a different thing.
+Fixed here by moving A33's tail back under its header. **This is the sixth-instance defect again
+(A32/A22): amendment boxes are append-only prose and an insertion silently orphans whatever follows.**
 
 > **A24, 2026-10-11 — THE DENSE BYTE-IDENTITY GATE HAS NO INSTRUMENT, AND TASK 8 IS BLOCKED UNTIL IT
 > DOES.** Row 8 and §11.4 both designate *"existing goldens"* as the gate for
