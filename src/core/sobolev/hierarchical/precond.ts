@@ -32,17 +32,25 @@
  * ONE DEVIATION FROM THE MEASURED ORACLE, RECORDED BECAUSE IT CROSSES A PROVENANCE BOUNDARY. The
  * lab's `D⁺` is `pinv(Π Lap Π)` of the PURE-STIFFNESS polyline Laplacian (`gmres_lab.py:95-110`,
  * `w = 1/ell`, singular with nullspace the constants). Production uses `solveLaplacian` on
- * `stiffness·L + mass·M` with **`massWeight = 1`** — spec §11.2's mass-weight ruling, because
- * `massWeight <= 0` is singular and has no pseudo-inverse route (`laplacian.ts` throws) and 1e-3
- * breached 7 of 9 measured cases. These are DIFFERENT operators, so every `κ_eig` in
- * `e0-closer-0b.json` / `e4-closer-0b.json` characterises the LAB's `Ã⁻¹`, not this one.
- * `massWeight` therefore stays a runtime parameter and `precond.test.ts` measures how far the
+ * `stiffness·L + mass·M` with **`massWeight = DEFAULT_MASS_WEIGHT_HAT/ext² = 30/ext²`** (`ext` =
+ * {@link curveExtent}) — spec §11.2's mass-weight ruling as SUPERSEDED by amendment A20 / issue
+ * #72 — because `massWeight <= 0` is singular and has no pseudo-inverse route (`laplacian.ts`
+ * throws) and 1e-3 breached 7 of 9 measured cases. These are DIFFERENT operators, so every
+ * `κ_eig` in `e0-closer-0b.json` / `e4-closer-0b.json` characterises the LAB's `Ã⁻¹`, not this
+ * one. `massWeight` therefore stays a runtime parameter and `precond.test.ts` measures how far the
  * production operator moves as it varies. It now ALSO measures `κ_eig` of THIS operator directly
  * (`denseSpectrum.ts`, validated against the corpus to 8 digits on the lab construction), so the
- * two no longer have to be conflated. Two consequences a caller must know: the shipped `κ` is
- * better than the lab's, and it is NOT scale-invariant — `massWeight = 1` carries units of
- * `length⁻²` (stiffness scales as `length⁻¹`, mass as `length⁺¹`), and `κ` moves 53-62x between
- * bbox extent 5.4716 and extent 1.0. A `κ` quoted without its extent is not a measurement.
+ * two no longer have to be conflated.
+ *
+ * THE MASS TERM IS DIMENSIONALLY CORRECT, THE COMPOSITE IS NOT YET SCALE-EQUIVARIANT. `massWeight`
+ * carries units of `length⁻²` (stiffness scales as `length⁻¹`, mass as `length⁺¹`), so the old bare
+ * default `massWeight = 1` moved `κ` 53-62x between bbox extent 5.4716 and extent 1.0; the `/ext²`
+ * makes the mass term scale like the stiffness term. It does not touch the dependence of the BVH
+ * tree on scale (`bvh.ts`'s SCALE PRECONDITION, issue utof/repulsive-test2#69), so a `κ` quoted
+ * without its extent is still not a measurement. On the trefoil fixture `30/ext² = 1.0021` at
+ * n = 240..960 (1.0030 at n=64, 1.0038 at n=120: its extent is itself slightly n-dependent) —
+ * within 0.4 % of the old default, a coincidence of that one fixture and not a property of the
+ * ruling.
  *
  * NOT RE-ENTRANT, for the same reason `HierarchicalA` is not (`apply.ts`): the workspace, the
  * scratch and the wrapped `LowOrderA` are shared, and GMRES calls this inside its loop.
@@ -51,8 +59,10 @@
  * @see .superpowers/sdd/2026-09-11-phase2h-queue/scratch/gmres_lab.py:174-194
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §2.3, §5.2, §5.3, §7.8, §11.2 task 6
  * @issue utof/repulsive-test2#59
+ * @issue utof/repulsive-test2#72
  */
 import type { Edge, Vec3 } from '../../testConfigs';
+import { curveExtent } from './extent';
 import {
     assembleCurveLaplacian,
     type LaplacianWorkspace,
@@ -63,6 +73,23 @@ import {
 import { applyLowOrderColumns, type LowOrderA } from './lowOrder';
 
 /**
+ * The dimensionless mass parameter `m̂ = massWeight·ext²` of the default mass weight
+ * `m̂/ext²` (`ext` = {@link curveExtent}). RULED 30 by amendment A20: a PRE-REGISTERED
+ * minimax-absolute-`κ_excl` criterion at n=960, over 8 shapes x 4-6 sizes x 19-27 mass values.
+ *
+ * Why a named export and not a literal in a `??`: A20 flags the minimax point DRIFTING UP with n
+ * (15 / 20 / 20 / 25 / 30 at n = 64 / 120 / 240 / 480 / 960 on the four shapes present at every
+ * n; an extrapolation to N=30 000 suggests 40-45, UNMEASURED). The constant is NOT frozen on
+ * n <= 960 data — task 9 re-checks it at n >= 4 000 — so it must be referenceable by name there.
+ * Do not extrapolate it here.
+ *
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §11.2 (mass-weight ruling, SUPERSEDED by amendment A20 -- see §10.2's retracted-claims row)
+ * @see .superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/spec-amendments.md A20
+ * @issue utof/repulsive-test2#72
+ */
+export const DEFAULT_MASS_WEIGHT_HAT = 30;
+
+/**
  * Options of {@link makePreconditioner}.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8, §11.2
  */
@@ -70,8 +97,19 @@ export interface PreconditionerOptions {
     /** `(−Δ)`'s stiffness weight. Default 1. */
     stiffnessWeight?: number;
     /**
-     * `(−Δ)`'s mass weight. Default **1** — spec §11.2's mass-weight ruling (`<= 0` is singular,
-     * 1e-3 breached 7 of 9 measured cases). See the module TSDoc's provenance note.
+     * `(−Δ)`'s mass weight, in units of `length⁻²`. Default **`DEFAULT_MASS_WEIGHT_HAT / ext²`**
+     * (= `30/ext²`), `ext` = the curve's maximum bounding-box side ({@link curveExtent}) — spec
+     * §11.2's mass-weight ruling as SUPERSEDED by amendment A20. The old default was a bare `1`,
+     * which is dimensionally scale-dependent (stiffness scales as `length⁻¹`, mass as `length⁺¹`),
+     * so the mass TERM is now dimensionally correct. An EXPLICIT value is still a RAW ABSOLUTE
+     * override — no `ext²` is applied to it (semantics unchanged); it must be `> 0`
+     * (`<= 0` is singular).
+     *
+     * Do NOT read this as "the operator is scale-equivariant": `buildBvh` is not (`bvh.ts`'s
+     * SCALE PRECONDITION, issue #69), so the composite still depends on the curve's scale through
+     * the tree.
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §11.2 (mass-weight ruling, SUPERSEDED by A20 -- see §10.2's retracted-claims row)
+     * @issue utof/repulsive-test2#72
      */
     massWeight?: number;
     /**
@@ -274,12 +312,29 @@ export function makePreconditioner(
             `makePreconditioner: knock-out L^{2-s} in a production preconditioner (variant=${lowOrder.variant}); pass knockOut: true in a test`,
         );
     }
-    const sys = assembleCurveLaplacian(
-        vertices,
-        edges,
-        opts.stiffnessWeight ?? 1,
-        opts.massWeight ?? 1,
-    );
+    // The default mass weight is `m̂/ext²` (issue #72, amendment A20), so `ext` is only needed — and
+    // only validated — when no explicit override is given; an explicit `massWeight` stays a raw
+    // absolute value exactly as before. The guard rejects `ext = 0` (all vertices coincident, or
+    // n <= 1) and a non-finite `ext` (a NaN/Infinity coordinate).
+    //
+    // IT IS A DIAGNOSTIC GUARD, NOT THE ONLY LINE OF DEFENCE — MEASURED by deleting it: a coincident
+    // curve (`30/0 = Infinity`) still dies in `assembleCurveLaplacian`'s zero-length-edge check, a
+    // NaN coordinate (`30/NaN`) as "massWeight=NaN makes the system singular", an Infinity
+    // coordinate (`30/Infinity² = 0`) as "massWeight=0 makes the system singular". An infinite mass
+    // weight cannot reach the solve. What the guard buys is the message: those three errors blame a
+    // weight or an edge the caller never chose, and none mentions the extent. `precond.test.ts`
+    // pins the message, which is what deleting the guard changes — do not delete it as redundant.
+    let massWeight = opts.massWeight;
+    if (massWeight === undefined) {
+        const ext = curveExtent(vertices);
+        if (!(ext > 0) || !Number.isFinite(ext)) {
+            throw new Error(
+                `makePreconditioner: curve extent=${ext} is not usable for the default massWeight = ${DEFAULT_MASS_WEIGHT_HAT}/ext² (all vertices coincident, n<=1, or a non-finite coordinate); pass massWeight explicitly or fix the curve (issue #72)`,
+            );
+        }
+        massWeight = DEFAULT_MASS_WEIGHT_HAT / (ext * ext);
+    }
+    const sys = assembleCurveLaplacian(vertices, edges, opts.stiffnessWeight ?? 1, massWeight);
     const state: PrecondState = {
         n,
         sigma,

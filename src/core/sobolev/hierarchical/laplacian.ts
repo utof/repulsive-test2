@@ -22,8 +22,12 @@
  * with a derived 1000*N*u_f64 stability bar plus a 4-digit fidelity check against out-tridiag.json.
  *
  * SINGULAR CASE: pure stiffness has the constants in its kernel on open AND closed curves, so
- * `massWeight <= 0` THROWS (no pseudo-inverse route). Default `massWeight = 1`: mass-weight ruling,
- * spec §11.2 / §12 q1 (CLOSED at 1). It stays a runtime parameter; only the default is decided.
+ * `massWeight <= 0` THROWS (no pseudo-inverse route). This function's own raw default is
+ * `massWeight = 1` (spec §11.2 / §12 q1, decided on solve residuals at mass=1 on normalised curves).
+ * That is NOT the preconditioner's default: `massWeight` has units `length⁻²`, so a bare constant is
+ * scale-dependent, and `makePreconditioner` passes `30/ext²` instead (`precond.ts`
+ * `DEFAULT_MASS_WEIGHT_HAT`, issue utof/repulsive-test2#72). A caller that omits it here gets the
+ * scale-dependent 1. It stays a runtime parameter.
  *
  * @see https://arxiv.org/abs/2107.01664 §5.2 (the preconditioner)
  * @see Numerical Recipes §2.7 (`cyclic`, Sherman-Morrison cyclic solve)
@@ -63,7 +67,8 @@ export interface TriSystem {
 /**
  * Assembles `stiffnessWeight*L + massWeight*M`; derives `closed` from the edge list.
  * @throws CurveTopologyError on unrepresentable topology, zero-length edges, or `massWeight <= 0`.
- * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §11.2 (default massWeight = 1)
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §11.2 (mass-weight ruling; the preconditioner's default is superseded by A20, see the module TSDoc)
+ * @issue utof/repulsive-test2#72
  */
 export function assembleCurveLaplacian(
     vertices: Vec3[],

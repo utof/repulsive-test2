@@ -10,12 +10,17 @@
  * or `out-accuracy.json` number, which belong to extent-1.0 curves.
  *
  * AND NO `κ` FIGURE HERE MAY BE STATED WITHOUT ITS EXTENT. The lab's `Ã⁻¹` is scale-invariant to
- * 7-9 significant digits; the shipped `massWeight = 1` one is NOT, because stiffness element
- * matrices scale as `length⁻¹` and mass as `length⁺¹`, so `massWeight` carries units of
- * `length⁻²`. MEASURED (`task-6d-report.md`, "Follow-up: scale dependence"): `κ_excl` moves 62x at
- * n=64 (8.87 -> 553.1) and 53x at n=1920 (20.3 -> 1081.4) between extent 5.4716 and extent 1.0. So
- * "the shipped operator conditions ~150x better than the lab" is true ONLY at extent 5.4716; at
- * extent 1.0 it is ~2.8x. Every κ test below ASSERTS the extent it measured at.
+ * 7-9 significant digits. The shipped one WAS NOT while its default was a bare `massWeight = 1`,
+ * because stiffness element matrices scale as `length⁻¹` and mass as `length⁺¹`, so `massWeight`
+ * carries units of `length⁻²`. MEASURED (`task-6d-report.md`, "Follow-up: scale dependence"):
+ * `κ_excl` moved 62x at n=64 (8.87 -> 553.1) and 53x at n=1920 (20.3 -> 1081.4) between extent
+ * 5.4716 and extent 1.0. The default is now `30/ext²` (@issue utof/repulsive-test2#72, amendment
+ * A20), so the MASS TERM is dimensionally correct; `buildBvh` still is not (`bvh.ts` SCALE
+ * PRECONDITION, #69), so the composite is only NEARLY scale-free — the #72 `describe` below
+ * measures how nearly. The trefoil fixture sits at extent 5.4716, where
+ * `30/ext² = 1.0021` — a coincidence of this one fixture that makes the old and new defaults agree
+ * to 0.2-0.4 %, and the reason every κ below moved by under 1 % when the default changed. Every κ
+ * test still ASSERTS the extent it measured at.
  *
  * `κ_eig(Ã⁻¹A_σ)` IS MEASURED HERE, on the operator `src/` ships. `Ã⁻¹A_σ` is a product of two
  * SPD matrices and is therefore not symmetric, but with `A_σ = R Rᵀ` it is SIMILAR to `Rᵀ Ã⁻¹ R`,
@@ -56,6 +61,7 @@ import { applyA, applyAScalar, prepareA } from '../../../src/core/sobolev/hierar
 import { buildBct } from '../../../src/core/sobolev/hierarchical/bct';
 import { buildBvh } from '../../../src/core/sobolev/hierarchical/bvh';
 import {
+    assembleCurveLaplacian,
     CurveTopologyError,
     makeLaplacianWorkspace,
     solveLaplacian,
@@ -67,7 +73,10 @@ import {
     prepareLowOrder,
 } from '../../../src/core/sobolev/hierarchical/lowOrder';
 import { makeHierarchicalOperator } from '../../../src/core/sobolev/hierarchical/operator';
-import { makePreconditioner } from '../../../src/core/sobolev/hierarchical/precond';
+import {
+    DEFAULT_MASS_WEIGHT_HAT,
+    makePreconditioner,
+} from '../../../src/core/sobolev/hierarchical/precond';
 import type { Edge, Vec3 } from '../../../src/core/testConfigs';
 import { cholesky, cholSolve, densify, matmul, spectrum, transpose } from './denseSpectrum';
 
@@ -103,7 +112,10 @@ const randVec = (n: number, seed: number): Float64Array => {
 };
 
 interface BuildOpts {
+    /** Explicit raw `massWeight`; `undefined` is the production default `30/ext²` (#72). */
     massWeight?: number;
+    /** Uniform scale applied to the trefoil's vertices; default 1 (extent 5.4716). */
+    geomScale?: number;
     dropConstantMode?: boolean;
     /** Default `'vertex'`, the production variant; `'rs-identity'` needs `knockOut` (precond.ts). */
     variant?: LowOrderVariant;
@@ -111,7 +123,13 @@ interface BuildOpts {
 
 const cache = new Map<string, ReturnType<typeof build>>();
 function build(n: number, opts: BuildOpts = {}) {
-    const { vertices, edges } = trefoil(n);
+    const fixture = trefoil(n);
+    const g = opts.geomScale ?? 1;
+    const vertices: Vec3[] =
+        g === 1
+            ? fixture.vertices
+            : fixture.vertices.map((v): Vec3 => [g * v[0], g * v[1], g * v[2]]);
+    const edges = fixture.edges;
     const bvh = buildBvh(vertices, edges, LEAF, EPS_A);
     const source = { kind: 'lists', bct: buildBct(bvh, { theta: THETA }) } as const;
     const H = prepareA(bvh, n, source, { alpha: ALPHA, beta: BETA, epsilon: EPS_A });
@@ -135,7 +153,11 @@ function build(n: number, opts: BuildOpts = {}) {
     return { vertices, edges, bvh, H, op, Lo, P };
 }
 function prep(n: number, opts: BuildOpts = {}) {
-    const k = `${n}/${opts.massWeight ?? 1}/${opts.dropConstantMode ?? false}/${opts.variant ?? 'vertex'}`;
+    // `?? 'default'`, NOT `?? 1`: the default stopped being 1 with issue #72, and with the old key
+    // `prep(n)` and `prep(n, { massWeight: 1 })` collided on one cache slot — the "mass=1" row of the
+    // weight-variation test silently became the default operator (delta exactly 0, norm ratio
+    // exactly 1) and the test stayed green. MEASURED when the default changed.
+    const k = `${n}/${opts.massWeight ?? 'default'}/${opts.geomScale ?? 1}/${opts.dropConstantMode ?? false}/${opts.variant ?? 'vertex'}`;
     let v = cache.get(k);
     if (!v) {
         v = build(n, opts);
@@ -144,7 +166,15 @@ function prep(n: number, opts: BuildOpts = {}) {
     return v;
 }
 
-/** The fixture's bbox max extent — the number every oracle κ is conditional on (module TSDoc). */
+/**
+ * The fixture's bbox max extent — the number every oracle κ is conditional on (module TSDoc).
+ *
+ * DELIBERATELY A SECOND, INDEPENDENT COPY of `src/core/sobolev/hierarchical/extent.ts`
+ * `curveExtent`: the default-mass-weight test below asserts `massWeight === 30/ext²`, and a test
+ * that took `ext` from the code under test would be checking production against itself — a
+ * defect both paths share (`hi` instead of `hi − lo`) would pass. Do NOT replace this with an
+ * import (memory `common-mode-blindness`; @issue utof/repulsive-test2#72).
+ */
 function extentOf(vertices: Vec3[]): number {
     let ext = 0;
     for (let d = 0; d < 3; d++) {
@@ -356,8 +386,10 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
         const kExc: number[] = [];
         for (const n of ns) {
             const { vertices, H, op, P } = prep(n);
-            // A-SCALE: the κ of the shipped operator is NOT scale-invariant (module TSDoc, 53-62x
-            // between extent 5.4716 and 1.0), so a number without its extent is not a measurement.
+            // A-SCALE: the κ of the shipped operator was NOT scale-invariant under the old bare
+            // `massWeight = 1` (module TSDoc, 53-62x between extent 5.4716 and 1.0) and is only
+            // NEARLY so now (the #72 describe below), so a number without its extent is still not a
+            // measurement.
             const ext = extentOf(vertices);
             log(`extent n=${n}`, ext);
             expect(ext / EXTENT).toBeCloseTo(1, 2);
@@ -478,8 +510,9 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
             densifyASigma(prep(n, { variant: 'rs-identity' }).H, base.op.sigma, n),
             n,
         );
-        // Every κ is conditional on the fixture's extent (module TSDoc): the same operator's κ
-        // moves 53-62x between extent 5.4716 and 1.0, so a κ without its extent is not a
+        // Every κ is conditional on the fixture's extent (module TSDoc): under the old bare
+        // `massWeight = 1` the same operator's κ moved 53-62x between extent 5.4716 and 1.0, and
+        // it is still only nearly scale-free through the BVH, so a κ without its extent is not a
         // measurement. @see utof/repulsive-test2#72
         expect(extentOf(prep(n).vertices) / EXTENT).toBeCloseTo(1, 2);
         log('κ_excl production', kExcGood);
@@ -793,9 +826,11 @@ describe('precond: symmetry and definiteness on 1⊥', () => {
 describe('precond: the mass-weight provenance gap (module TSDoc)', () => {
     test('how far the production Ã⁻¹ moves as massWeight varies', () => {
         // The lab's `D⁺` is `pinv(Π Lap Π)` of the PURE-STIFFNESS Laplacian (`gmres_lab.py:95-110`,
-        // singular). Production cannot use it — `massWeight <= 0` throws (laplacian.ts) — so
-        // `massWeight = 1` is the ruling and the two operators differ. This measures by how much,
-        // instead of assuming the oracle's `κ_eig` transfers.
+        // singular). Production cannot use it — `massWeight <= 0` throws (laplacian.ts) — so a
+        // positive mass weight (default `30/ext²`, #72) is the ruling and the two operators
+        // differ. This measures by how much, instead of assuming the oracle's `κ_eig` transfers.
+        // The reference is the DEFAULT; the explicit values are raw absolute overrides, and the
+        // `1` row is a genuinely different operator from the default (`30/ext² = 1.0021` here).
         const n = 240;
         const base = prep(n);
         const r = randVec(n, 61);
@@ -817,9 +852,11 @@ describe('precond: the mass-weight provenance gap (module TSDoc)', () => {
             // irrelevant to Krylov (`κ_eig(cM A) = κ_eig(M A)`). The scale-invariant quantity —
             // does the preconditioner point the same way — is the angle, so both are recorded and
             // the norm one must not be read as "the operators disagree by 234x".
-            log(`mass=${massWeight}: ‖ΔÃ⁻¹‖/‖Ã⁻¹(mass=1)‖ on r⊥1`, Math.sqrt(num) / l2(ref, n));
-            log(`mass=${massWeight}: ‖Ã⁻¹‖/‖Ã⁻¹(mass=1)‖`, l2(got, n) / l2(ref, n));
-            log(`mass=${massWeight}: cos∠(Ã⁻¹r, Ã⁻¹(mass=1)r)`, dot / (l2(got, n) * l2(ref, n)));
+            // NOTE the `mass=1` row is NOT the reference any more: it differs from the default by
+            // `30/ext² − 1 = 0.0021`, which is what a cache-key collision used to hide.
+            log(`mass=${massWeight}: ‖ΔÃ⁻¹‖/‖Ã⁻¹(default)‖ on r⊥1`, Math.sqrt(num) / l2(ref, n));
+            log(`mass=${massWeight}: ‖Ã⁻¹‖/‖Ã⁻¹(default)‖`, l2(got, n) / l2(ref, n));
+            log(`mass=${massWeight}: cos∠(Ã⁻¹r, Ã⁻¹(default)r)`, dot / (l2(got, n) * l2(ref, n)));
         }
         // `massWeight <= 0` is the lab's pure-stiffness limit and is SINGULAR on a closed curve
         // (constants in the kernel of pure stiffness); `laplacian.ts` refuses it rather than
@@ -871,6 +908,154 @@ describe('precond: the mass-weight provenance gap (module TSDoc)', () => {
         expect(Number.isFinite(out[0])).toBe(true);
         // And the production variant still goes through with no flag.
         expect(() => makePreconditioner(vertices, edges, prep(n).Lo, op.sigma)).not.toThrow();
+    });
+});
+
+describe('precond: the default mass weight is 30/ext² (issue #72, amendment A20)', () => {
+    // `30` IS A LITERAL IN THIS BLOCK, on purpose, and `ext` comes from `extentOf` above, never from
+    // `curveExtent`: a test that read either from the code under test would pass when production
+    // changed the constant or the extent definition (memory `common-mode-blindness`).
+    // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §11.2 (mass-weight ruling, SUPERSEDED by A20)
+
+    test('DEFAULT_MASS_WEIGHT_HAT is the ruled 30 (A20)', () => {
+        // The one place the constant is pinned BY NAME. Task 9 re-checks it at n >= 4000 and may
+        // change it; this line and the literal 30s below must then change TOGETHER — the literals
+        // are what prove production USES the constant, this is what stops it drifting unseen.
+        expect(DEFAULT_MASS_WEIGHT_HAT).toBe(30);
+    });
+
+    test('P.sys is assembled with massWeight = 30/ext², bit-for-bit', () => {
+        for (const n of [64, 240]) {
+            const { vertices, edges, P } = prep(n);
+            const ext = extentOf(vertices);
+            expect(ext / EXTENT).toBeCloseTo(1, 2);
+            // `ext * ext`, not `ext ** 2`: the same operation order as production, so the match is
+            // bit-exact rather than "close".
+            const want = assembleCurveLaplacian(vertices, edges, 1, 30 / (ext * ext));
+            log(`30/ext² n=${n}`, 30 / (ext * ext));
+            expect(P.sys.b).toEqual(want.b);
+            expect(P.sys.a).toEqual(want.a);
+            expect(P.sys.c).toEqual(want.c);
+            expect(P.sys.cornerTR).toBe(want.cornerTR);
+            expect(P.sys.cornerBL).toBe(want.cornerBL);
+            // The check can tell the new default from the old: `30/ext² = 1.0021 ≠ 1` on this
+            // fixture, small but not zero, so a regression to a bare 1 changes the bands.
+            const old = assembleCurveLaplacian(vertices, edges, 1, 1);
+            expect(P.sys.b).not.toEqual(old.b);
+        }
+    });
+
+    test('the default mass term scales like the stiffness term: S(λV) = S(V)/λ', () => {
+        // `massWeight` has units length⁻²: stiffness elements are `1/l`, mass elements `mass·l/6`.
+        // Under V → λV only `massWeight ∝ 1/λ²` keeps `S = L + mass·M` ∝ 1/λ. This is the defect
+        // #72 names, tested on the assembled bands directly, so it is independent of the BVH and
+        // of every κ bar. `Lo` below is the UNscaled curve's `L^{2−s}`: `makePreconditioner` checks
+        // only its `n`, and `.sys` does not read it.
+        const n = 64;
+        const { vertices, edges, Lo, op, P } = prep(n);
+        const worstDefect = (opts: { massWeight?: number }, lam: number): number => {
+            const scaled = vertices.map((v): Vec3 => [lam * v[0], lam * v[1], lam * v[2]]);
+            const Ps = makePreconditioner(scaled, edges, Lo, op.sigma, opts);
+            let worst = 0;
+            for (const band of ['a', 'b', 'c'] as const) {
+                let top = 0;
+                for (let i = 0; i < n; i++) top = Math.max(top, Math.abs(P.sys[band][i]));
+                for (let i = 0; i < n; i++) {
+                    worst = Math.max(worst, Math.abs(lam * Ps.sys[band][i] - P.sys[band][i]) / top);
+                }
+            }
+            for (const corner of ['cornerTR', 'cornerBL'] as const) {
+                worst = Math.max(
+                    worst,
+                    Math.abs(lam * Ps.sys[corner] - P.sys[corner]) / Math.abs(P.sys[corner]),
+                );
+            }
+            return worst;
+        };
+        for (const lam of [1 / extentOf(vertices), 0.01, 7.3, 1000]) {
+            const defect = worstDefect({}, lam);
+            log(`max band defect |λ·S(λV) − S(V)|/|S(V)|, default, λ=${lam}`, defect);
+            expect(defect).toBeLessThan(1e-12);
+        }
+        // NEGATIVE CONTROL: an explicit massWeight is a RAW ABSOLUTE override (precond.ts), so
+        // `massWeight: 1` — the old default — must FAIL the same check, by a lot.
+        const raw = worstDefect({ massWeight: 1 }, 7.3);
+        log('max band defect, explicit massWeight=1 (the old default), λ=7.3', raw);
+        expect(raw).toBeGreaterThan(1e-2);
+    });
+
+    test('an explicit massWeight is used verbatim, and bypasses the extent', () => {
+        const n = 64;
+        const { vertices, edges, Lo, op } = prep(n);
+        const P = makePreconditioner(vertices, edges, Lo, op.sigma, { massWeight: 2.5 });
+        const want = assembleCurveLaplacian(vertices, edges, 1, 2.5);
+        expect(P.sys.b).toEqual(want.b);
+        expect(P.sys.a).toEqual(want.a);
+        // Lazily validated: a coincident-vertex curve with an explicit weight dies in
+        // `assembleCurveLaplacian`'s zero-length-edge check, NOT in the extent guard.
+        const point: Vec3[] = vertices.map((): Vec3 => [1, 2, 3]);
+        let caught: unknown;
+        try {
+            makePreconditioner(point, edges, Lo, op.sigma, { massWeight: 1 });
+        } catch (e) {
+            caught = e;
+        }
+        expect(caught).toBeInstanceOf(CurveTopologyError);
+        expect((caught as Error).message).not.toMatch(/extent/);
+    });
+
+    test('a degenerate or non-finite extent is refused by name, not turned into an Infinity weight', () => {
+        // `ext = 0` (all vertices coincident) ⇒ `30/0 = Infinity`; `assembleCurveLaplacian` rejects
+        // only `massWeight <= 0`, so Infinity passes ITS guard. What stops a coincident curve
+        // downstream is its zero-length-edge check, whose message never mentions the extent — so
+        // these assertions pin the MESSAGE, which is what deleting the guard changes.
+        const n = 64;
+        const { vertices, edges, Lo, op } = prep(n);
+        const make = (vs: Vec3[]) => () => makePreconditioner(vs, edges, Lo, op.sigma);
+        expect(make(vertices.map((): Vec3 => [1, 2, 3]))).toThrow(/extent=0\b/);
+        const withNaN = vertices.map((v): Vec3 => [...v]);
+        withNaN[7][1] = Number.NaN;
+        expect(make(withNaN)).toThrow(/extent=NaN/);
+        const withInf = vertices.map((v): Vec3 => [...v]);
+        withInf[7][2] = Number.POSITIVE_INFINITY;
+        expect(make(withInf)).toThrow(/extent=Infinity/);
+        // The guard is on the DEFAULT path only: it did not change which curves are accepted.
+        expect(make(vertices)).not.toThrow();
+    });
+
+    test('κ_excl is (nearly) scale-free under the default: extent 1.0 and 16.4 vs 5.4716', () => {
+        // The measurement behind #72. MEASURED (this task): under the old bare `massWeight = 1`,
+        // `κ_excl` at extent 1.0 was 553.1 / 929.0 at n=64 / 240 against 8.87 / 16.2 at extent 5.4716
+        // (62x / 57x). Under `30/ext²` it reads 8.89 / 15.91 at extent 1.0 and 8.89 / 16.26 at
+        // extent 16.4 (ratios 1.000 / 0.981 and 1.000 / 1.003). NOT EXACT, and not meant to be: the
+        // residual is `buildBvh`'s own scale dependence (`bvh.ts` SCALE PRECONDITION, issue #69),
+        // which #72 does not touch. BAR 10 %: 5x over the measured BVH residual, 5.7x under the
+        // defect it exists to catch. If #69 lands this bar can tighten; do not loosen it.
+        const kExcl = (n: number, o: BuildOpts) => {
+            const { H, op, P } = prep(n, o);
+            const sp = kappaOf(
+                densify(n, (u, out) => P.applyScalar(u, out)),
+                densifyASigma(H, op.sigma, n),
+                n,
+            );
+            // `λ₂` is the smallest 1⊥ eigenvalue ONLY while the pinned constant mode (λ = 1) is the
+            // global minimum. Asserted, because past it `κ_excl` silently excludes the wrong mode.
+            expect(sp.lambda2).toBeGreaterThan(1.5);
+            return sp.lambdaMax / sp.lambda2;
+        };
+        for (const n of [64, 240]) {
+            const ext = extentOf(prep(n).vertices);
+            const base = kExcl(n, {});
+            const unit = kExcl(n, { geomScale: 1 / ext });
+            const wide = kExcl(n, { geomScale: 3 });
+            const old = kExcl(n, { geomScale: 1 / ext, massWeight: 1 });
+            log(`κ_excl n=${n} extent 5.4716 / 1.0 / 16.4, default`, `${base} / ${unit} / ${wide}`);
+            log(`κ_excl n=${n} extent 1.0, OLD default massWeight=1`, old);
+            expect(Math.abs(unit / base - 1)).toBeLessThan(0.1);
+            expect(Math.abs(wide / base - 1)).toBeLessThan(0.1);
+            // The control that makes the two bars above mean something: the old default is 60x off.
+            expect(old / base).toBeGreaterThan(10);
+        }
     });
 });
 
