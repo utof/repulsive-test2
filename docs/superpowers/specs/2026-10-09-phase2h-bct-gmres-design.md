@@ -3008,7 +3008,12 @@ must return a solver for the **full saddle** `[[Ā, Cᵀ], [C, 0]]` — `gradien
 `rhsBottom = −Φ(γ^q)` (`lineSearch.ts:276-277`). **VERIFIED: `src/core/sobolev/hierarchical/` contains
 ZERO constraint machinery** — a grep for `schur|Schur|lambda|constraint` over all ten files returns
 nothing outside comments, **none of its 38 exported functions takes a `C: number[][]`**, and
-`schur.ts` does not exist. `gmres` solves `A_σ x = b` only. **So the producer cannot produce a working
+`schur.ts` does not exist. **The negative claim was then re-verified across spellings rather than left
+on one grep** (CLAUDE.md `capability-claims-need-falsifying`), and it is stronger than first stated:
+`grep -rn 'number\[\]\[\]' src/core/sobolev/hierarchical/*.ts` returns **zero hits for ANY parameter
+name**, and no exported symbol in the directory — of 38 functions plus 9 consts, interfaces and types
+included — has a name matching `constr|schur|saddle|lagrang|lambda|project|null`. Both checks are one
+command each, so a future reader can falsify this rather than trust it. `gmres` solves `A_σ x = b` only. **So the producer cannot produce a working
 solver before `schur.ts` exists**, and `schur.ts` is row 9b. **Row 9b is promoted ahead of 8b;** the
 new order is **9b → 8b → 9 → 9c → 10 → 11.** Row 9 (`nullspace.ts`) stays after 8b: it serves the
 `k = O(n)` route, which 8b's `k = O(1)` end-to-end cell does not need.
