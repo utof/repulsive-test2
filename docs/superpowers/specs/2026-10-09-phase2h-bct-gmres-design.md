@@ -3032,9 +3032,9 @@ verification are here.
 | 6 | `lowOrder.ts` + `precond.ts` — `L_{2−s}`, `Ã⁻¹`, constant-mode correction | new + test | **H5, all three properties** (§7.8): `dim null(L^{2−s}) == 1` (defect variant gives 2); **property 2's live bar is the per-fixture level `κ_excl ≤ 40` on the unnormalised trefoil at n = 64/120/240/480/960, SHIPPED. `\|p\| ≤ 0.05` is WITHDRAWN (A22) and so is saturation `R ≤ 0.75` (A32): on the shipped operator at θ=0.5 (§4.1's ruled target; `DEFAULT_THETA` is still 0.25) `κ_excl` is non-monotone, so `R` = 1.6509 on 240/480/960 (fails on a CORRECT operator) and −0.4354 on the registered 480/960/1920 (passes vacuously). `R` is logged, never asserted**; **`κ_excl(Ã⁻¹A_σ)·u_inner ≤ 1e-2`** — the precondition of the whole mixed-precision scheme. Both knock-outs trip; `λ₁`/`λ₂`/`λ_max`/`rankTol` reported so nullity is falsifiable; nullity ≥ 3 ⇒ INVALID, not RED |
 | 7 | `gmres.ts` — left-preconditioned GMRES exposing `x̃`, `b`, `iters`, `maxit`, `tol`, the per-iteration recurrence residual **and an `η` probe hook on the χ=0 matvec with a recorded probe stride** (§7.3) | new + test | **H2 + H3** on one instrument. ~~The right-preconditioning knock-out must trip (`cos∠_A = 0.142` at n=480 while recurrence reads 1e-4)~~ **RE-ASSIGNED 2026-10-11 to task 10, with a new observable — see §5.3's correction box. This task CANNOT host it:** the knock-out needs a genuine f32 matvec, and `cos∠_A = 0.142` was never the right number (it is an f32 artefact of `e2_inexact.py:120-122`, not a side effect; in f64 right-preconditioning gives `cos∠_A = 1.000000` at every n). The replacement observable is **`cos∠_A ≤ 0` for `side: 'right'` under an f32 matvec at n=960** (MEASURED −0.136 median, −0.273 min) against left's 0.9991 — falsifiable, and it has a sign change rather than a magnitude to argue about. **What task 7 DOES own instead:** the `side` plumbing differential (reviewer B: each of 3 side-plumbing mutants fails 9–17 tests) and the guard refusing `side: 'right'` without `knockOut: true`. The recurrence-residual-as-η knock-out must trip RED at 34× the bar; **`η_exact` must never be bit-equal to `η_bct`** (both computed); `iters == maxit` and any-direction-censored ⇒ INVALID, and compare against `maxit`, **never** against `n`; **the gated η is `η_bct` (A21, §7.3) and `etaTarget` must read `η_bct`** |
 | 8 | Seam: the `kind`-tagged `PreparedSaddle` and `FrozenSaddleOperator` unions, `HierarchicalSaddleSolver`, operator-shaped `structuredSaddleResidual`, **and the `projectOntoConstraintSet` hierarchical route** (§5.1) | `linsolve.ts`, `gradient.ts`, **`optimizer.ts`**, **`lineSearch.ts`**, **`src/gpu/saddle.ts`** | **the dense branch stays byte-identical** — **the existing goldens CANNOT measure this (A24, 2026-10-11); a bit-level dense-path golden was a PRE-TASK-8 deliverable and task 8 was BLOCKED until it existed** (box below). **DISCHARGED 2026-10-11 at `d3672c2`** — `test/sobolev/denseSaddleBitGolden.{test.ts,json}`, 44 tests, 26 728 numbers pinned with `Object.is`, captured with all five seam files untouched vs `main` (SHA-256 recorded in `provenance.seamFileSha256`). **Non-vacuity proven by mutation and independently reproduced by the controller:** a one-ULP perturbation of `z[0]` in `solveSaddleFrozen` turns the new gate **41/44 RED while all 54 pre-existing files stay 708/0 green**; same clean contrast for a one-ULP `x[0]` in `lineSearch.ts`'s reassemble projection branch, `Math.fround` on `structuredSaddleResidual`, and a one-ULP `a[0]` in `gradient.ts`'s Prepared arm. **Known sensitivity limit:** a 1-ULP change to an O(1e-3) projection correction is partly absorbed when added to an O(1) coordinate, so T1 (which pins the solve before absorption) is the sharp instrument, not T2/T3. **WARNING for this task, from the same mutation sweep: `test/gpu/dESeam.test.ts:91` (`expect(scaled.energy).not.toBe(baseline.energy)`) rides on ~3 ULP of rounding by its own comment's admission and flips in EITHER direction on any change to the arithmetic realisation (`@issue utof/repulsive-test2#80`). If it goes red during this task, check whether the two energies became bit-equal BEFORE concluding you caused a regression**; `kind: 'dense'` ⇒ bit-identical, and `optimizer.ts:291`'s dense throw message is pinned by `test/gpu/saddleSeam.test.ts:287-298`. `bunx tsc --noEmit` clean is a hard gate here: the first-draft `A?` delta produced TS18048 + TS2322  **SHIPPED 2026-10-11 at `a8569d8`** — 11 files, 650+/17−; `tsc` 0, suite **762/0/56**, golden fixture byte-identical to `d3672c2` (`cmp` empty), golden 44/44, all four verified by the controller. `lineSearch.ts` needed **comment only** (`+10/−0`): because `solveSaddleFrozen` dispatches on `kind` internally, `projectOntoConstraintSet`'s body is byte-for-byte unchanged, which is what §1.4 demands. Non-vacuity run not asserted: two `src` mutants each turn exactly one of the 10 new tests red (controller independently reproduced the residual-reordering mutant: 1 fail, the named test, 9 pass). **Guard shape corrected — see A25 in §5.1.** |
-| 8b ⛔ **RUNS AFTER 9b — see the A33 box below** | **`hierarchicalSaddle.ts` — the producer.** A `makeHierarchicalSaddle(vertices, …): HierarchicalPreparedSaddle` factory plus its wiring through `dispatch.ts` → `optimizer.ts` `opts.saddle` | new + `dispatch.ts` | **without this the phase ships an unreachable feature**: tasks 1–8 widen a public type that nothing in the repo ever writes, and the dense path stays bit-identical only because it is still the only path. End-to-end: one `sobolevStepSet` on the hierarchical route at n=960, `cos∠_A ≥ 0.9` against the dense f64 reference  **CROSS-TASK CONTRACT FROM TASK 8 (`a8569d8`, binding): this task MUST pass `projectionMode: 'frozen'` when it wires the hierarchical saddle through `dispatch.ts`.** `optimizer.ts:297-318` REFUSES a hierarchical saddle without it, pre-arm, by design: `projectOntoConstraintSet`'s other branch calls `assembleAFlat` **per projection iterate** (O(N²) f64, **7.2 GB at N=30 000**), so the combination cannot run at target scale, and below that scale it would solve the GRADIENT hierarchically while silently reassembling a DENSE Ā for every projection iterate — a step that reads as hierarchical and is not (CLAUDE.md: gates name their impossible values). An auto-upgrade was rejected because `opts` and behaviour would then disagree. **If 8b needs to pass either mode, the throw may be downgraded ONLY with the dense-projection fallback surfaced in `stats`** — nothing downstream can currently distinguish the two. **Also carried to 8b: (R2) `factorMode` is silently inert on the hierarchical arm — add the guard or the one-line TSDoc; (R4) the seam tests cover one fixture (trefoil n=24, k=4) and one step, so 8b owns the k=0 and `edgeLengths` cells against a REAL operator.** |
-| 9 | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately |
-| 9b ⬆️ **PROMOTED AHEAD OF 8b (A33)** | `schur.ts` — the `k=O(1)` half of §8.2's hybrid (barycentre, 3 rows; per-pin, 3 rows; tangent, 1 row) | new + test | the hybrid is a two-branch ruling and the first draft gave a task to only one branch. Dispatch on `k`: Schur for `k=O(1)`, nullspace for `edgeLengths`' `\|E\|` rows. Verify each branch reproduces the dense path's `x` to 1e-10 at n=960 on its own constraint set |
+| 8b ⛔ **RUNS AFTER 9b (now SHIPPED) — see the A33 AND A35 boxes below; A35 carries the k=0-mod-translation rule, the `SolveNotCertifiedError` seam fix, the offset-targets corpus trap, and the fact that `cos∠_A` measures θ's compression and not the solve** | **`hierarchicalSaddle.ts` — the producer.** A `makeHierarchicalSaddle(vertices, …): HierarchicalPreparedSaddle` factory plus its wiring through `dispatch.ts` → `optimizer.ts` `opts.saddle` | new + `dispatch.ts` | **without this the phase ships an unreachable feature**: tasks 1–8 widen a public type that nothing in the repo ever writes, and the dense path stays bit-identical only because it is still the only path. End-to-end: one `sobolevStepSet` on the hierarchical route at n=960, `cos∠_A ≥ 0.9` against the dense f64 reference  **CROSS-TASK CONTRACT FROM TASK 8 (`a8569d8`, binding): this task MUST pass `projectionMode: 'frozen'` when it wires the hierarchical saddle through `dispatch.ts`.** `optimizer.ts:297-318` REFUSES a hierarchical saddle without it, pre-arm, by design: `projectOntoConstraintSet`'s other branch calls `assembleAFlat` **per projection iterate** (O(N²) f64, **7.2 GB at N=30 000**), so the combination cannot run at target scale, and below that scale it would solve the GRADIENT hierarchically while silently reassembling a DENSE Ā for every projection iterate — a step that reads as hierarchical and is not (CLAUDE.md: gates name their impossible values). An auto-upgrade was rejected because `opts` and behaviour would then disagree. **If 8b needs to pass either mode, the throw may be downgraded ONLY with the dense-projection fallback surfaced in `stats`** — nothing downstream can currently distinguish the two. **Also carried to 8b: (R2) `factorMode` is silently inert on the hierarchical arm — add the guard or the one-line TSDoc; (R4) the seam tests cover one fixture (trefoil n=24, k=4) and one step, so 8b owns the k=0 and `edgeLengths` cells against a REAL operator.** |
+| 9 | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately. **A35: this row's bar inherits 9b's amendment — compare against the DD-refined truth, not the dense path, or it is unmeasurable at n=960 for the same reason. And it MUST include a `gen/−φ` cell (generic top with non-zero mean): 9b measured that a flipped multiplier sign is INVISIBLE on every `grad/0` and `zero/−φ` cell of every k=3 set, so a suite without `gen/−φ` ships a sign error.** |
+| 9b ⬆️ **PROMOTED AHEAD OF 8b (A33)** | `schur.ts` — the `k=O(1)` half of §8.2's hybrid (barycentre, 3 rows; per-pin, 3 rows; tangent, 1 row) | new + test | the hybrid is a two-branch ruling and the first draft gave a task to only one branch. Dispatch on `k`: Schur for `k=O(1)`, nullspace for `edgeLengths`' `\|E\|` rows. ~~Verify each branch reproduces the dense path's `x` to 1e-10 at n=960 on its own constraint set~~ **BAR AMENDED, A35: `1e-10` against the DOUBLE-DOUBLE-REFINED TRUTH of the dense matrix of the same operator.** The literal bar is unmeetable BY ANY SOLVER at n=960 — dense LDLᵀ's own error against truth grows `~n^3.3` (4e-14…1.6e-13 at n=120 → **1.4e-10…6.4e-10 at n=960**), so it crosses 1e-10 between n=480 and n=960 and the "disagreement" equals the oracle's own error to 3 digits. Shipped Schur is **3.2e-12…9.1e-12** from truth, **25–200× closer than the oracle it was told to match**. Literal LDLᵀ agreement is asserted at **n ≤ 240** (5.6e-13…5.4e-12) and LOGGED at n=960. **SHIPPED** |
 | **9c** | **The `c` re-check at n ≥ 4 000 — A20's OPEN item, which had NO OWNER until 2026-10-11. A20 points at *"task 9's calibration"*; THIS ROW is what it means.** Row 9 is `nullspace.ts` and does no calibration, and **`9b` was already taken by `schur.ts`** — the item was assigned to a task that cannot do it. Scope: `κ_excl` over a `c` grid at n ≥ 4 000 on the four shapes present at every n (arc / circle / helix / trefoil — A20 proves these carry every binding constraint), **plus `λ₂(n, m̂)` jointly, which issue #78 needs and which is the same eigensolve** | `bench` / `scratch` only — measurement, no `src` change | **Three pre-registered outputs.** (1) The minimax-absolute `c` at n ≥ 4 000, against A20's five-rung trend **15 / 20 / 20 / 25 / 30** at n = 64…960 and its extrapolated **40–45** at N = 30 000 — report whether the trend continues, flattens, or breaks; do NOT bank the extrapolation either way. (2) **Where `λ₂ = 1` falls in `(n, m̂)`** — `κ_excl = λ_max/λ₂` silently measures the wrong mode once `λ₂ < 1` (#78; measured `λ₂` at n=64: 6.62 @ m̂=30 → 0.878 @ m̂=90, and `precond.test.ts`'s module comment records `λ₂ ≈ 1.3` at n=30 000 for the OLD m̂), so if `λ₂ < 1` anywhere in the production regime **every `κ_excl` figure there is not κ_excl** and the N=30 000 conditioning claims rest on a broken instrument. (3) The `rs-identity` knock-out bar `> 100`, re-derived at whatever `c` lands: MEASURED **273.3 at m̂=30, 118.0 at 45, 66.4 at 60** (#78), so it FAILS inside A20's own projected band — re-derive it as part of changing `c`, measuring first, never after a red. |
 | 10 | Mixed precision: f32 inner, f64 outer (§6) | `gmres.ts`, `apply.ts` | **a genuine f32 hierarchical apply through the whole solve** (§9.2's top gap) — locate the wall, do not inherit it |
 | — | ~~GPU wall-clock probe~~ | — | **NOT a task in this phase.** §7.11 item 6 wants one wall-clock matvec at n=30 000 to anchor H3's budget half, but §1.4 puts the GPU apply out of scope and §9.1 concedes the protocol needs "a kernel, when one exists" — so there is nothing to time. **Consequence, pre-registered: H3's budget-derived bar stays unanchored for this phase**, and its only live support is the CPU-f64 projection (§7.4), which §7.4 itself marks as integer-noise-sensitive. Do not quote `0.5 s ÷ 7.8 ms` as measured |
@@ -3071,6 +3071,104 @@ it.** **RE-SCOPED: 8b delivers reachability on the MAIN-THREAD / inline driver o
 in `stats` or TSDoc rather than leaving a UI path that throws. Making the hierarchical route work under
 the worker driver is **a separate, unscheduled task** — it needs the saddle BUILT INSIDE the worker from
 cloneable inputs, which is a different seam from the one tasks 1–8 widened. **Not smuggled into 8b.**
+
+### ⚠️ A35 — task 9b SHIPPED, and it refuted row 9b's bar, my Schur algebra, and two of its own knock-outs
+
+Ruled 2026-10-11 from task 9b's report (`.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-9b-report.md`).
+Delivered `src/core/sobolev/hierarchical/schur.ts` + `test/sobolev/hierarchical/schur.test.ts` (45 tests),
+no existing file touched. **Four of its findings change the spec and three of them are corrections to things I
+wrote.**
+
+**(1) ROW 9b's BAR WAS UNMEETABLE, AND NOT BECAUSE OF THE SOLVER — ACCEPTED, AMENDED ABOVE.** The implementer
+built an independent third instrument (double-double iterative refinement, converging in ONE step to
+`|δz|/|z| = 4.1e-17…5.1e-17`) instead of accepting the oracle I handed it, and measured that **dense LDLᵀ — the
+oracle I named — is 1.4e-10…6.4e-10 from truth at n=960 while the Schur solver is 3.2e-12…9.1e-12.** My bar
+therefore measured the *oracle's* error: a Schur implementation 100× worse would have passed it identically.
+Dense LU is different again (6.4e-11…2.4e-10), which is itself evidence the dense path is not a fixed point.
+**This is the defect class this branch keeps producing — a gate that cannot discriminate what it claims to —
+and this time it was in a bar I wrote in a task row.**
+
+**(2) MY SCHUR ALGEBRA IN THE 9b BRIEF WAS WRONG, AND I HAD ALREADY FLAGGED THE REASON.** I wrote
+`W = A⁻¹Cᵀ`, `S = C W`, `S λ = C y − d`, `x = y − W λ`. **`W` does not exist: `Ā` is SINGULAR**, nullity exactly
+1 per coordinate block (`Ā·1 = 0`; `λ₁ = 3e-15` at n=48, `3e-13` at n=240), and `gmres` can only invert the
+SHIFTED `A_σ`. Substituting `A_σ` for `A` in the textbook reduction **solves the shifted saddle and is wrong by
+1.5e-3…1.7e0 on every pinning set.** The exact reduction needs a `(k+3)`-system carrying the solvability
+condition `Gᵀλ = Nᵀb` with `G = C N` (`N` the per-block constant basis), derived in the module TSDoc and
+**verified in dense arithmetic to 1e-14 BEFORE any GMRES was involved.** I named this interaction in the brief
+— *"the σ shift and the barycentre rows both act on the constant mode, settle it in source, do not guess"* —
+and then wrote the incomplete formula anyway. **Flagging a trap is not the same as not falling into it;** what
+saved it was telling the implementer to let the oracle decide rather than my reasoning.
+
+**(3) THE DENSE PATH IS NOT A REFERENCE FOR `x` WHERE THE SADDLE IS SINGULAR — AND THAT IS 8b's ONLY CELL.**
+On `k = 0` and totalLength-only sets the dense saddle is translation-singular, and **dense LDLᵀ and dense LU
+return DIFFERENT translations for the same system** (`mean(x)` = 6.0e-2 vs 8.0e-2 at n=48, k=0). `schur.ts`
+returns the `A_σ` gauge (`Nᵀx = Nᵀb/σ`). **Consequence for A33, which made `k = 0` the one constraint cell 8b
+owns end-to-end: its dense reference is meaningful only MOD TRANSLATION.** `cos∠_A` is blind to a translation,
+so 8b's stated gate survives untouched — but any literal `x` comparison 8b adds **must remove the per-block
+mean** or it will fail against a correct solver.
+
+**(4) PRODUCTION `tol` RULED `1e-12`, from the measured knee** (A33 recorded that none existed). Error vs truth
+against `tol`: 1e-10 → 2.2e-10…5.7e-10 (**over the bar**), 1e-11 → 2.1e-11…7.3e-11, **1e-12 → 3.7e-12…7.6e-12
+(13× under the bar)**, 1e-13 → 2.2e-12…3.2e-12 (**the floor**), 1e-14 identical to 1e-13. Nothing is bought
+below 1e-13, and 1e-12 costs 46 iterations against 51. `DEFAULT_ETA_ACCEPT = 1e-10` is a **certificate, not the
+accuracy target** (40× above the measured η at the default tol). **Calibration worth keeping: at the stopping
+iterate `η/tol = 1.0…3.7 across n = 48…960`, i.e. the recurrence residual is within 4× of the true BACKWARD
+error at the stop.** That does NOT contradict `gmres.ts`'s 1e8…1e12 under-reporting figure — that one is of the
+relative residual `‖r‖/‖b‖`, a different quantity, and conflating the two would be a provenance error of the
+kind A17 catalogued.
+
+**(5) TWO KNOCK-OUTS ARE BLIND TO THE BAR. Both are recorded rather than papered over, and one of them is a
+near-miss worth naming.**
+- **`lambda-sign` is INVISIBLE on the `grad/0` and `zero/−φ` cells of every k=3 set** (bary, pin), because
+  `Gᵀλ = Nᵀb` with `G` square and invertible forces `λ ≈ 0` for a mean-free top. **A suite of `grad/0` +
+  `zero/−φ` cells alone would have shipped a flipped multiplier sign.** The `gen/−φ` cell catches it and is
+  now a REQUIRED cell, propagated to row 9 above.
+- **`no-symmetrise` is NOT caught at the shipped `tol` on ANY cell.** `S`'s asymmetry is just the GMRES error
+  in `W` (`sDefect` 5e-14…9e-13), so factoring the lower triangle instead of the average moves `x` by < 1e-10.
+  **Ruling: the symmetrisation stays, and it is explicitly NOT protected by the 1e-10 bar** — it is hygiene
+  with a bounded effect. The live gate is the loose-`tol` differential the implementer added (at `tol = 1e-6`
+  on barypin the symmetrised solver is closer in all three cells, asserted as *"unsymmetrised is > 1.1× worse"*).
+  **This is exactly the case CLAUDE.md's anchoring rule exists for: a line a future agent can delete with every
+  test still green.** Its comment must say so.
+- **CORPUS TRAP, and it would have made the whole table read green:** the trefoil is Z₃-symmetric, so a
+  barycentre block AT its own barycentre is a DEGENERATE cell — the naive formula agrees to 7e-15 at n=48 with
+  `λ ≈ 0`. **Constraint targets must be offset so `Φ ≠ 0` in every test.** Carried to rows 9, 9c and 8b.
+
+**(6) SEAM DECISION, ASSIGNED TO 8b, WITH ITS RISK NAMED.** `SchurConvergenceError` / `SchurRouteError` extend
+`ExternalSolveError` because it is the only class the seam lets through uncaught — which does fix A33's
+*"GMRES non-convergence is reported as `'singular_system'`"*, the lesser evil, and the implementer flagged it as
+mine to rule rather than deciding it silently. **But `ExternalSolveError` is documented as the GPU path's
+"could not certify" signal and `driver.ts` treats it as "re-run on the CPU path" — which is the WRONG recovery
+for a CPU GMRES that failed to converge, since re-running it will fail the same way.** RULED: **8b introduces a
+neutral base `SolveNotCertifiedError` in `linsolve.ts` with `ExternalSolveError` extending it, and widens the
+two catches (`optimizer.ts:429`, `lineSearch.ts:321`).** Added to 8b's carry set. Until then the mis-recovery
+is unreachable (nothing builds a hierarchical saddle yet), which is the only reason this is not a blocker.
+
+**(7) THE ACCURACY CEILING ON ANY CROSS-PATH COMPARISON AT n=960 IS ≈2e-10, AND THAT BOUNDS EVERY LATER GATE.**
+Two evaluations of the **same** operator that differ by only **2e-15 relative** — the θ=0 streaming source versus
+`assembleAFlat` — have **true solutions 1.8e-10…2.2e-10 apart at n=960**, an amplification of ~1e5 consistent
+with `κ·u_f64`. So the independent-operator comparison is asserted only at **n=240**. **Generalise this before
+writing any further cross-path bar: at n=960 no comparison between two independently-evaluated operators can
+assert better than ~2e-10, no matter how exact either solver is.** A17's provenance discipline and this are the
+same lesson at two scales.
+
+**(8) THE COMPRESSION ERROR DOMINATES THE SOLVER ERROR BY ~8 ORDERS, WHICH REFRAMES 8b's GATE.** θ=0.25
+compression alone moves `x` by **1.6e-3…4.5e-3** against the true `Ā` solve, against the Schur solver's
+3.2e-12…9.1e-12. **So 8b's `cos∠_A ≥ 0.9` gate measures the OPERATOR's compression, not the solve** — which is
+the right thing for it to measure, but the row must say so, or a future reader will take a passing `cos∠_A` as
+evidence about the linear solver. It is evidence about θ.
+
+**(9) σ-INDEPENDENCE IS THE FALSIFIER FOR THE CORRECTED REDUCTION, and it is clean.** With σ scaled **×4 and
+×0.25**, the shipped `x` moves by **≤ 9.0e-15** (σ cancels exactly, as the derivation requires) while the naive
+route moves by **1.4e-4…1.8e-3**. That is a 1e11 separation between a correct and an incorrect reduction on a
+quantity neither the 1e-10 bar nor the knock-out table looks at — **the strongest single check in this task, and
+it should be the first thing row 9 reproduces for the nullspace route.** `cond(S) ≤ 59.6` across every cell.
+
+**Also confirmed, not assumed:** the `prepare`-once/`solve`-many cost split is structurally pinned by a
+counting preconditioner, not inferred — prepare = 316 applies = Σ(iters+1) over columns, one `solve` = 41, a
+SECOND solve with a different rhs = 48 (**one GMRES, not k**), and a `rhsTop = 0` projection solve = **0
+applies**, short-circuited before `gmres`. `SCHUR_MAX_K = 16`; `edgeLengthsBlock` is refused by name with
+`SchurRouteError`.
 
 **(3) `edgeLengths` is assigned to TWO rows at once — my error, and 8b loses it.** Row 8b's carry R4
 says *"8b owns the k=0 and `edgeLengths` cells against a REAL operator"*, while row 9 and §8.2 route
