@@ -61,6 +61,7 @@ import {
 import { assembleAFlat } from '../../../src/core/sobolev/innerProduct';
 import {
     ExternalSolveError,
+    SolveNotCertifiedError,
     solveSaddleFromA,
     solveSaddleFrozen,
 } from '../../../src/core/sobolev/linsolve';
@@ -299,7 +300,7 @@ interface Rhs {
 /**
  * Three right-hand sides, each there for a measured reason:
  *  - `grad/0`: the gradient solve (`dE`, bottom omitted). `dE` is translation-invariant so `Nᵀb ≈ 0`.
- *  - `zero/-phi`: the projection solve (`rhsTop = 0`, `rhsBottom = −Φ`), `lineSearch.ts:276`.
+ *  - `zero/-phi`: the projection solve (`rhsTop = 0`, `rhsBottom = −Φ`), `lineSearch.ts:279`.
  *  - `gen/-phi`: a GENERIC top with non-zero per-block mean. It exists because with a k = 3 pinning
  *    set the solvability condition `Gᵀλ = Nᵀb` determines `λ` alone, so on the two cells above
  *    `λ ≈ 0` and a flipped-sign `λ` is INVISIBLE (MEASURED: knock-out 'lambda-sign' passes
@@ -740,8 +741,13 @@ describe('typed errors (spec §8.1, §8.3, A33)', () => {
             expect(err.message).toContain('edgeLengthsBlock');
             expect(err.message).toContain('nullspace');
             expect(err.message).toContain('§8.1');
-            // Not a SINGULAR matrix: it must escape the seam's 'singular_system' fold (optimizer.ts:429).
-            expect(err).toBeInstanceOf(ExternalSolveError);
+            // Not a SINGULAR matrix: it must escape the seam's 'singular_system' fold
+            // (optimizer.ts:448), which now tests the NEUTRAL base (spec A35 item 6, row 8b).
+            expect(err).toBeInstanceOf(SolveNotCertifiedError);
+            // ...and specifically NOT the EXTERNAL arm: `instanceof ExternalSolveError` is what a
+            // GPU "re-run on the CPU path" recovery keys on, and re-running this CPU GMRES would
+            // fail identically. @see src/core/sobolev/linsolve.ts (SolveNotCertifiedError)
+            expect(err).not.toBeInstanceOf(ExternalSolveError);
             expect(c.applies).toBe(0);
         }
     });
@@ -783,7 +789,10 @@ describe('typed errors (spec §8.1, §8.3, A33)', () => {
         }
         expect(e1).toBeInstanceOf(SchurRankError);
         expect((e1 as SchurRankError).matrix).toBe('S');
+        // A rank-deficient C really IS a singular system, so it must NOT escape the fold -- which
+        // now means not being a `SolveNotCertifiedError` either (spec A35 item 6, row 8b).
         expect(e1).not.toBeInstanceOf(ExternalSolveError);
+        expect(e1).not.toBeInstanceOf(SolveNotCertifiedError);
         // (b) a zero row.
         let e2: unknown;
         try {
@@ -820,8 +829,11 @@ describe('typed errors (spec §8.1, §8.3, A33)', () => {
         expect(err.record.stop).toBe('maxit');
         expect(err.record.censored).toBe(true);
         expect(err.record.eta).toBeGreaterThan(DEFAULT_ETA_ACCEPT);
-        // The seam only lets ExternalSolveError through (optimizer.ts:429, lineSearch.ts:321).
-        expect(err).toBeInstanceOf(ExternalSolveError);
+        // The seam only lets a SolveNotCertifiedError through (optimizer.ts:448,
+        // lineSearch.ts:329) -- widened from ExternalSolveError by row 8b (spec A35 item 6), and
+        // this error must be on the NON-external side of that split.
+        expect(err).toBeInstanceOf(SolveNotCertifiedError);
+        expect(err).not.toBeInstanceOf(ExternalSolveError);
         expect(err).not.toBeInstanceOf(SchurRankError);
         expect(err.message).toContain('NOT a singular system');
         // The same budget with the certificate off does NOT throw -- so it was the η check that fired.

@@ -2,10 +2,10 @@ import { barycenterBlock, type ConstraintSet } from './sobolev/constraintSet';
 import { solveConstrainedGradientSetFrozen } from './sobolev/gradient';
 import { type LineSearchFailureReason, l2CurveNorm, lineSearchStepSet } from './sobolev/lineSearch';
 import {
-    ExternalSolveError,
     type FactorMode,
     type FrozenSaddleOperator,
     type PreparedSaddle,
+    SolveNotCertifiedError,
 } from './sobolev/linsolve';
 import {
     type PenaltyConfig,
@@ -174,7 +174,18 @@ export interface SobolevStepOptions {
      * by the same self-certifying residual, so this is a cost knob, not a
      * semantics knob (which is why there is no store/UI toggle — unlike
      * projectionMode).
+     *
+     * **SILENTLY INERT on the hierarchical arm** (`saddle.kind === 'hierarchical'`, Phase 2H):
+     * there is no dense factorization anywhere in that step, so this option selects nothing.
+     * VERIFIED by reading every reader: `gradient.ts`'s hierarchical branch returns before
+     * `solveSaddleFromA`, the only place the value is read on the gradient side; and the
+     * projection's only reader (`lineSearch.ts`, reassemble branch) is unreachable because the
+     * pre-arm guard below forces `projectionMode: 'frozen'`. There is deliberately NO guard
+     * rejecting it: rejecting a value the dense arm accepts would make the option's own type a
+     * lie, and the spec row allows either. So: no error, no effect — MEASURED as 0 of 144
+     * coordinates changed, against 118 of 144 on the dense arm (`hierarchicalSaddleReal.test.ts`).
      * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §11.2 row 8b (R2)
      */
     factorMode?: FactorMode;
     /**
@@ -199,7 +210,7 @@ export interface SobolevStepOptions {
      * `kind: 'hierarchical'` (Phase 2H) is a different contract, not another source: there is no
      * `A` and no factorization, so it is NOT bit-identical to the dense arm, and it REQUIRES
      * `projectionMode: 'frozen'` — the pre-arm guard below refuses it otherwise rather than let
-     * the projection fall back to a per-iterate dense assembly. Its producer is task 8b.
+     * the projection fall back to a per-iterate dense assembly. `makeHierarchicalSaddle` produces it.
      * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
      * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b
      */
@@ -418,15 +429,23 @@ export function sobolevStepSet(
                 // capturedField null. @see plan §D14 / issue #9.
                 if (collectField) capturedField = gTilde;
             } catch (e) {
-                // The ONE throw this catch must not swallow: an external solve that
-                // could not certify its result ([DESIGN §4.1] step 4). Converting it to
-                // 'singular_system' would present an unconverged descent direction as
-                // a rejected step, with usedGpuSolve still true — the driver has to see
-                // it to re-run this step on the CPU path ([DESIGN §4.5] trigger 3).
+                // The ONE throw this catch must not swallow: a solve that could not certify its
+                // result ([DESIGN §4.1] step 4). Converting it to 'singular_system' would present
+                // an unconverged descent direction as a rejected step, with usedGpuSolve still
+                // true — the driver has to see it to re-run this step on the CPU path
+                // ([DESIGN §4.5] trigger 3).
+                // WIDENED to the neutral base `SolveNotCertifiedError` (Phase 2H, spec A35 item 6):
+                // the hierarchical arm's `SchurConvergenceError` is the same KIND of failure
+                // (GMRES missed its backward-error certificate) but is NOT external, and before
+                // the base existed the only way for it to escape this catch was to extend
+                // `ExternalSolveError` — which would then report a CPU non-convergence as a GPU
+                // seam failure. `ExternalSolveError` still satisfies this test, so the dense/GPU
+                // arm is unchanged. Do NOT narrow this back to `ExternalSolveError`.
                 // Unreachable when `saddle` is absent; test/gpu/saddleSeam.test.ts
                 // proves the absent path is still deterministic WITH this branch here.
                 // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
-                if (e instanceof ExternalSolveError) throw e;
+                // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, A35
+                if (e instanceof SolveNotCertifiedError) throw e;
                 // Exactly singular saddle system (e.g. an isolated vertex → zero Ā rows).
                 // Fold into the spec §C step 10 contract: reject, echo the input, report —
                 // the frame loop auto-pauses on accepted:false instead of crashing.

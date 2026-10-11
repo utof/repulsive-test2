@@ -55,8 +55,9 @@ function args(n = 24): DispatchDescentStepArgs {
 
 // What this proves, exactly: with `saddle` ABSENT the step is DETERMINISTIC and leaks
 // nothing across calls, with all three of this task's default-path control-flow edits
-// in place (the saddle.A shape guard at optimizer.ts:297-318, the ExternalSolveError
-// rethrow at :403, the timing-collector disarm at :498-507).
+// in place (the saddle.A shape guard at optimizer.ts:298-329, the uncertified-solve
+// rethrow at :448 -- widened from ExternalSolveError to SolveNotCertifiedError in
+// Phase 2H, spec A35 item 6 -- and the timing-collector disarm at :544-552).
 // What it does NOT prove: identity with the PRE-seam code. Both arms are the post-seam
 // build, so a regression the seam introduced is present on both sides and cancels. The
 // pre/post backstop is the committed golden suites (test/golden.test.ts,
@@ -344,7 +345,7 @@ test('solverWorker: a saddle on the step payload is rejected', async () => {
     if (response.type !== 'error') throw new Error(`expected an error, got ${response.type}`);
     // The GUARD's own message, not a loose /saddle/. Measured: with the guard
     // mis-spelled as `'saddle' in msg` (D4's dead-code form, which can never fire)
-    // the step still errors — the saddle.A guard at optimizer.ts:317-318 rejects the
+    // the step still errors — the saddle.A guard at optimizer.ts:328-329 rejects the
     // plain {} with a TypeError naming `opts.saddle.A`, whose text ALSO contains
     // "saddle". A /saddle/ assertion therefore passes on the dead spelling and
     // falsifies nothing; this one fails on it.

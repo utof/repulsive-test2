@@ -62,12 +62,19 @@
  * A PARTIAL pin (`0 < rank G < 3`) cannot arise from the catalogue (`barycenterBlock` and
  * `pointBlock` pin all three translations, the others none) and is refused.
  *
- * NON-CONVERGENCE IS NOT A SINGULAR MATRIX (spec A33, `optimizer.ts:429`/`lineSearch.ts:321`: only
- * {@link ExternalSolveError} escapes the seam's `'singular_system'` catch). Every GMRES run is checked
- * against its TRUE backward error `η = ‖b − A_σx‖ / (‖A_σ‖‖x‖ + ‖b‖)` (never the recurrence residual,
- * which under-reports by 10⁸-10¹², `gmres.ts` module TSDoc) and a failure throws
- * {@link SchurConvergenceError}, which IS an `ExternalSolveError`. A rank-deficient `C` is a plain
+ * NON-CONVERGENCE IS NOT A SINGULAR MATRIX (spec A33, `optimizer.ts:448`/`lineSearch.ts:329`: only
+ * {@link SolveNotCertifiedError} escapes the seam's `'singular_system'` catch). Every GMRES run is
+ * checked against its TRUE backward error `η = ‖b − A_σx‖ / (‖A_σ‖‖x‖ + ‖b‖)` (never the recurrence
+ * residual, which under-reports by 10⁸-10¹², `gmres.ts` module TSDoc) and a failure throws
+ * {@link SchurConvergenceError}, which IS a `SolveNotCertifiedError`. A rank-deficient `C` is a plain
  * {@link SchurRankError}: that one really is a singular system.
+ *
+ * The base was `ExternalSolveError` when this module shipped, because that was then the only class
+ * the seam let through; spec A35 item 6 ruled the neutral base in and row 8b introduced it. A CPU
+ * GMRES that missed its certificate is NOT an external solve, so that base contradicted
+ * `ExternalSolveError`'s own TSDoc and destroyed `instanceof ExternalSolveError` as the discriminant
+ * the SPECIFIED GPU recovery keys on ("re-run on the CPU path", [DESIGN §4.5] trigger 3 -- specified,
+ * and as of 2026-10-11 not yet implemented: `src/gpu/driver.ts` has no `catch`). Do not re-narrow.
  *
  * `src/core` must not import `src/gpu` (`gmres.ts` module TSDoc); `src/gpu/saddle.ts`'s
  * `schurWoodburySolve` is factor-based and was read for ideas only.
@@ -76,7 +83,7 @@
  * @see https://arxiv.org/abs/2006.07859 §6.3 (no matrix to factor once the apply is hierarchical)
  * @issue utof/repulsive-test2#62
  */
-import { ExternalSolveError, operatorSaddleResidual } from '../linsolve';
+import { operatorSaddleResidual, SolveNotCertifiedError } from '../linsolve';
 import { applyAsigma, backwardError, estimateNorm2, type GmresStop, gmres } from './gmres';
 import type { HierarchicalOperator } from './operator';
 import type { Preconditioner } from './precond';
@@ -136,13 +143,14 @@ export const TRANSLATION_INVARIANT_REL = 1e-10;
 
 /**
  * `k` is outside the `O(1)` regime this route serves -- the `edgeLengthsBlock` case (`|E|` rows).
- * Extends {@link ExternalSolveError} ON PURPOSE: a plain `Error` thrown from `prepare(C)` is folded
- * into `'singular_system'` by `optimizer.ts:429`, which would present a DISPATCH bug (a `k = O(n)`
- * set routed here) as a singular matrix.
+ * Extends {@link SolveNotCertifiedError} ON PURPOSE: a plain `Error` thrown from `prepare(C)` is
+ * folded into `'singular_system'` by `optimizer.ts:448`, which would present a DISPATCH bug (a
+ * `k = O(n)` set routed here) as a singular matrix. NOT `ExternalSolveError` (spec A35 item 6):
+ * nothing external ran, so the GPU arm's specified "re-run on the CPU" recovery is the wrong one.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §8.1, §8.2
  * @issue utof/repulsive-test2#62
  */
-export class SchurRouteError extends ExternalSolveError {
+export class SchurRouteError extends SolveNotCertifiedError {
     constructor(
         readonly k: number,
         readonly maxK: number,
@@ -160,13 +168,16 @@ export class SchurRouteError extends ExternalSolveError {
 
 /**
  * A GMRES run inside the Schur solve did not reach {@link SchurOptions.etaAccept} (or produced a
- * non-finite iterate). Extends {@link ExternalSolveError} ON PURPOSE -- Why: `optimizer.ts:429` and
- * `lineSearch.ts:321` let exactly that class escape their `'singular_system'` / `ok:false` folds;
- * a plain `Error` would report "GMRES did not converge" as "the matrix is singular" (spec A33).
+ * non-finite iterate). Extends {@link SolveNotCertifiedError} ON PURPOSE -- Why: `optimizer.ts:448`
+ * and `lineSearch.ts:329` let exactly that class escape their `'singular_system'` / `ok:false`
+ * folds; a plain `Error` would report "GMRES did not converge" as "the matrix is singular"
+ * (spec A33). NOT `ExternalSolveError` (spec A35 item 6): this GMRES ran in `src/core`, so the
+ * external arm's specified "re-run on the CPU path" recovery would re-run the identical failing
+ * solve.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.3, §8.3, A33
  * @issue utof/repulsive-test2#62
  */
-export class SchurConvergenceError extends ExternalSolveError {
+export class SchurConvergenceError extends SolveNotCertifiedError {
     constructor(
         readonly phase: 'prepare' | 'solve',
         /** Constraint row whose `A_σ⁻¹ Cᵀ` column failed (`prepare`), or `-1` for the rhs solve. */
@@ -479,7 +490,7 @@ export function prepareSchur(
         column: number,
     ): { x: Float64Array; record: SchurGmresRecord } => {
         const bNorm = norm2(b);
-        // The projection solve always has rhsTop = 0 (`lineSearch.ts:276`): the answer is x = 0 and
+        // The projection solve always has rhsTop = 0 (`lineSearch.ts:279`): the answer is x = 0 and
         // `gmres` would still spend one preconditioner apply before noticing, so skip it. The record
         // keeps `gmres`'s own `stop` name for the case.
         if (bNorm === 0) {

@@ -83,6 +83,11 @@ export function solveConstrainedGradientSet(
  * → solveSaddleFromA's default, 'ldlt' since the 2026-07-06 gate verdict;
  * 'lu' is bit-identical to the pre-option path) and rides into the returned
  * frozen operator's `fac`, so reuse solves inherit the choice for free.
+ * **It is SILENTLY INERT when `saddle.kind === 'hierarchical'`** (spec §11.2 row 8b, R2): that
+ * branch returns before `solveSaddleFromA` (the only read of the value in this file) and its frozen
+ * operator has no `fac` to carry a choice into, because there is no factorization at all
+ * (spec §1.1). Not a bug and not guarded — see the option's own TSDoc in `src/core/optimizer.ts`
+ * for why; the end-to-end A/B is in `test/sobolev/hierarchicalSaddleReal.test.ts`.
  *
  * `saddle` is the WebGPU Phase 2a seam: when present, `A` and the factorization
  * come from the caller (the GPU Cholesky) instead of `assembleAFlat` +
@@ -129,7 +134,7 @@ export function solveConstrainedGradientSetFrozen(
         // solver because only it can certify a matrix-free solve (operatorSaddleResidual is the
         // shape; linsolve.ts). The 'saddle' timing key is unchanged, so the phase ledger stays
         // comparable across the two arms; 'factor' simply never fires here — which is the point.
-        // The PRODUCER of this arm is task 8b; nothing in the repo writes it yet.
+        // The PRODUCER of this arm is `hierarchical/hierarchicalSaddle.ts` (spec §11.2 row 8b).
         // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b
         const solver = saddle.prepare(C);
         const { x, lambda, residual } = timed('saddle', () => solver.solve(flatten(dE)));

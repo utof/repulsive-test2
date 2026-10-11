@@ -11,8 +11,8 @@
  * TOPOLOGY LIMIT: only curves whose edge list is exactly the natural path `(i,i+1)` (open) or that
  * path plus one `(n-1,0)` wrap (closed) are representable. Anything else (junctions, crossings,
  * permuted vertex order, missing/duplicate edges) throws {@link CurveTopologyError} naming the
- * edge -- assembling a wrong matrix silently is the failure this prevents. Task 8b's dispatch must
- * route such curves to the dense path.
+ * edge -- assembling a wrong matrix silently is the failure this prevents. `makeHierarchicalSaddle`
+ * (spec §11.2 row 8b) refuses them UP FRONT, with the dense fallback named in the message.
  *
  * KNOWN FINDING (task 1 review): the closed circle is the worst geometry for this algorithm at every mass
  * weight -- 2-7x the torus knot's residual at matched n at mass=1 (rhs-seed dependent, up to 5.4x spread),

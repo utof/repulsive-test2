@@ -29,9 +29,9 @@ import { barycenterBlock, type ConstraintSet } from './constraintSet';
 import { assembleAFlat } from './innerProduct';
 import { flatten, unflatten } from './layout';
 import {
-    ExternalSolveError,
     type FactorMode,
     type FrozenSaddleOperator,
+    SolveNotCertifiedError,
     solveSaddleFromA,
     solveSaddleFrozen,
 } from './linsolve';
@@ -202,10 +202,12 @@ export type ProjectBarycenterResult = ProjectConstraintSetResult;
  *
  * A non-finite correction step or a solver throw returns `ok: false` with the
  * current iterate, mirroring the oracle's failure semantics — with ONE exception:
- * an {@link ExternalSolveError} from a GPU-supplied factorization PROPAGATES instead,
- * because an uncertified solve is a contract violation rather than an unconverged
- * projection (see the anchor on the catch below). Unreachable without the WebGPU
- * `saddle` seam, so the CPU path's failure semantics are unchanged.
+ * a {@link SolveNotCertifiedError} PROPAGATES instead, because an uncertified solve
+ * is a contract violation rather than an unconverged projection (see the anchor on
+ * the catch below). That covers a GPU-supplied factorization's
+ * {@link ExternalSolveError} and, since Phase 2H, the hierarchical arm's
+ * `SchurConvergenceError` — the same kind of failure from a CPU GMRES. Unreachable
+ * without the `saddle` seam, so the CPU-dense path's failure semantics are unchanged.
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4, §4.5
  * @see oracle/tpe_constraints_oracle.py (project_constraint_set)
  */
@@ -305,7 +307,7 @@ export function projectOntoConstraintSet(
             cur = cur.map((p, i) => [p[0] + step[i][0], p[1] + step[i][1], p[2] + step[i][2]]);
         } catch (e) {
             // The ONE throw this catch must not swallow, for the same reason the
-            // gradient solve's catch cannot (optimizer.ts:403): an external solve that
+            // gradient solve's catch cannot (optimizer.ts:448): a solve that
             // could not certify its result is a contract violation, NOT a degraded mode
             // ([DESIGN §4.4]), and the driver has to see it to re-run the step on the
             // CPU path ([DESIGN §4.5] trigger 3). Swallowing it into `ok: false` reports
@@ -314,11 +316,17 @@ export function projectOntoConstraintSet(
             // and usedGpuSolve still true. Measured on trefoil(24): τ 0.5 → 0.0625 with
             // nothing surfaced. Three of the four solves in a normal step arrive here,
             // so without this the seam propagates from the gradient solve only.
-            // Inert when `saddle` is absent: ExternalSolveError can only originate in a
-            // PreparedSaddle.solve, so with no seam this branch is unreachable and every
-            // path below is bit-identical.
+            // WIDENED to the neutral base `SolveNotCertifiedError` (Phase 2H, spec A35 item 6):
+            // the hierarchical projection solve raises `SchurConvergenceError`, which is the same
+            // contract violation from a CPU GMRES rather than from an external factorization, and
+            // this is the only one of the step's four solves where it would otherwise be swallowed
+            // into a backtrack. `ExternalSolveError` extends the base, so the GPU arm is unchanged.
+            // Inert when `saddle` is absent: a SolveNotCertifiedError can only originate in a
+            // PreparedSaddle.solve / HierarchicalSaddleSolver.solve, so with no seam this branch
+            // is unreachable and every path below is bit-identical.
             // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4, §4.5
-            if (e instanceof ExternalSolveError) throw e;
+            // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, A35
+            if (e instanceof SolveNotCertifiedError) throw e;
             return { vertices: cur, ok: false, iterations: it, phiNorm: finalPhiNorm };
         }
     }

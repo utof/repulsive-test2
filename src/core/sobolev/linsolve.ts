@@ -408,7 +408,7 @@ export type SaddleFactorization = LuFactorization | LdltFactorization | External
  * itself certified the result ([DESIGN §4.1] step 4); it throws
  * {@link ExternalSolveError} rather than returning an uncertified z.
  * Why: nothing in `src/core/` ever compares `residual` against a threshold —
- * `linsolve.ts:850`/`:953` compute it and `optimizer.ts:388,437,491` forward it
+ * `linsolve.ts:927`/`:1139` compute it and `optimizer.ts:425,482,536` forward it
  * as a stat — so a solve that converged to 1e-3 is indistinguishable at every
  * call site from one that converged to 1e-12.
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1, §4.4
@@ -419,14 +419,43 @@ export interface ExternalFactorization {
 }
 
 /**
+ * "The solve ran, and it could not certify its own answer" — the ONE class the step's two
+ * singular-saddle catches (`optimizer.ts`, `lineSearch.ts`) re-throw instead of folding into
+ * `'singular_system'` / `ok:false`. A NEUTRAL base, deliberately saying nothing about WHERE the
+ * solve ran.
+ *
+ * Why it exists as a separate class from {@link ExternalSolveError}: the two catches need "not
+ * certified", but the GPU driver's SPECIFIED recovery needs "the GPU seam failed, re-run on the
+ * CPU" ([DESIGN §4.5] trigger 3), and those are different questions. Phase 2H added a second,
+ * CPU-side, matrix-free producer of an uncertified solve — `hierarchical/schur.ts`'s
+ * `SchurConvergenceError`, raised when GMRES misses its backward-error certificate — and a CPU
+ * GMRES that did not converge does NOT get better by being re-run on the CPU. Before this split
+ * the only way for that error to escape the catches was to extend `ExternalSolveError`, which made
+ * the shipped type contradict that class's own TSDoc (*"an external solve"*) and destroyed
+ * `instanceof ExternalSolveError` as the discriminant a GPU fallback would be written against.
+ *
+ * NOTE, measured 2026-10-11: no `src/` site catches either class yet (`src/gpu/driver.ts` has no
+ * `catch` at all, and `makePreparedSaddle`'s only callers are `test/gpu/`), so the mis-recovery is
+ * LATENT. The split is here because `makeHierarchicalSaddle` (spec §11.2 row 8b) is what first
+ * makes an uncertified CPU solve reachable at all — do not delete it as unused.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §8.3, A35 item 6
+ * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.5
+ */
+export class SolveNotCertifiedError extends Error {}
+
+/**
  * Thrown by an external solve that cannot certify its own result — iterative
  * refinement exhausted its budget without reaching 1e-10 ([DESIGN §4.1] step 4).
  * Typed (not a bare Error) because `optimizer.ts`'s singular-saddle catch must let
  * exactly this one through: converting it to 'singular_system' would hide an
  * unconverged descent direction behind a rejected step.
+ *
+ * Extends {@link SolveNotCertifiedError} (Phase 2H): the catches widened to the base, so this
+ * class now means specifically "the EXTERNAL (GPU) solve failed" — the one case the driver's
+ * specified CPU re-run is the right recovery for. Its semantics are otherwise unchanged.
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.1, §4.4, §4.5
  */
-export class ExternalSolveError extends Error {}
+export class ExternalSolveError extends SolveNotCertifiedError {}
 
 /**
  * A saddle solve prepared OUTSIDE the step, for the step's INPUT vertices.
@@ -471,8 +500,8 @@ export interface HierarchicalSaddleSolver {
  * Hierarchical path (Phase 2H) — no matrix and no factorization: `op` applies Ā matrix-free and
  * `prepare(C)` returns the reusable solver for THIS step's constraint Jacobian.
  *
- * The producer is task 8b (`makeHierarchicalSaddle`); until it lands nothing in the repo writes
- * this arm, which is why the dense path is still the only reachable one.
+ * The producer is `makeHierarchicalSaddle` (`hierarchical/hierarchicalSaddle.ts`, spec §11.2 row
+ * 8b). It is reachable on the MAIN-THREAD / INLINE driver ONLY — see that module's TSDoc.
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b
  */
 export interface HierarchicalPreparedSaddle {
