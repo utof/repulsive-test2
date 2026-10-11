@@ -3098,6 +3098,23 @@ implementer's wrong turn):**
 - **`alpha`/`beta`/`epsilon` are NOT forwarded by `dispatch.ts`;** the core falls back to `DEFAULTS`, so
   a saddle built outside `sobolevStepSet` must use the identical values or the operator and the step
   disagree silently (`src/gpu/driver.ts:147-155` documents the same trap for the GPU engine).
+- **SCALE — added 2026-10-11, an omission in this box's first draft.** `buildBvh` **does not
+  normalise**, and its header states tree quality depends on the caller scaling to extent ≈ 1
+  (issue #69, where `κ_near` moves **1.70×** across the two scales in the corpus). **And the
+  provenance is split, which is worse than a bare precondition and is what #69 actually names:**
+  `bvh.ts:32-38` records that the spike **normalised every fixture to bbox max extent 1**
+  (`scratch/curves.ts:13-17`) and that **every `out-bct-*.json` oracle — e.g. `κ_near = 108.20` —
+  was measured that way**, while every shipped test builds from the **unnormalised** `trefoil` at
+  extent **5.4716**. The mechanism is stated there too: the split score sums squared diameters of
+  positions (curve scale) against unit tangents (scale 1), so at large scale positions swamp
+  tangents, the chosen axis changes, and tree quality — hence `κ_near` and far-field accuracy —
+  changes with it. **8b is the first code to take ARBITRARY production vertices**, whose extent is
+  whatever the user's curve happens to be. 9b is unaffected (it builds
+  from `trefoil` like its peers). **8b must either normalise before `buildBvh` and state the
+  transform, or record in `stats` the extent it built at** — silently building a tree at extent
+  5.47 and then at extent 0.01 on the next step is a quality change nothing downstream can see.
+  This is the same class as #72's mass weight, which was closed by making the quantity
+  scale-equivariant rather than by picking a better constant.
 
 **Process note.** All three defects are in the SEAM, not the numbers — which is exactly what memory
 `plan-the-seam-not-the-numbers` says to expect, and I still wrote a row whose dependency order was
