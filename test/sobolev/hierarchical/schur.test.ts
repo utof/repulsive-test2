@@ -50,11 +50,13 @@ import {
     DEFAULT_ETA_ACCEPT,
     DEFAULT_SCHUR_TOL,
     prepareSchur,
+    RANK_PIVOT_REL,
     SCHUR_MAX_K,
     SchurConvergenceError,
     type SchurDefect,
     SchurRankError,
     SchurRouteError,
+    TRANSLATION_INVARIANT_REL,
 } from '../../../src/core/sobolev/hierarchical/schur';
 import { assembleAFlat } from '../../../src/core/sobolev/innerProduct';
 import {
@@ -950,6 +952,12 @@ describe('S = C A_σ⁻¹ Cᵀ and its conditioning, against dense arithmetic (n
         expect(len).toBeLessThan(1e-14);
         expect(pinning).toBeGreaterThan(1e-2);
         expect(sens('k0')).toBe(0);
+        // The cut must be INSIDE the gap it was chosen for, with >=3 decades of air on each side.
+        // Asserted through the exported constant: the two literals above pin the MEASUREMENT, this
+        // pins the THRESHOLD, and without it 1e-10 could drift anywhere in 1e-14..1e-2 green.
+        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md A35
+        expect(TRANSLATION_INVARIANT_REL).toBeGreaterThan(len * 1e3);
+        expect(TRANSLATION_INVARIANT_REL).toBeLessThan(pinning / 1e3);
     });
 });
 
@@ -1140,5 +1148,80 @@ describe('knock-outs: each injected defect is caught by the cells the table says
         );
         expect(rg).toBeLessThan(1e-6);
         expect(rb).toBeGreaterThan(1e-3);
+    });
+});
+
+// ===========================================================================
+// 9. The pivot floor, bracketed by its own data. Section 7's rank cells prove RANK_PIVOT_REL is not
+//    too SMALL (at 1e-20 the duplicate pin's ~1e-16 pivot sails through and (a) fails). Nothing
+//    proved it is not too LARGE: at 1e-2 every cell in this file is still green, because the
+//    best-conditioned legitimate S only reaches 1/cond ~ 1.7e-2. That is 14 decades of silent
+//    drift in a guard, so it is bracketed here from both sides.
+//    @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md A35
+// ===========================================================================
+describe('schur: the rank floor sits strictly inside the gap it was chosen for', () => {
+    test('RANK_PIVOT_REL is >=3 decades under every legitimate 1/cond(S) and >=3 over the degenerate pivot', () => {
+        // Upper side: a pivot of a well-conditioned S is bounded below by λ_min/S_jj >= 1/cond(S).
+        // If the floor ever rose to meet that, a VALID constraint set would be rejected as singular.
+        let worst = Number.POSITIVE_INFINITY;
+        for (const name of ['bary', 'len', 'barylen', 'pin', 'barypin'] as const) {
+            const { fx, C } = setup(48, DEFAULT_THETA, name);
+            const cond = prepareSchur(fx.op, fx.P, C).report.sConditioning;
+            if (!cond) throw new Error(`no conditioning for ${name}`);
+            worst = Math.min(worst, 1 / cond.cond);
+        }
+        log('min legitimate 1/cond(S)', worst.toExponential(2));
+        expect(worst).toBeGreaterThan(1e-3);
+        expect(RANK_PIVOT_REL).toBeLessThan(worst / 1e3);
+
+        // Lower side. NOT measurable from section 7's duplicated pin: two IDENTICAL rows give
+        // identical `W` columns, so the eliminated pivot is EXACTLY 0.0 (MEASURED) and a floor of
+        // 1e-300 would trip that cell too -- i.e. the duplicate cell constrains this constant only
+        // to "> 0", which is no constraint at all. So the lower side is measured off a NEARLY
+        // dependent pair instead, whose pivot is tunable: rows `e_v` and `e_v + delta*e_w` are
+        // independent for delta > 0, and eliminating the first leaves a pivot of order delta^2.
+        // Sweeping delta turns the floor's position into a measured trip/no-trip boundary.
+        const fx = fixture(48, DEFAULT_THETA);
+        const nearDup = (delta: number): number[][] => {
+            const rows: number[][] = [];
+            for (let c = 0; c < 3; c++) {
+                const r = zeros(3 * 48);
+                r[c * 48 + 5] = 1; // pins all three translations on its own (rank(C N) = 3)
+                rows.push(r);
+            }
+            for (let c = 0; c < 3; c++) {
+                const r = zeros(3 * 48);
+                r[c * 48 + 5] = 1;
+                r[c * 48 + 9] = delta;
+                rows.push(r);
+            }
+            return rows;
+        };
+        const pivotOf = (delta: number): number | 'ok' => {
+            let err: unknown;
+            try {
+                const rep = prepareSchur(fx.op, fx.P, nearDup(delta)).report;
+                if (!rep.sConditioning) throw new Error('no conditioning');
+                return 'ok';
+            } catch (e) {
+                err = e;
+            }
+            expect(err).toBeInstanceOf(SchurRankError);
+            expect((err as SchurRankError).matrix).toBe('S');
+            // Read the pivot out of the message the floor itself raised, so the number asserted is
+            // the one the guard actually compared against RANK_PIVOT_REL.
+            const m = /p=([-\d.e+]+), diag=([-\d.e+]+)/.exec((err as Error).message);
+            if (!m) throw new Error(`pivot not in message: ${(err as Error).message}`);
+            return Math.abs(Number(m[1]) / Number(m[2]));
+        };
+        const loose = pivotOf(1e-3); // pivot ~ 1e-6: well above the floor, must be ACCEPTED
+        const tight = pivotOf(1e-8); // pivot ~ 1e-16: below the floor, must be REJECTED
+        log('near-dup delta=1e-3 / delta=1e-8', `${loose} / ${tight}`);
+        expect(loose).toBe('ok');
+        expect(typeof tight).toBe('number');
+        expect(tight as number).toBeLessThan(RANK_PIVOT_REL);
+        // And the boundary is the floor's, not an accident of the arithmetic: the rejected pivot is
+        // non-zero, so lowering RANK_PIVOT_REL far enough WOULD let this rank-deficient set through.
+        expect(tight as number).toBeGreaterThan(0);
     });
 });
