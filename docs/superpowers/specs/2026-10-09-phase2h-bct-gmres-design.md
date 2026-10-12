@@ -1315,7 +1315,11 @@ EXTRAPOLATED). §7.8 is where that correction lands.
 trip* consistency check whose second half is the INVALID triangle clause. MEASURED anchor: 1.533e-6
 f32-vs-f64, identically 0 for f64-vs-f64. (2) Accumulator truncated to f16, or a lost
 pairwise/Kahan sum ⇒ the same model predicts `97 × 4.88e-4 = 4.7e-2`, **820× over the bar.**
-**NOT MEASURED — this knock-out must be produced during implementation** (§7.11 item 8).
+~~NOT MEASURED — this knock-out must be produced during implementation~~ **MEASURED, and it FIRES
+(A47 item 2): f16 `δ_precision` = 2.635476e-3, 45.6× the bar at θ=0.5 (31.9× at θ=0.25). §7.11 items 7
+and 8 CLOSE.** The `m·u` worst case overstates the realised error 17.96× — expected, for a worst-case
+bound on a sequential sum whose rounding errors partly cancel. `m` is `κ_near + κ_far` per :1294, NOT the
+edge count; A47 item 1 rejects the proposed "`m` → 960" correction.
 
 *INVALID (any ⇒ H1, H2 and H4b′ all INVALID at that n).*
 
@@ -4868,3 +4872,133 @@ right — my ledger engaged the substance but issued no ruling.
 > "0.25 is production because H6 read RED" rests on a withdrawn inference. **The CHOICE of production θ
 > stays open on #51's own evidence and is NOT row 11's to make:** row 11 gates at BOTH θ wherever a gate is
 > per-θ and emits `thetaProduction: null` citing #51 and this item.
+
+---
+
+## A47 — row 11 Stage 1: the harness ships, N1 is REJECTED, and H4c is MIS-AXED rather than weak
+
+Row 11's gate harness (`bench/gpu/hCalibration.ts`, `bench/results/2026-10-12-gpu-phase2h-gate-calibration.json`,
+18 shards) ran every gate in §7 and emitted VALUES, not only verdicts. Verdicts: H1-a GREEN, H1-b GREEN,
+H2 GREEN, H3 GREEN, H4a GREEN, **H4b′ VACUOUS**, H4c GREEN, H5 GREEN, H6 RED-as-withdrawn (A46 item 7),
+R1 three ceilings. Four archived anchors reproduced to every quoted digit; H2's f32 column lands inside
+A26's 0.306–0.412 band and its f64 column inside A26's 3.3–5.3. The eleven rulings below are row 11's.
+
+**1. N1 is REJECTED — the spec was already right.** Stage 1 reported §7.11 item 7's f16 model as writing
+`m · u_f16` while substituting `97 = κ_near + κ_far` instead of `m = 960`, a claimed 9.9× error. **`m` is
+DEFINED as `κ_near + κ_far` at §7.2:1294** ("a sequential f32 sum of `m = κ_near + κ_far` terms"), so
+:1317's `97 × 4.88e-4 = 4.7e-2` substitutes its own symbol correctly. No edit is made; the proposed
+"one-line correction" would have replaced `m` with its own definition. *The reading that `m` is the edge
+count came from outside this section — a locally-bound symbol must be resolved at its binding site.*
+
+**2. …but item 7's knock-out is CLOSED, and the model is 18–26× CONSERVATIVE.** :1318 says "**NOT
+MEASURED** — this knock-out must be produced during implementation". It has now been produced and it
+**fires**: f16 `δ_precision` = **2.635476e-3 (45.6× the bar)** at θ=0.5 and **3.644364e-3 (31.9×)** at
+θ=0.25, against the model's 4.733683e-2 / 819.2×. The knock-out's purpose — exceed the bar — is met;
+the `m·u` worst case overstates the realised error by **17.96×** and **25.69×**, as a worst-case bound on
+a sequential sum should over a sum whose rounding errors partly cancel. **§7.11 items 7 and 8 CLOSE.**
+
+**3. Three Stage-1 GO rulings enter the spec** (cited in the harness as "NOT YET IN THE SPEC"; A46's seven
+items did not cover them — a dangling citation I created):
+- **Ruling 3 — H4a's metric AND its reference are both the exact dense `A_σ`.** The BCT metric is not used
+  for the cosine. *Why:* compression enters H4a through `x̃`, not through the metric, so measuring in the
+  compressed metric would fold δ_compress into a gate that exists to read the f32-vs-f64 arithmetic gap.
+  Both are emitted. **My stated mechanism for this ruling was wrong and the ruling stands** — see item 11.
+- **Ruling 4 — INVALID-1's computable replacement.** §11.2 row 11 requires every INVALID predicate be
+  reachable in a test; `"x* not from an f64 dense solve"` is a provenance claim, not a function of outputs
+  (A46 item 4), so it is replaced by **the reference solve's own backward error ≤ 10·u_f64**. Bounded
+  validity — see item 8.
+- **Ruling 9 — conjunct 1's RED side is a LABELLED SYNTHETIC KNOCK-OUT.** It is produced by deliberate
+  exponent drift, is marked as such in the artefact, and is **not** a claim that production can reach it.
+
+**4. H4c conjunct 1's RED side is now ESTABLISHED, and §7.11 item 10c CLOSES.** §9's table (:2969) recorded
+the first draft's "6/6 random arms ≤ 0.86027" as **NOT ESTABLISHED**, because those arms had `K_run` =
+1,2,6,2,1,10 against K=20 — the gate's own INVALID clause forbids folding them into a ratio — leaving
+conjunct 2 to carry the separation. A valid RED now exists: **α drift at K=20 with acceptance 1.0 at every
+rung.** MEASURED: α=2.5 → 0.990250, α=2 → 0.965187, **α=1.5 → 0.868108 ⇒ RED**; α=1.0 throws in
+`prepareSchur`, so the reachable window is α ∈ (1, 2). Because acceptance stays 1.0 throughout, **the two
+conjuncts are demonstrably independent** — which item 10c's proposed route (accept every trial regardless
+of Armijo) could not have shown, since it forces conjunct 2 by construction. Production α is **3**
+(`optimizer.ts:23` `DEFAULTS`), bracketed with margin. Note 0.868108 ≈ the withdrawn 0.86027: the first
+draft's number was roughly right and its *derivation* was invalid; that is not a rehabilitation of it.
+
+**5. θ CANNOT over-compress this operator — the adjacency certificate is a hard accuracy floor.** MEASURED
+(n=240): **`nFar` pinned at 274 and `nearPairs` at 7 128 for every θ ≥ 4**, with θ=4 and θ=50 producing
+**bit-identical trees**, because raising θ converts would-be-admissible blocks into adjacency-**VETOED
+near** blocks (`adjacencyVetoed` 50 → 196) rather than far ones. `δ_compress` saturates at **1.568e-2**,
+only **1.7×** its θ=0.5 value. This is the asymptotic consequence of the O(1) certificate proved at
+`bct.ts:30-38`, and it is a **safety property**: no choice of θ makes this operator inaccurate.
+> **This does NOT contradict `bct.ts:438-448`**, which reports θ 0.5→0.25 holding `nearPairs` at 21 598
+> while `nFar` goes 748→904. That is the **refining** end of the ladder (vetoed blocks become merely
+> inadmissible and split one level deeper); the saturation above is the **coarsening** end (would-be-far
+> blocks get vetoed into near). Different fixtures and opposite directions — both are the same certificate.
+>
+> **Consequence for gate design: θ is not a knock-out axis for any accuracy gate in §7.** Any gate whose
+> RED side is specified against θ is specifying an unreachable RED. H4b′ (A46 item 1) and H4c conjunct 1
+> both hit this; it is a property of the operator, not a coincidence of two gates.
+
+**6. H4c is MIS-AXED, not weak — the bar is NOT tightened (#98).** Stage 1's own framing ("H4c conjunct 1 is a
+WEAK gate") is accepted on the measurement and **rejected on the conclusion**. MEASURED: across the exact
+dense `A`, θ=0.5, θ=4, ε drift 1e-10→1e-2, β drift 6→4.5 and massWeight 100, **`R_E` spans only
+0.9987–1.0034**, with β drift and θ=4 both scoring *above* production; τ=1 on every step, so `R_E` ≈ 1 for
+any roughly-downhill direction. Three rulings follow:
+- **The 0.95 bar stays.** Choosing a tighter bar from the same run that revealed the narrow band is
+  data-dependent bar-setting — the move refused at A42 ruling 5 and A43. A new bar must come from a
+  pre-registered sensitivity analysis, not from this artefact.
+- **H4c's documented purpose changes to what it actually detects: α/β/ε drift between the saddle operator
+  and the step that consumes it.** `hierarchicalSaddle.ts:110-118` states that this failure is invisible
+  everywhere else — *"NOTHING downstream can see the disagreement — the residual is self-consistent and
+  nothing thresholds it"* (`linsolve.ts:410-413`). H4c conjunct 1 is the **only** instrument in §7 that
+  fires on it. A gate that uniquely covers an otherwise-undetectable failure is not a weak gate; it was
+  mis-named. §7.7's framing of it as an end-to-end *compression* check is withdrawn.
+- **Compression's instrument is H1-a's `δ_compress`, which already discriminates.** H4c never needed to
+  duplicate it, and by item 5 could not have.
+
+**7. New verdict label: WEAK/MIS-AXED, beside A42 ruling 5's VACUOUS.** VACUOUS = the predicate cannot
+fire. **MIS-AXED** = it fires, but not on the variable it is written against. Both are distinct from GREEN
+and **neither may be reported as GREEN**, because a gate that passed and a gate that could not have failed
+on the tested axis read identically in an artefact. H4b′ is VACUOUS; H4c conjunct 1 is MIS-AXED.
+
+**8. Ruling 4's replacement has BOUNDED validity and will bind at n ≈ 2318 (#99).** The reference solve's own
+backward error goes 2.103e-16 → 7.331e-16 over the ladder, leaving only **1.514× margin at n=960** and
+rising as **n^0.471**, projected to cross 10·u_f64 at **n ≈ 2318**. This is the first *computable* form of
+§7.5's ceiling and is consistent with but weaker than its n=960 value. **Anyone extending the ladder past
+n ≈ 2318 must re-derive this predicate, not raise its constant.**
+
+**9. My apply-count budget was WRONG, and the n=1920 cut is ACCEPTED.** I instructed Stage 1 to budget from
+apply counts because they are load-independent integers. They are — and they are **incomplete**, which I
+did not check. Full GMRES's Arnoldi orthogonalisation is **O(iters²·dim)**: at n=960, iters=600, that is
+600²·2880 = **1.04e9 operations, ~8× the near-field apply work and independent of the apply count.**
+MEASURED per-doubling cost n=480→960 is **3.0×** against the ladder's predicted 1.66× — the budget ran
+**1.81× low**, inside my 2.5× stop trigger but for the wrong reason. **The correct cost model is apply
+counts PLUS the orthogonalisation term.** Stage 1's earlier 2.79× is withdrawn (inferred n=240 time).
+Independently, 138 s with both operators resident vs 33 s f64-only = **4.2×**, reproducing task 7b's
+"a second resident `HierarchicalA` slows `applyA` 6×". **H2's n=1920 cell is NOT MEASURED** (~69 min) and
+that is accepted: the floor's exponent is −0.1034 (flat-to-falling), the margin grows with n, A26 already
+publishes n=1920, and H3 covers the range. It is labelled NOT MEASURED, not silently dropped.
+
+**10. H2's "floor" is a CENSORED MINIMUM at every n ≥ 240.** §7.3:1401 pins `maxit = min(600, 2·dim)` and
+gates `min over probed iterates of η`; at n ≥ 240 the iteration stops at `maxit`, not at convergence, so
+the gated value is a minimum over a **truncated** trajectory. The word "floor" in §7.3 is therefore
+misleading and is to be read as *censored minimum*. The gate is unaffected — a censored minimum is an
+upper bound on the true floor, so GREEN still implies GREEN — but no convergence claim may be drawn from
+it. Now published per row with its stop reason.
+
+**11. Three of Stage 1's own pre-registered numbers were REFUTED, one of them mine.** Recorded because a
+pre-registration that only ever gets confirmed is not doing any work:
+- "cos in the BCT metric will be much closer to 1" — **REFUTED** (moves 1−cos by 4%, not decades). This is
+  ruling 3's stated mechanism: I claimed the exact-reference cosine is δ_compress-dominated *through the
+  metric*. The metric is not the channel; compression enters through `x̃`. **The ruling's conclusion stands
+  and its reasoning does not** — emitting both was right for a reason I did not give.
+- H1-b's margin band 19–54× **exceeded** at θ=0.25 (108.9×): the bar doubles while the noise stays flat.
+- H2's floor exponent −0.077 predicted vs **−0.1034** measured.
+
+**12. H4b′'s VACUOUS verdict is CORROBORATED here, not ESTABLISHED here.** `rowsWithCosBelowCosBarAndQPositive`
+is **0** in this run — every direction also passes H4a — so row 11 supplies **non-failure evidence only** and
+cannot demonstrate the blindness. The VACUOUS ruling remains A46 item 1's, resting on task 0c's adversarial
+set. Row 11 must not be cited as its source.
+
+**13. The H4a column is NOT COMPARABLE to §7.5's δ=0 control** (#97). Row 11 reads 0.9991 at n=64 where
+§7.5's δ=0 control reads 0.9704, and **a compressed operator cannot beat an uncompressed control**, so the
+two constructions differ — most likely because row 11 shifts the dense reference by the BCT run's own σ.
+Stage 1 declined to claim the better number and recorded `tr(A_exact)/n` per row so the discrepancy is
+checkable. **Neither column may be quoted against the other until #97 reconciles them.**
