@@ -750,6 +750,14 @@ quadrature argument (§5.4) refers to.
 
 Five orders of magnitude of conditioning growth removed, flat to within 2.7 % over a 30× size range.
 
+> **SCOPE, A38 item 9 (2026-10-12): the preconditioned row above is the LAB `pinv((−Δ)⁺)` construction,
+> not the shipped operator.** `task-6-review-math.md:171-178` measures both on the same `A_bct,σ` and the
+> same hierarchical `L_f`: lab **1.09765e4** (the digits above) vs **shipped `massWeight=1`: 59.04** at
+> n=64. The shipped operator is ~100× BETTER in absolute terms and **NOT flat** — 9c measures the worst
+> four-shape `κ_excl` growing **n^+0.47 at c=30** and **n^+0.15 at c=35** (90.8 → 309.9 and 115.7 → 233.0
+> over n = 64 → 4 000). **The "flat" claim does not transfer to the shipped path; the headroom does, and
+> it is 48× larger than §6 quotes** (720× at n=4 000, not 14.9×). Do not rebuild anything on flatness.
+
 > **Trap, measured, do not rediscover.** ~~The RS preconditioner is **worse than no preconditioner
 > below n ≈ 223.**~~ **A28, RULED 2026-10-11 (task 7b): `n ≈ 223` is REFUTED by 2.8×. The crossover is
 > bracketed in `n ∈ [72, 80]`.** The trap's *direction* survives — there is a small-n regime where RS
@@ -1096,6 +1104,12 @@ parameter whose minimum value is the exact all-inadmissible path, through the sa
 
 **Plain f32 walls at n ≈ 1 200–2 000.** Four agreeing derivations (tabulated in §7.11), and the
 mechanism is not the BCT:
+
+> **SCOPE CORRECTION, A38 item 8 (2026-10-12): this range is the TREFOIL's.** Measured on four shapes,
+> the exponent below is confirmed (+3.30…+3.34) but the PREFACTOR spans **4 506×**, so the
+> unpreconditioned f32 wall spans **n ≈ 394 (arc) to n ≈ 4 907 (helix)** — the arc's is BELOW the n = 960
+> floor. Any quotation of a scalar f32 wall must name its fixture.
+
 `κ₂(A_σ) ∝ n^3.3338` measured against `2s = 10/3` theory, so `κ₂·u_f32` reaches 0.838 by n=1 920.
 **The BCT fixes storage and cost. It does nothing whatsoever for conditioning.**
 
@@ -1149,9 +1163,36 @@ this as a pre-registered limitation rather than leaving it implicit.
 > dense `sgemv`'s `alphaMatvecF32 = 2.229e-07`, and it grows `n^0.829`/`n^1.176` against the dense
 > floor's `n^0.370`. This single correction is what moves the wall from n≈3 310 to n≈1 228–1 773.
 >
-> **A genuine f32 hierarchical apply driven through the whole solve has still never been run**, and
-> it remains the single highest-value unknown in this spec — the one measurement that could
-> invalidate §7.11's range ruling in either direction. §7.11 item 1 and §11 make it a task.
+> ⚠ **SCOPED 2026-10-12 by `[A40]`/`[A42]`, MEASURED: the noise statement above is TRUE and its WALL
+> INFERENCE IS FALSE.** The genuine apply really is 5.5× noisier than the dense `sgemv` **on random
+> directions** (1.05e-6 vs 1.9e-7, independently reproduced). But that does **not** transfer to the
+> solve: at the `K_s` operating point the genuine arm's A-angle is **88–1370× SMALLER** than the dense-f32
+> recipe's, because error entering through `Mᵀ` is derivative-shaped and damped by `A_σ^{-1}` while the
+> dense recipe's error is white. **"UNSAFE" is STRUCK for the A-angle at `K_s`; it STANDS for
+> random-direction apply noise**, and `[§7.11]` rows 1/1b are relabelled as random-direction apply noise,
+> not wall evidence. The sentence "this single correction is what moves the wall to n≈1 228–1 773" is
+> **withdrawn**: the dense-f32 recipe's wall is ≈1 900 (reproduced), the genuine arm's is ≥ 9 300.
+>
+> ~~**A genuine f32 hierarchical apply driven through the whole solve has still never been run**~~ —
+> **FALSE as of 2026-10-12.** Task 7b ran one (`[A39 item 2]`) and row 10 has now run it as a controlled
+> two-arm differential (`[A40]`, `[A42]`). §7.11's range ruling IS invalidated for the shipped operator,
+> in the safe direction.
+>
+> **MECHANISM (`[A43]`, row 10 S4.2–S4.5; adopted as proposed).** The genuine apply's rounding error is
+> suppressed across the whole low-wavenumber band, not only at the constant mode:
+> `R = a_k(genuine)/a_k(dense cast)` = **0.0009–0.05 at `k = 2…16` on 10/10 (shape, n) cells**, so the
+> "constant mode only" account is **refuted (0/10)**, and the registered "suppression across low `k`"
+> threshold was met on only **6/10 and is NOT confirmed by its own rule**. The property that survives the
+> controls is that **the error operator has exactly zero row sums, so it acts on differences of `x`**: a
+> dense f32 cast with each row repaired to sum to zero (diagonal repaired in f64) matches the genuine
+> arm's `A_σ⁻¹` amplification (**0.79–1.03×, 10/10**), whereas the same cast with the diagonal exact but
+> row sums non-zero stays at the dense level (**0.62–1.38×, 10/10**). The `Mᵀ…M` factorisation is
+> therefore **not necessary** for the effect, and `A·1 = 0` is the `k = 0` shadow of a statement about
+> every row. In the genuine apply the high-order zero (`M·1 = 0`) is reassociation-proof and the low-order
+> zero is conditional on `diag(K⁰1)` and `K⁰·1` agreeing (invisible at 10 ulps, 7–10× at 10³ ulps; the
+> low-order term carries ~3 % of the `K_s` angle). **It does NOT protect the stagnation reading**, which
+> is set by the f32 storage of `A·x` (`κ₂(A_σ)·u_f32`). *Zero-row-sums is a POST-HOC finding (its two
+> controls were each registered before running); the registered hypothesis it replaced is not confirmed.*
 
 > **Trap, measured, not transferable.** WGSL permits reassociation and fusion with **no portable
 > opt-out** ([gpuweb#2076](https://github.com/gpuweb/gpuweb/issues/2076), open since 2021), and
@@ -2407,6 +2448,15 @@ set that is non-vacuous at n=30 000 and bears directly on precision:**
 MEASURED 0.8369 at n=1 920; the first draft said 1 900, which the same table contradicts) — one of the four f32-wall estimates
 in §6 — **while the preconditioned number does not move at all.**
 
+> **FIXTURE IDENTIFIED + INDEPENDENTLY REPRODUCED, A38 item 8 (2026-10-12).** This table is the
+> **trefoil**. A four-shape probe of `cond₂(D^−1/2 A_σ D^−1/2)` gives 1.233e6 / 1.237e7 / **1.425e8** at
+> n = 960 / 1 920 / 4 000 — **11–13 % of this table at every rung, including the n = 4 000 entry that was
+> EXTRAPOLATED here** (mine is lower by the amount Jacobi scaling predicts). So the table is confirmed
+> AND its `n ≈ 2 025` is shape-scoped: the same probe gives **n ≈ 394 (arc), 948 (circle), 2 104
+> (trefoil), 4 907 (helix)**. The exponent is geometry-independent; the prefactor varies **4 506×**.
+> The preconditioned column's flatness is correspondingly a one-shape measurement — see A38 item 8 (iii).
+
+
 *INVALID.* `dim null == 0` — structurally impossible, since the constants are in the nullspace by
 construction for every variant, so a zero nullity means the rank tolerance is mis-set. Or
 `dim null ≥ 3` ⇒ **INVALID, not RED**: the known defect gives exactly 2 (one extra mode, the
@@ -2511,6 +2561,12 @@ Rules:
 ```
 
 ### 7.11 Where the f32 wall sits, and what the gates can and cannot see
+
+> **SCOPE, A38 item 10 (2026-10-12): every derivation in the table below is the TREFOIL, and three of
+> them share one instrument family.** The agreement is therefore common-mode on geometry — and
+> derivation 3, re-measured on four shapes (A38 item 8), spans **n ≈ 394 (arc) to 4 907 (helix)**, with
+> the arc's wall BELOW the n = 960 floor. The geometry-independence of derivations 1, 1b, 2 and 4 is
+> **UNTESTED, not established.** Per this section's own rule, an unbound ceiling is "NOT ESTABLISHED".
 
 **#59's n ≈ 3 310 is superseded.** That crossover reproduces exactly (3 310.4 from
 `α_denseF32 = 1.555e-08·n^0.3697` against `β_rand = 1621·n^-2.7605`) and is wrong for one reason: it
@@ -2799,7 +2855,7 @@ a very fast kernel — it fails silently in the direction that *confirms* an opt
 |---|---|---|
 | **Genuine f32 hierarchical apply** driven through the whole solve | both f32 walls rest on a *dense* f32 stand-in (§6); this decides where the mixed-precision switch goes, and it is the one run that could invalidate §7.11's whole range ruling | low — §11 **task 10** |
 | **Adversarial rhs** that excites θ=0.5's 0.4–2.2 % bad modes | every `cos∠_A` is against 5 random rhs; a converged flow is exactly where the rhs stops being random. #64 calls this "cheaper and far more decisive than another `c₁` point" | low — **promoted to gate H6** (§7.9) and §11 **task 0c**, because §7.6 removed the instrument §4.1 was resting on |
-| **`κ₂(Ã⁻¹A_σ)` above n = 1 920** | MEASURED flat only to n=480 in JSON; **ASSUMED** flat above 1 920, and that assumption carries the entire mixed-precision scheme via H5 property 3 | low–medium — §11 **task 0b(iv)** + matrix-free Lanczos; needs no dense matrix |
+| **`κ₂(Ã⁻¹A_σ)` above n = 1 920** | ~~MEASURED flat only to n=480 in JSON; **ASSUMED** flat above 1 920, and that assumption carries the entire mixed-precision scheme via H5 property 3~~ **CLOSED by 9c — A38 item 9. 9c's matrix-free Lanczos route — the exact instrument this row costed — swept four shapes to n=4 000. The bar is met with 720× headroom at n=4 000 (vs §6's quoted 14.9×, which is the LAB operator), but the quantity GROWS (n^+0.15…+0.47), so THE ASSUMED FLATNESS IS FALSE WHILE THE RULING SURVIVES. Build on the measured margin, never on flatness.** | ~~low–medium~~ **spent — no new task needed** |
 | **One wall-clock GPU matvec at n=30 000** | **H3's primary bar is 0.5 s ÷ 7.8 ms, and the 7.8 ms rests on zero GPU runs** (§3.6) | low — §11 **task 11** |
 | **Accuracy on tangle-class geometry** | all direction/SPD/line-search results are on `trefoil` alone; κ_near spans 14.67× across geometries | medium |
 | **Accuracy at n > 4 000** | every BCT error number is n≤4 000 (θ=0.5) or n=960 (θ sweep); nothing at the 30 000 target | high — the exact reference is O(N²) |
@@ -3054,8 +3110,8 @@ verification are here.
 | 8b ✅ **SHIPPED (`4df665b`) — see A33, A35 AND A36. A36: this row's `cos∠_A ≥ 0.9` bar CANNOT FAIL for the reason it is written about (no θ trips it — 0.9987 is the worst any θ produces, because the adjacency certificate has no θ term) and it is BLIND to a saddle built for the wrong geometry (0.999839 vs 0.999840 while `g̃` is 4.04 relative away — issue #83). Two companion cells ship with it: mod-translation relErr of `g̃` ≤ 1e-2, and an EXACTNESS differential at θ=0 where `nFar`=0, ≤ 1e-10 at n=240 (measured 2.6e-12, the only cell that can see a plumbing defect)** | **`hierarchicalSaddle.ts` — the producer.** A `makeHierarchicalSaddle(vertices, …): HierarchicalPreparedSaddle` factory plus its wiring through `dispatch.ts` → `optimizer.ts` `opts.saddle` | new + `dispatch.ts` | **without this the phase ships an unreachable feature**: tasks 1–8 widen a public type that nothing in the repo ever writes, and the dense path stays bit-identical only because it is still the only path. End-to-end: one `sobolevStepSet` on the hierarchical route at n=960, `cos∠_A ≥ 0.9` against the dense f64 reference — **BAR AMENDED, A36: met at 0.999840, but it is NOT a compression gate and NOT a wrong-geometry gate; the two companion cells above are what discriminate, and the θ=0 exactness cell is now REQUIRED**  **CROSS-TASK CONTRACT FROM TASK 8 (`a8569d8`, binding): this task MUST pass `projectionMode: 'frozen'` when it wires the hierarchical saddle through `dispatch.ts`.** `optimizer.ts:308-327` (post-8b; was `:297-318`) REFUSES a hierarchical saddle without it, pre-arm, by design: `projectOntoConstraintSet`'s other branch calls `assembleAFlat` **per projection iterate** (O(N²) f64, **7.2 GB at N=30 000**), so the combination cannot run at target scale, and below that scale it would solve the GRADIENT hierarchically while silently reassembling a DENSE Ā for every projection iterate — a step that reads as hierarchical and is not (CLAUDE.md: gates name their impossible values). An auto-upgrade was rejected because `opts` and behaviour would then disagree. **If 8b needs to pass either mode, the throw may be downgraded ONLY with the dense-projection fallback surfaced in `stats`** — nothing downstream can currently distinguish the two. **Also carried to 8b: (R2) `factorMode` is silently inert on the hierarchical arm — add the guard or the one-line TSDoc; (R4) the seam tests cover one fixture (trefoil n=24, k=4) and one step, so 8b owns the k=0 and `edgeLengths` cells against a REAL operator.** |
 | 9 ✅ **SHIPPED (`01079a1`) — see A37. It routes the MIXED `{barycenter, edgeLengths, pins}` set by COMPOSING the projector with an UNMODIFIED `prepareSchur` (the controller's hypothesis that this breaks 9b's reduction was REFUTED: `C_edge N = 0` bit-exactly, so `N ⊂ V` and the reduction transfers verbatim). §8.3's two gates were BOTH mis-specified — see A37 items 2 and 3.** | `nullspace.ts` — the `k=O(n)` constraint route for `edgeLengths` (§8.2) | new + test | projected-preconditioned operator verified SPD on the constrained subspace **before** any convergence number; `[G6]`'s conditioning bound checked separately. **BAR AMENDED, A37 item 6: `λ` is asserted at n ≤ 240 only and LOGGED at n=960. The edge multipliers are not solved for, they are RECOVERED post-solve through `(C_e C_eᵀ)⁻¹`, so their error carries that matrix's `cond ≈ 1.9e4` on top of `x`'s: over n = 240 → 960 `x` grows 1.9× while `λ` grows 16× on `grad/−φ` and 85× on `gen/−φ`, reaching 4.24e-10 — OVER a 1e-10 bar. At n=960 assert `x` plus `edgeConstraintResidual` instead. A36: this row's `k=0` / gauge cells also inherit A36 item 3 — on a translation-singular set the dense path is not a reference for the STEP either (the dense `g̃` is 82 % translation, so `lineSearch.ts` normalises it to a 1.77× shorter step and a 4.0 % energy gap, with BOTH arms `accepted: true`); a green `k=0` cell must not be read as the two arms taking the same step. A35: this row's bar inherits 9b's amendment — compare against the DD-refined truth, not the dense path, or it is unmeasurable at n=960 for the same reason. And it MUST include a `gen/−φ` cell (generic top with non-zero mean): 9b measured that a flipped multiplier sign is INVISIBLE on every `grad/0` and `zero/−φ` cell of every k=3 set, so a suite without `gen/−φ` ships a sign error.** |
 | 9b ⬆️ **PROMOTED AHEAD OF 8b (A33)** | `schur.ts` — the `k=O(1)` half of §8.2's hybrid (barycentre, 3 rows; per-pin, 3 rows; tangent, 1 row) | new + test | the hybrid is a two-branch ruling and the first draft gave a task to only one branch. Dispatch on `k`: Schur for `k=O(1)`, nullspace for `edgeLengths`' `\|E\|` rows. ~~Verify each branch reproduces the dense path's `x` to 1e-10 at n=960 on its own constraint set~~ **BAR AMENDED, A35: `1e-10` against the DOUBLE-DOUBLE-REFINED TRUTH of the dense matrix of the same operator.** The literal bar is unmeetable BY ANY SOLVER at n=960 — dense LDLᵀ's own error against truth grows `~n^3.3` (4e-14…1.6e-13 at n=120 → **1.4e-10…6.4e-10 at n=960**), so it crosses 1e-10 between n=480 and n=960 and the "disagreement" equals the oracle's own error to 3 digits. Shipped Schur is **3.2e-12…9.1e-12** from truth, **25–200× closer than the oracle it was told to match**. Literal LDLᵀ agreement is asserted at **n ≤ 240** (5.6e-13…5.4e-12) and LOGGED at n=960. **SHIPPED** |
-| **9c** | **The `c` re-check at n ≥ 4 000 — A20's OPEN item, which had NO OWNER until 2026-10-11. A20 points at *"task 9's calibration"*; THIS ROW is what it means.** Row 9 is `nullspace.ts` and does no calibration, and **`9b` was already taken by `schur.ts`** — the item was assigned to a task that cannot do it. Scope: `κ_excl` over a `c` grid at n ≥ 4 000 on the four shapes present at every n (arc / circle / helix / trefoil — A20 proves these carry every binding constraint), **plus `λ₂(n, m̂)` jointly, which issue #78 needs and which is the same eigensolve** | `bench` / `scratch` only — measurement, no `src` change | **Three pre-registered outputs.** (1) The minimax-absolute `c` at n ≥ 4 000, against A20's five-rung trend **15 / 20 / 20 / 25 / 30** at n = 64…960 and its extrapolated **40–45** at N = 30 000 — report whether the trend continues, flattens, or breaks; do NOT bank the extrapolation either way. (2) **Where `λ₂ = 1` falls in `(n, m̂)`** — `κ_excl = λ_max/λ₂` silently measures the wrong mode once `λ₂ < 1` (#78; measured `λ₂` at n=64: 6.62 @ m̂=30 → 0.878 @ m̂=90, and `precond.test.ts`'s module comment records `λ₂ ≈ 1.3` at n=30 000 for the OLD m̂), so if `λ₂ < 1` anywhere in the production regime **every `κ_excl` figure there is not κ_excl** and the N=30 000 conditioning claims rest on a broken instrument. (3) The `rs-identity` knock-out bar `> 100`, re-derived at whatever `c` lands: MEASURED **273.3 at m̂=30, 118.0 at 45, 66.4 at 60** (#78), so it FAILS inside A20's own projected band — re-derive it as part of changing `c`, measuring first, never after a red. |
-| 10 ⚠️ **THREE CARRIES FROM A37 before it measures anything: (a) the PROJECTION SOLVE must stay f64 above n ≈ 9 000 (`κ·u_f32 = 1.12` at N=30 000 — an f32 projector stops being a projector), while the OPERATOR is the earlier-binding quantity at n ≈ 1 027; (b) the `rhsTop = 0` projection iterate is NOT free on the nullspace route — it costs a FULL GMRES because `d ≠ 0 ⇒ x_p ≠ 0 ⇒ b̂ ≠ 0`, so 9b's zero-apply shortcut does not exist there and a line search leaning on it will read as a regression; (c) issue #85 — `edgeLengthsBlock` allocates `C` densely, `3n²` f64 = 21.6 GB at N=30 000, so the `C: number[][]` seam is itself an O(N²) wall for every consumer except `prepareNullspace`** | Mixed precision: f32 inner, f64 outer (§6) | `gmres.ts`, `apply.ts` | **a genuine f32 hierarchical apply through the whole solve** (§9.2's top gap) — locate the wall, do not inherit it |
+| **9c** ✅ **DONE — see A38. All three outputs answered: `c* = 35` at BOTH new rungs (grid-only, NOT converged); the `λ₂ = 1` crossing mapped (arc and circle are ALREADY below 1 in the production regime); and THIS ROW'S OWN `rs-identity` SENTENCE IS FALSE (the bar does NOT fail inside 40–45 — 148.5 and 118.0, first failure at m̂ ≈ 48.9). → #88 proposes `c`: 30 → 35; #89, #90 carry the two `λ₂` conflicts.** | **The `c` re-check at n ≥ 4 000 — A20's OPEN item, which had NO OWNER until 2026-10-11. A20 points at *"task 9's calibration"*; THIS ROW is what it means.** Row 9 is `nullspace.ts` and does no calibration, and **`9b` was already taken by `schur.ts`** — the item was assigned to a task that cannot do it. Scope: `κ_excl` over a `c` grid at n ≥ 4 000 on the four shapes present at every n (arc / circle / helix / trefoil — A20 proves these carry every binding constraint), **plus `λ₂(n, m̂)` jointly, which issue #78 needs and which is the same eigensolve** | `bench` / `scratch` only — measurement, no `src` change | **Three pre-registered outputs.** (1) The minimax-absolute `c` at n ≥ 4 000, against A20's five-rung trend **15 / 20 / 20 / 25 / 30** at n = 64…960 and its extrapolated **40–45** at N = 30 000 — report whether the trend continues, flattens, or breaks; do NOT bank the extrapolation either way. (2) **Where `λ₂ = 1` falls in `(n, m̂)`** — `κ_excl = λ_max/λ₂` silently measures the wrong mode once `λ₂ < 1` (#78; measured `λ₂` at n=64: 6.62 @ m̂=30 → 0.878 @ m̂=90, and `precond.test.ts`'s module comment records `λ₂ ≈ 1.3` at n=30 000 for the OLD m̂), so if `λ₂ < 1` anywhere in the production regime **every `κ_excl` figure there is not κ_excl** and the N=30 000 conditioning claims rest on a broken instrument. (3) The `rs-identity` knock-out bar `> 100`, re-derived at whatever `c` lands: MEASURED **273.3 at m̂=30, 118.0 at 45, 66.4 at 60** (#78), ~~so it FAILS inside A20's own projected band~~ **FALSE — A38 item 2: it does NOT. At the binding cell (n=64) the ratio is 148.5 at 40 and 118.0 at 45, both above 100; the first failure is at m̂ ≈ 48.9. The struck claim rested on the 66.4 at m̂=60, which is OUTSIDE the band it names. Replicated value at m̂=30 is 271.78, not 273.3 (0.55%, and #78's own rounded κs give 271.6).** — re-derive it as part of changing `c`, measuring first, never after a red. |
+| 10 ⚠️ **PLUS TWO CARRIES FROM A38 item 4 (`A_σ`'s conditioning, measured): (d) `cond₂` of the unit-diagonal `A_σ` grows **n^+3.34** (arc: 3.27e8 → 3.85e10 over n = 960 → 4 000), so an f32 **factor-or-solve** of `A_σ` is out of reach ALREADY AT THE n=960 FLOOR (19.5× past `1/eps_f32` on the arc) while f64 stays safe to N ≈ 130 000 — and the pre-registered `chol_pivot_ratio` vs `sqrt(eps)` flag is WITHDRAWN as not scale-free; (e) **`cond₂` bounds SOLVING, not APPLYING** — this row's deliverable is an f32 **matvec**, whose error goes as `eps32 × growth`, so (d) must NOT be quoted against it. THREE CARRIES FROM A37 before it measures anything: (a) the PROJECTION SOLVE must stay f64 above n ≈ 9 000 (`κ·u_f32 = 1.12` at N=30 000 — an f32 projector stops being a projector), while the OPERATOR is the earlier-binding quantity at n ≈ 1 027; (b) the `rhsTop = 0` projection iterate is NOT free on the nullspace route — it costs a FULL GMRES because `d ≠ 0 ⇒ x_p ≠ 0 ⇒ b̂ ≠ 0`, so 9b's zero-apply shortcut does not exist there and a line search leaning on it will read as a regression; (c) issue #85 — `edgeLengthsBlock` allocates `C` densely, `3n²` f64 = 21.6 GB at N=30 000, so the `C: number[][]` seam is itself an O(N²) wall for every consumer except `prepareNullspace`** | Mixed precision: f32 inner, f64 outer (§6) | `gmres.ts`, `apply.ts` | **a genuine f32 hierarchical apply through the whole solve** (§9.2's top gap) — locate the wall, do not inherit it |
 | — | ~~GPU wall-clock probe~~ | — | **NOT a task in this phase.** §7.11 item 6 wants one wall-clock matvec at n=30 000 to anchor H3's budget half, but §1.4 puts the GPU apply out of scope and §9.1 concedes the protocol needs "a kernel, when one exists" — so there is nothing to time. **Consequence, pre-registered: H3's budget-derived bar stays unanchored for this phase**, and its only live support is the CPU-f64 projection (§7.4), which §7.4 itself marks as integer-noise-sensitive. Do not quote `0.5 s ÷ 7.8 ms` as measured |
 | 11 | Gate harness, emitting §7.12's schema to `bench/results/<date>-gpu-phase2h-gate-calibration.json`. **TypeScript, not Python** (`bench/gpu/hCalibration.ts`) for H1-a, H1-b, H2, H3, H4a, H4b′, H4c — those gates are defined against the TS instruments built in tasks 3–8 (`applyA`, `lineSearchStepSet`, the GMRES `η` hook) and a `.py` harness cannot reach them. H5 and H6 stay in `scratch/*.py`, where their dense-eigenvalue instruments already live | new | every gate in §7 reports its **VALUE, not only its verdict**; every INVALID predicate reachable in a test; **R1 publishes three ceilings** and `NOT ESTABLISHED` where no gate binds; `clock: null` |
 
@@ -3770,6 +3826,306 @@ implementation. Three rules specific to this spec:
 
 ---
 
+### ⚠️ A38 — task 9c is DONE and ACCEPTED; **row 9c's own sentence about the `rs-identity` bar is FALSE**; A20's open item is answered at the grid's resolution and NOT converged; and `A_σ`'s conditioning is measured for the first time
+
+Report: `.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/task-9c-report.md` (918 lines), data
+`scratch/sweep_shapes_9c.json` (105 rows). Controller ruling and the four dispatch conditions:
+`progress.md`, "TASK 9c ACCEPTED". Measurement-only task: no `src`/`test`/`bench` change, nothing
+committed. Every figure below is the **Python dense exact all-pairs `A_σ`**, not the TS BVH/BCT `A_σ`.
+
+**1. Output (1) — the minimax-absolute `c` at n ≥ 4 000.** Grid argmin **35 at n = 1 920 (worst
+`κ_excl` 207.42, arc binding) and 35 at n = 4 000 (232.98, arc binding)**, continuing A20's
+15 / 20 / 20 / 25 / 30. **The trend FLATTENS at the 5-wide grid's resolution; it does not BREAK.** The
+supplementary continuous arc/helix switch point is 30.32 → 32.91 → 34.84 over n = 960 → 4 000, with
+decelerating per-octave increments (+3.96, +2.59, +1.82) — so at n = 1 920 the grid argmin overstates
+the continuous point by about one step. **`35 → 35` IS NOT CONVERGENCE:** the continuous point still
+moves +1.93 per octave and the worst `κ_excl` at the argmin still rises (159.15 → 207.42 → 232.98;
+exponents +0.382 then +0.158, LS +0.266 over 960…4 000). **A20's extrapolated 40–45 at N = 30 000 is
+neither confirmed nor refuted and is NOT banked.** Argmin interior to its grid at both new rungs.
+
+The mechanism, which is the part worth carrying: **at `c = 30` the binding shape is the HELIX and its
+`κ_excl` grows n^+0.47 over the last three rungs; at `c = 35` and above the binding shape is the ARC
+and it grows n^+0.15 (+0.11 at 40, +0.09 at 45).** The minimax `c` rises with n because the helix side
+degrades faster than the arc side, and the shipped value sits on the steep side of the switch. Per-shape
+argmins span 0 (arc, which wants no mass term at all from n = 480 up) to 70 (helix at n = 4 000).
+**→ issue #88** proposes `c`: 30 → 35, gated on a TS/BCT re-measurement first; it is an exported
+constant, so the inline-fix gate sends it to an issue rather than an edit.
+
+**2. ROW 9c'S OWN SENTENCE IS FALSE and is struck here.** The row says the `rs-identity` knock-out bar
+`> 100` "**so it FAILS inside A20's own projected band**". ~~It fails inside 40–45.~~ **It does not.**
+Measured at the binding cell (trefoil, n = 64): **148.5 at m̂ = 40 and 118.0 at 45 — both above 100.**
+The bar first fails between m̂ = 48 (103.8) and 49 (99.7), i.e. at **m̂ ≈ 48.9**, four above the band's
+top. The claim rested on the **66.4 at m̂ = 60**, which is OUTSIDE the band the sentence names. At the
+landed `c = 35` the ratio is **196.4, margin ×1.96**, and it survives at every measured n (1 103 at
+n = 120, 5 048 at 240 — the ratio grows ×4–6 per rung, so n = 64 binds at every `c`). The correct
+statement: **the bar needs no change for `c ≤ 48`; the margin at 45 is thin (×1.18) and shrinks as `c`
+rises.** `precond.test.ts:571` is sound as written.
+
+**3. Output (2) — where `λ₂ = 1` falls in `(n, m̂)`.** `lam_min` crosses DOWN through 1 at
+**m̂ ≈ 85.4 (trefoil, n = 1 920 and 4 000; 84.0 → 85.4 over n = 64 → 4 000, essentially
+n-independent), ≈ 93.1 (helix), ≈ 27.7 (circle, stable)**; the **arc has `lam_min < 1` at EVERY m̂
+including 0 for n ≥ 240** (0.2986 at n = 4 000, m̂ = 0). So at the shipped `c = 30` and at 40/45 the
+arc and circle are below 1 while helix and trefoil are above — **`κ_excl` as `λ_max/λ₂` is already not
+`κ_excl` on the arc and circle in the production regime**, which is #78 item 2 confirmed. Every figure
+in this phase that needs the 1⊥ minimum must use the explicit-`Q` projection, never
+deflation-by-value: in this regime the constant mode and the smallest 1⊥ mode cannot be told apart by
+value. **The shipped guard `precond.test.ts:1092` (`λ₂ > 1.5`, on the trefoil) is NOT near firing** —
+margin **×2.48 at n = 4 000, m̂ = 30** (identical at every m̂ from 20 to 40, because the trefoil's
+`lam_min` is a mass-weight-independent mode there), ×2.21 at 45, ×1.82 at 50; it would fire at
+**m̂ ≈ 69** at every n. **Two conflicts go to issues:** `precond.test.ts:547`'s "`λ₂` extrapolates to
+≈1.3 at n = 30 000" is contradicted by a flattening trefoil `lam_min` (3.719 at n = 4 000, local slope
+−0.013; continuation gives ≈3.6) → **#89**; and the **helix `lam_min` is the one quantity still
+falling** (3.093 → 2.131 → **1.588** at n = 960/1 920/4 000, slopes −0.80, −0.54, −0.40, in a
+mass-independent band so `c` cannot fix it) → **#90**.
+
+**4. `A_σ`'s OWN CONDITIONING, measured for the first time on this branch** (controller probes
+`scratch-ctl/cholpivot.py` + `cholpivot_scaled.py`, JSON beside them). The task-10 carry above asked
+for `chol_pivot_ratio` at every (shape, n) with the arc factored first; 9c did not report it, so the
+controller measured it. **All 12 cells factor (`dpotrf info = 0`): `A_σ` is SPD-factorable at n = 4 000
+on all four shapes.** The raw ratio `(min diag L / max diag L)²` falls as **n^−2.28** on the arc
+(3.10e-6 → 6.38e-7 → **1.19e-7** at n = 960/1 920/4 000).
+
+**The ratio is NOT scale-free, and the Jacobi-scaled follow-up proves the decay is REAL rather than a
+dynamic-range artefact** — `cond₂(D^−1/2 A_σ D^−1/2)` on the arc is **3.27e8 → 3.32e9 → 3.85e10**, i.e.
+**n^+3.34**, and the scaled pivot ratio decays at −2.33 against the raw −2.28 (scaling moves the level
+2.1×, the trend not at all). Consequences, all of which replace the carry's `sqrt(eps)` flag:
+
+- **The `sqrt(eps_f64) ≈ 1.5e-8` flag I pre-registered measures the wrong quantity.** Worst measured is
+  1.19e-7 (7.9× above it, not crossed), but the raw trend would cross it at N ≈ 9 950 for geometric
+  reasons. **Drop it. Use `cond₂` of the unit-diagonal matrix.**
+- **f64 is safe across the whole target band.** `cond₂ ~ 1/eps_f64 = 4.5e15` is not reached until
+  **N ≈ 130 000** on the n^3.34 trend. At N = 30 000, `cond₂ ≈ 3.2e13`.
+- **But a dense DIRECT f64 solve at the scale target carries `cond₂·u_f64 ≈ 7.2e-3`** — within one
+  order of magnitude of f64's useful limit, against `κ_excl ≈ 233` for the PRECONDITIONED operator at
+  n = 4 000. **This is a quantified reason the preconditioner is load-bearing rather than an
+  optimisation**, and it is independent of the memory argument (`[DESIGN §1]`, CLAUDE.md: 3.6 GB and
+  ~9e12 flops at N = 30 000).
+- **An f32 FACTORISATION or SOLVE of `A_σ` is already out of reach at the n = 960 FLOOR**, not at
+  target scale: `cond₂` exceeds `1/eps_f32 = 8.4e6` by **39× on the arc at n = 960** and 21× on the
+  circle at n = 1 920. There is no f32 factorisation in `src` today (the only Cholesky is
+  `src/gpu/saddle.ts:92 choleskyF64`, f64 with an explicit `!(d > 0) || !Number.isFinite(d)` throw), so
+  nothing is broken — but **no f32 factor path may be added without scaling first and re-measuring.**
+- **CROSS-VALIDATED BY AN INDEPENDENT INSTRUMENT (added 2026-10-12, task 9c round 2 §5.5).** LAPACK
+  `dpocon`'s 1-norm estimate on the already-computed Cholesky factor gives `cond₁(arc)` = 8.05e9 ->
+  **9.30e10** over n = 1 920 -> 4 000, exponent **+3.335**, against my Jacobi-scaled `cond₂` exponent
+  **+3.34**. Different quantities, different codebases, agreeing to **three digits** — and the raw
+  pivot ratio ρ disagrees at **−2.29** on the same cells. **That settles which instrument is the
+  n-extrapolation one: `rcond₁`/`cond₂`, never ρ.** On the right quantity the arc's factor carries
+  `cond₁·u_f64` = 2.1e-5 at n = 4 000 (~4.7 correct digits), 2.6e-5 at n = 4 300, 2.1e-4 at n = 8 000,
+  **1.7e-2 at N = 30 000** — so the dense-`A_σ` arc route is **accuracy-limited near the SCALE TARGET,
+  not near n = 4 300.** A 9c conclusion to the contrary is struck (controller ruling R11 in
+  `progress.md`): its ρ bar of 1e-7 was set as "6.7× √ε" and therefore inherited **this item's own
+  withdrawn flag**. 9c's trip table also shows ρ and `rcond₁` trip in the **same decade** of a
+  definiteness perturbation (both pass at δ = 1e-7, both trip at δ = 1e-8), so preferring `rcond₁`
+  costs no sensitivity. **CONFIRMED ON 7 RUNGS × 4 SHAPES (9c round 3, `checks_9c.py ladder`):** the
+  arc's LOCAL `cond₁` exponents converge **+3.39, +3.36, +3.35, +3.34, +3.34, +3.34** over
+  n = 64…4 000 while its ρ exponents sit at −2.26…−2.29 — the split is not an artefact of a two-point
+  fit, and it reproduces on `dpocon` alone without my instrument. Circle and trefoil show the same
+  split (~−2.3 vs +3.33). **The two instruments agree on the EXPONENT only and were never
+  cross-checked on the LEVEL** — `cond₁` and `cond₂` differ by the 1-norm/2-norm constant and are not
+  interchangeable in absolute value. The harness now gates `rcond₁ ≥ 1e-12` (the value pre-registered
+  in its docstring before any factor was measured; **ruled NOT to be loosened** — it is conservative,
+  not wrong, and the model that would justify loosening has a 40× spread across its own probe points). **Any guard on this quantity gates `rcond₁`; ρ is a diagnostic only** — a ρ bar
+  at 6.7×√ε refuses a HEALTHY matrix from n ≈ 4 300 up, which is as costly as a gate that cannot fire.
+- **THE DISTINCTION ROW 10 MUST NOT LOSE.** `cond₂` bounds the error of **SOLVING** with a matrix, not
+  of **APPLYING** it. Row 10's deliverable is an f32 **matvec** inside an f64 outer iteration, whose
+  error goes as `eps32 × growth`, **not** `eps32 × cond`. **These numbers must not be quoted as
+  evidence against the f32 apply.** They bound exactly one thing: an f32 factor-or-solve of `A_σ`.
+  (This is the `tolerance-transfer-across-provenance` / `figures-carry-their-regime` failure mode; it
+  has already cost this branch four repeats.)
+
+**5. A GATE-METHODOLOGY DEFECT IN THIS SPEC'S OWN DISPATCH PRACTICE — mine, not the worker's.** 9c's
+matrix-free Lanczos route **failed its pre-registered gate, 99/101**, and the route was used anyway
+under a rule the report labels POST-HOC. The two failures are helix at m̂ = 0 and 0.03, on the
+**residual bar only** (3.6e-8, 1.4e-8 vs 1e-8), while their `κ` agreement with the dense reference is
+2.9e-7 and 8.1e-8 — **35× and 120× INSIDE the 1e-5 bar that gates the quantity actually used**. Those
+cells are inputs to no output (helix `κ` at m̂ = 0 is 5.1e6 against contenders near 200). **The defect
+is that I wrote the gate as a CONJUNCTION over a cell set that was a superset of the decision region,
+without saying what a failure outside the decision region means** — which promotes an irrelevant cell
+into a blocking failure and leaves the worker choosing between a task-destroying stop and an
+unpre-registerable rule. **Binding rule for every remaining gate in this phase: declare the DECISION
+REGION and gate it as a conjunction; report the COVERAGE REGION as a distribution, never as a
+conjunct.** Accepted with the failing family quarantined; the single sweep row that violates even the
+post-hoc rule (helix n = 1 920, m̂ = 0) is excluded from every claim.
+
+**6. "EQUIVALENT MUTANT" IS NOT "VACUOUS GATE" — the first correctly-diagnosed non-trip on this
+branch.** All four `Π` (mean-removal) drops in `minv_core` leave `κ` within 3e-10 of undropped, so they
+do not trip 9c's gate. That is **not** a tenth vacuous gate: 9c hypothesised only one `Π` was
+redundant, **falsified its own hypothesis** with a supplementary run, and then showed algebraically and
+by measurement why all four are (`|Lf·1|_∞/|Lf|_max` = 1.0e-15; `|mean(L v)|/rms(L v)` = 5.6e-15 for
+`v ⊥ z0`). A vacuous gate **cannot fail for the reason it names**; an equivalent mutant **has nothing
+to detect**. The `Π`s stay in as defensive code. The gate's live bars are proven by real trips:
+`θ = 0` in the SA run, the `rs-identity` `Lf` swap, a wrong factor order, mass-weight perturbations at
+1e-6 (trefoil) / 1e-5 (arc), and a slack `eigsh` tolerance — the last of which trips **only** the
+residual bar, which is why that bar exists and is not droppable.
+
+**7. Residual limits of 9c, pre-registered here so nothing quotes past them.** (a) **No independent
+eigensolve exists at n = 4 000 at all** — every figure at that rung is the matrix-free route
+self-validated by residual plus the n ≤ 1 920 cross-checks; route-vs-dense agreement does not degrade
+with n (3.9e-6 at 960, 3.7e-6 at 1 920 on the arc), and a 17–33 % decision cannot be moved by 1e-5, but
+**any future claim needing better than 1e-2 on an arc `κ` at n ≥ 1 920 must first establish an
+independent route** — three dense routes already spread 9.5e-6 there, so the arc `κ` is known to ≈1e-5
+by ANY route. (b) `lam_next` from the matrix-free route is informational only (41/105 unconverged;
+Krylov skips degenerate copies) — no conclusion may use it. (c) The vectorised assembler is now
+validated against the pure-Python loop **at n = 4 000 too** (trefoil, max entrywise rel **5.80e-14**
+against a 1e-12 bar, 99.963 % bit-identical — `scratch/validate_vec4000_9c.json`, run by the
+controller after the 12 733 s loop reference finished); at n ≤ 1 920 all four shapes pass at 5.5e-14.
+n = 4 000 covers the trefoil only. (d) The replicated `rs-identity` ratio at m̂ = 30 is **271.78
+against #78's published 273.3** (0.55 %); #78's own rounded `κ`s give 271.6, so **273.3 is not
+recoverable from #78's own table**. Unexplained, affects nothing, not a regression.
+
+**8. THE f32 WALL IS A ONE-SHAPE NUMBER, and the exponent behind it is now confirmed on four**
+(controller probe `scratch-ctl/cholpivot_scaled.py` / `.json`, 12 cells; added 2026-10-12 after item 4).
+`cond₂` of the unit-diagonal `D^−1/2 A_σ D^−1/2`:
+
+| shape | n=960 | n=1 920 | n=4 000 | exponent | `cond₂·u_f32` at 4 000 | f32 wall (`·u_f32 = 1`) |
+|---|---:|---:|---:|---:|---:|---:|
+| **arc** | 3.270e8 | 3.322e9 | **3.853e10** | **+3.34** | **2 297** | **n ≈ 394** |
+| circle | 1.749e7 | 1.759e8 | 2.029e9 | +3.33 | 121 | n ≈ 948 |
+| trefoil | 1.233e6 | 1.237e7 | 1.425e8 | +3.33 | 8.49 | n ≈ 2 104 |
+| helix | 8.003e4 | 7.592e5 | 8.550e6 | +3.30 ⚠ | 0.510 | n ≈ 4 907 ⚠ |
+
+⚠ **HELIX CAVEAT (added 2026-10-12, 9c round 3):** on a 7-rung `cond₁` ladder the helix is the one
+shape **not yet asymptotic** (local exponents −2.23 / +3.28 against the other three shapes' ~−2.3 /
++3.33). My +3.30 above is a 3-rung fit, so **the helix row — and the n ≈ 4 907 wall derived from it —
+is the least settled of the four.** It is also the row that sets the UPPER end of item 10's 12.5×
+spread, so treat that endpoint as softer than the arc's.
+
+**(a) The GROWTH LAW is geometry-independent and reproduces this spec's own theory.** All four shapes
+give +3.30…+3.34 against §5's `2s = 10/3 = 3.3333` and #59's measured `n^3.3338` — **the first
+multi-shape confirmation of that exponent on this branch**, on a different instrument (dense exact
+`A_σ`, Jacobi-scaled) than #59 used.
+
+**(b) The PREFACTOR varies 4 506× with geometry, and §6 / §7.8 quote one shape's.** §7.8's table
+(`κ₂(A_σ)` = 1.393e6 / 1.404e7 / 1.622e8 at n = 960 / 1 920 / 4 000) and the `n ≈ 2 025` wall derived
+from it are **the TREFOIL's**. My trefoil column agrees to **11–13 % at every rung, including n = 4 000
+where §7.8's value was EXTRAPOLATED** — mutual validation of two independent instruments, with mine
+lower by the amount Jacobi scaling predicts. But the wall is therefore **not one number: n ≈ 394 (arc)
+to n ≈ 4 907 (helix), a 12.5× spread, and the ARC'S WALL IS BELOW THE n = 960 FLOOR.**
+
+**Binding consequences.** (i) **§6's "Plain f32 walls at n ≈ 1 200–2 000" and §7.11 item 3's
+"n ≈ 2 025" must name their fixture.** Row 11's R1 "publishes three ceilings" — a ceiling that moves
+12.5× with the fixture is not publishable as a scalar; publish per shape or name the shape.
+(ii) **The preconditioner's SHAPE-flattening is now measurable and large:** unpreconditioned spread at
+n = 4 000 is **4 506×** (arc/helix), while 9c's *preconditioned* `κ_excl` at the same rung on the same
+four shapes spans **233.0 (arc) → 19.65 (trefoil), 11.9×**. `Ã⁻¹` removes roughly **379× of geometry
+dependence** on top of the five orders of n-dependence §7.8 already records — **a stronger form of this
+spec's central thesis, free from data already on disk.** (iii) **§6's own most load-bearing assumption
+is single-shape:** it states that `κ₂(Ã⁻¹A_σ)` flatness above n = 1 920 is **ASSUMED** and "carries the
+whole mixed-precision scheme" — measured on one shape, while the quantity it must flatten varies
+4 506×. (ii) is evidence the flattening generalises, but `κ_excl` and `κ₂(Ã⁻¹A_σ)` are different
+normalisations (207 vs 1.13e4 at n = 1 920) and are **not** interchangeable. Closing this is a
+row-10/11 input, not a claim. **And none of (i)–(iii) licenses quoting these numbers against row 10's
+f32 APPLY — see item 4's last bullet.**
+
+**9. §9.2'S THIRD-RANKED GAP — "`κ₂(Ã⁻¹A_σ)` above n = 1 920, ASSUMED flat, and that assumption
+carries the entire mixed-precision scheme" — IS ANSWERED BY 9c's DATA. The bar is met with 48× MORE
+room than §6 claims, by an operator that does NOT satisfy §6's stated flatness mechanism.**
+
+§9.2 costed this gap as "low–medium — task 0b(iv) + **matrix-free Lanczos; needs no dense matrix**".
+9c built and gated exactly that route and swept it over four shapes at n = 64…4 000, so the gap closes
+without a new task. Two corrections fall out of tracing the numbers to their source:
+
+**(a) §7.8's `κ₂(Ã⁻¹A_σ)` row and §6's `6.716e-04` are the LAB `pinv((−Δ)⁺)` construction, not the
+shipped operator.** Provenance: `task-6-review-math.md:171-178` measures both on the SAME `A_bct,σ`
+(θ=0.25) and the SAME hierarchical `L_f`, unnormalised trefoil — **lab 1.09765e4 / 1.10955e4 /
+1.12258e4 / 1.13050e4** at n = 64/120/240/480 (the digits §7.8 quotes, matching its oracle to 5
+figures) against **shipped `massWeight=1`: 59.04 / 64.60 / 69.70 / 71.94**. And `1.1269e4 × u_f32
+(5.96e-8) = 6.716e-04` exactly, so §6's property-3 figure and its "14.9× margin" are the lab number.
+(The shipped column's own identity as `λ_max` in disguise is #71, closed.)
+
+**(b) The shipped quantity is ~100× BETTER in absolute terms and NOT flat.** 9c's `κ_excl` at fixed `c`,
+worst over arc/circle/helix/trefoil, from §8.2's grid-independent view:
+
+| | n=64 | n=960 | n=1 920 | n=4 000 | exponent (last 3 rungs) |
+|---|---:|---:|---:|---:|---:|
+| `c = 30` (shipped) | 90.8 | 159.2 | 231.1 | **309.9** | **+0.466** |
+| `c = 35` | 115.7 | 189.4 | 207.4 | **233.0** | **+0.145** |
+
+Against §7.8's claimed `∝ n^0.0010`. **So §6's mechanism — "the preconditioned number does not move at
+all" — is FALSE for the shipped operator: it moves as n^+0.15 to n^+0.47 depending on `c`.**
+
+**(c) The ruling survives anyway, with far more margin than the spec claims.** Property 3 is
+`κ₂(Ã⁻¹A_σ)·u_inner ≤ 1e-2`, i.e. `κ ≤ 1.68e5` at `u_f32 = 5.96e-8`:
+
+| n | worst `κ_excl` at the grid argmin | `·u_inner` | headroom to 1e-2 |
+|---:|---:|---:|---:|
+| 960 | 159.15 | 9.49e-06 | **1 054×** |
+| 1 920 | 207.42 | 1.24e-05 | **809×** |
+| 4 000 | 232.98 | 1.39e-05 | **720×** |
+
+**720× at n = 4 000 against §6's quoted 14.9× — the spec is pessimistic by 48× because it quotes the
+lab operator.** Continuing the WORST exponent (+0.466, at `c = 30`) to N = 30 000 gives `κ ≈ 800` and
+`·u_inner ≈ 4.8e-5`, still **~200× inside the bar**. That continuation is an EXTRAPOLATION and per
+§7.0 cannot be a bar — it is stated as headroom, not as a gate value.
+
+**Net effect on row 10: the mixed-precision precondition is in far better shape than §6 states, and
+for a different reason than §6 gives.** `[CH18]`'s `φ = (c₁κ∞(A)+c₂)u_s ≪ 1` is satisfied by ~3
+orders at every measured rung on four shapes, not by 1.2 orders on one. What is NOT established is
+flatness, and nothing should be built on flatness again — build on the measured margin.
+
+**10. "FOUR INDEPENDENT DERIVATIONS AGREE ON 1 200–2 000" IS A COMMON-MODE AGREEMENT: all four are
+the TREFOIL, and the one of them I have now measured on four shapes spans 12.5×.** This sets row 10's
+scope and row 11's R1 ceilings, so it is recorded as a binding scope item, not an observation.
+
+§7.11's table lists derivations 1 (`n ≈ 1 228`), 1b (1 773), 2 (1 225), 3 (2 025) and 4 (breached at
+n = 2 000). **Every one is measured on `trefoil`/`torusKnot`** — and §9.2 row 5 already says so in
+general terms: *"all direction/SPD/line-search results are on `trefoil` alone; `κ_near` spans 14.67×
+across geometries."* Derivations 1, 1b and 2 additionally share one instrument family (the measured
+apply-noise / residual-floor stream), so the count of genuinely independent axes is **lower than
+four** on both fixture and instrument.
+
+**Agreement across derivations is evidence of robustness only where the derivations VARY what could be
+wrong.** These vary the *estimator* and hold the *geometry* fixed — memory `common-mode-blindness`: a
+differential cannot pin anything its paths share. And the shared factor is now measured to matter:
+**A38 item 8 gives derivation 3 per shape as n ≈ 394 (arc) / 948 (circle) / 2 104 (trefoil) / 4 907
+(helix)**, a 12.5× spread, with the trefoil sitting mid-range and the arc's wall **below the n = 960
+floor.** So at least one of the four is strongly geometry-dependent, and the geometry-independence of
+the other three is **UNTESTED**, not established.
+
+**Consequences, binding:**
+
+- **Row 10 cannot answer "locate the wall" with one fixture** — the answer is a range, and a single
+  number from a single shape would reproduce exactly the error A38 item 8 corrects. **It must locate
+  the wall on at least the ARC and the HELIX** (the measured extremes of the 4 506× conditioning
+  prefactor) in addition to whatever fixture it uses for continuity with §7.11. This is not scope
+  creep: it is the minimum that answers the question the row asks.
+- **Row 11's R1 must publish the f32 ceiling per shape or name its shape**, and where only one shape
+  is measured the others are **"NOT ESTABLISHED"** — §7.11's own rule, applied to its own band.
+- **§6's "Plain f32 walls at n ≈ 1 200–2 000" keeps its number only as a trefoil-class statement.**
+- **What would falsify this item:** derivations 1, 1b or 2 re-measured on arc and helix coming out
+  within ~1.5× of their trefoil values. That is a cheap check and it is row 10's first stage.
+
+**11. §7.3's INVALID CLAUSE 2 IS ASYMMETRIC, and row 10 is the first task that can trip its blind
+side.** Found pre-dispatch while censusing the f32 seam (`task-10-f32-census.md` Q6); recorded here
+because it is a defect in a pre-registered INVALID predicate, not in code.
+
+`EtaProbeOptions.uOp` (`gmres.ts:355-358`) is documented *"REQUIRED, with no default, so it cannot
+silently be `u_f32` for an f64 run (INVALID clause 2)"*, and validation (`:564-566`) checks only
+`uOp > 0 && Number.isFinite(uOp)`. `HierarchicalOperator` (`operator.ts:30-33`) carries no variant, so
+**an f32 operator pairs with `U_F64` with no error.** Clause 2 fires on `0 < η < u_op/10`:
+
+| case | η | `uOp/10` | clause 2 fires? |
+|---|---:|---:|---|
+| f64 operator mislabelled `U_F32` | ~1e-16 | 6e-9 | **YES** — the case the TSDoc names |
+| **f32 operator mislabelled `U_F64`** | ~1e-5 | 1.1e-17 | **NO — structurally blind** |
+
+The guard was built against the only misuse that existed when it was written (every operator was f64),
+and **row 10 introduces the mirror-image misuse it does not cover.** The self-check compounds it:
+`gmres.ts:305-306` states that an η below `u_op/10` means the residual was not formed in that
+precision, but `:687` forms the residual in f64 **regardless**, so that check also rests entirely on
+the caller's `uOp`. A green η with a mismatched `uOp` is a vacuous result — the defect class this
+branch has shipped ten times, pre-armed on the one seam row 10 must cross.
+
+**Binding on row 10** (brief §4.1): every f32 run passes `uOp: U_F32` **and the report carries a
+RECORDED cross-check that the pairing is correct**, not an assertion. A minimal `src` guard (the
+operator carrying its own variant so `uOp` can be derived or validated) is **in scope for row 10**,
+which already names `gmres.ts` and `apply.ts`; if it grows beyond minimal it becomes an issue.
+
+**Not yet fixed, and deliberately so:** narrowing clause 2 to catch both directions requires the
+operator to expose its precision, which widens an exported interface — a decision that belongs with
+row 10's measurement rather than ahead of it.
+
 ## 12. Open questions deferred to implementation
 
 1. ~~**The mass weight in `(−Δ)`.**~~ **CLOSED: `laplacian.ts`'s raw default is 1; the
@@ -3790,3 +4146,591 @@ implementation. Three rules specific to this spec:
    phase (§9.1 item 2). #61 ruled Phase 3 stays after 2H; that ruling was about ordering, and the
    readback tax could reopen it.
 5. **Leaf size, split plane, adjacency certificate** (§9.3) — all cheap, all unexplored.
+
+---
+
+## A39 — task 10's Stage 0 falsified three controller claims before measuring anything (2026-10-12)
+
+Row 10's Stage 0 was dispatched as "verify the brief against source and tell me where it is wrong."
+It found three material defects, all three reproduced by me against source, all three mine.
+**This is the fourth, fifth and sixth controller claim killed on this branch by a worker's
+pre-measurement check** (after the √ε flag, the R4 mechanism, and the §7.11 fixture) — the pattern is
+now the branch's strongest process result and is carried in `[A38 item 10]`'s spirit: a stage whose
+only job is to attack the brief pays for itself every time.
+
+### 1. The `u_f32` convention was wrong by a factor of 2, so EVERY wall in A38 item 8 was 1.23× too small — CORRECTED IN PLACE
+
+`A38 item 8`'s walls were derived from `cond₂ · u = 1` with **`u = 2^-23 = 1.19e-7`, the machine
+EPSILON.** This repo's own constant is the **unit roundoff**: `gmres.ts:74` is
+`export const U_F32 = 2 ** -24`, with TSDoc that says so explicitly ("NOT the machine epsilon"), and
+five further sites agree numerically (`apply.test.ts:55`, `lowOrder.test.ts:57`, `precond.test.ts:92`,
+`oracle/check_kappa_peredge.py:61`, `bench/gpu/k1-calibration.py:89`, all `5.96e-8`).
+**The spec was internally inconsistent about its own constant:** `[A37]`'s `κ·u_f32 = 1.12` at
+N = 30 000 (`:3494`) is correct under `2^-24` (`1.883e7 × 5.9605e-8 = 1.1222`), so A38 contradicted A37.
+
+Re-derived at `cond₂ = 2^24 = 1.678e7` from the n = 4 000 anchor and each shape's own exponent:
+
+| shape | A38 as published (`2^-23`) | **CORRECTED (`U_F32 = 2^-24`)** |
+|---|---:|---:|
+| arc | n ≈ 319 | **n ≈ 394** |
+| circle | n ≈ 770 | **n ≈ 948** |
+| trefoil | n ≈ 1 710 | **n ≈ 2 104** |
+| helix | n ≈ 3 978 ⚠ | **n ≈ 4 907 ⚠** |
+
+The factor is `2^(1/3.33) = 1.232` in `n`, uniform, so **every RATIO and the 12.5× spread survive
+unchanged** and item 8's and item 10's conclusions all stand. Two readings do shift: the arc's wall
+(394) is still below the n = 960 floor but by 2.4× not 3.0×, and **the trefoil's own wall (2 104) now
+sits just ABOVE §7.11's 1 200–2 000 band** — so the band is at the edge of even its own fixture, which
+*strengthens* item 10. Corrected at all 7 sites plus the `cond₂·u` column (`2 297 / 121 / 8.49 / 0.510`)
+and row 10's "19.5× past `1/u_f32`" (was "39×"). **Pre-edit copy: `/tmp/spec-pre-c3.md`.**
+**Why it survived:** the number was never cross-checked against the repo's named constant, only against
+itself. Any `u_f32` quoted with a wall must now name `2^-24` or `2^-23` in the same sentence.
+
+### 2. An f32 apply HAS already been run through the whole solve — row 10's novelty claim was false
+
+`[§9.2]`'s top gap and row 10's deliverable both read "a genuine f32 hierarchical apply through the
+whole solve", and my f32 census confirmed it unmeasured. **Both are wrong.** Task 7b did exactly that:
+`scratch-7b/h23.ts:194-205` builds `prepareA(..., { variant: F32 })`, wraps it as a
+`HierarchicalOperator` reusing the f64 `σ`, and `ko.ts:70-71,110-111` drives it through `gmres` with
+`probe.uOp = U_F32` over n = 64…3 840 × 5 seeds, measuring an `η_bct` floor of **0.306–0.412 `u_f32`**
+(`task-7b-report.md:84-96`).
+
+**Why the census missed it, and the general lesson:** the entire
+`.superpowers/sdd/2026-10-09-phase2h-bct-gmres-design/` tree — which holds every campaign script of
+this phase — **is excluded from the codebase-memory graph index.** A census driven off the graph, as
+briefed, is structurally unable to see prior scratch measurements. **Any "has this been measured
+before?" question must grep the SDD tree in addition to querying the graph**; the graph answers "what
+does the shipped code do", never "what has this campaign already run". Added to the subagent briefing.
+
+What is genuinely unmeasured, and so still row 10's: the **forward-direction** differential (7b read
+residuals, never `x̃32` vs `x̃64`), shapes other than the Lissajous trefoil, the bbox-normalised
+fixtures, and θ ≠ 0.5.
+
+### 3. "Trefoil" is TWO different curves in this corpus
+
+`src/core/fixtures.ts:10 trefoil` is the Lissajous form `(sin t + 2 sin 2t, cos t − 2 cos 2t, −sin 3t)`
+at native extent 5.4716 — the curve every Python probe in A38 item 8 and §7.11 derivation 3 uses.
+`test/sobolev/hierarchical/fixtures.ts:79 torusKnot` is a `(p,q) = (2,3)` torus knot on `R = 2,
+r = 0.8`, bbox-normalised — the curve §7.11 derivations 1/1b use. Same knot type, **different geometry**
+(`L/extent` 5.268 vs 5.568, checked numerically by row 10's `scratch-10/shape_check.ts`).
+
+**Effect on A38 item 10, both ways.** The four derivations are NOT all on one fixture, so the
+common-mode critique is weaker than item 10 states at the exact-curve level. But it holds at the level
+that matters: the two curves were never cross-measured, the 12.5× per-shape spread dwarfs any plausible
+trefoil-to-trefoil difference, and **the corrected trefoil wall now falls outside the band anyway.**
+Item 10's conclusion is unchanged; its "all four are trefoil" wording is now "all four are
+trefoil-TOPOLOGY, across two distinct geometries, neither cross-measured."
+**THE HELIX HAS THE SAME DEFECT, and it bites row 10 harder.** `test/.../fixtures.ts openHelix` is
+**not** the Python helix either: bbox dims `[0.667, 0.667, 1.0]` against the Python curve's `[1, 1, 0.6]`
+(MEASURED by row 10's `shape_check.ts`). Since item 10 names the arc and the helix precisely because they
+are the two **measured extremes** of the 4 506× prefactor, a probe run on `openHelix` cannot connect to
+that measurement and does not satisfy the row. **Ruling (2026-10-12): row 10 builds scratch-local
+`arc(n)` and `helix(n)` matching the Python geometry**, descriptor-checked before either carries a
+predicted wall; `openHelix` is kept as a separate coverage shape with no predicted wall. The TS corpus
+has no arc at all and no matching helix, so the alternative was to leave item 10 unanswerable.
+
+**Binding:** no number may be quoted for "the trefoil" or "the helix" without naming which curve. Of the
+four shapes in item 8's table, **only the circle has a TS fixture that matches its Python counterpart** —
+the arc has none, and the trefoil and helix each have a same-named TS curve with different geometry. Any
+future task transferring a per-shape figure from the Python probes to the TS harness must run a geometry
+descriptor first; three of four will not transfer without a new generator.
+
+---
+
+## A40 — row 10 Stage 1: the GENUINE f32 hierarchical arm is 88–1370× quieter than the dense-f32 lab recipe, which REVERSES §6's sign (2026-10-12)
+
+**MEASURED, one cell (`torusKnot`, n = 960, θ = 0.5, 5 seeds), f32 inner / f64 outer through the whole
+solve.** The A-angle between the f32 and f64 solution iterates on the **identical** block lists:
+
+| arm | 1 − cos∠_A at `K_s` | 1 − cos∠_A at stagnation | angle |
+|---|---:|---:|---|
+| **genuine hierarchical F32** | **1.0e-10** | **9.5e-8** | 8e-4° / 2.5e-2° |
+| dense-f32 stand-ins (C1/C2/Q1/Q2, the lab recipe) | 88–1370× larger | 2.9–61× larger | — |
+
+**§6's figure is a DENSE-f32 number and does not transfer to the shipped operator.** Reaching the
+τ = 0.9 bar by n = 2 000 would require an exponent of **28** (at `K_s`) or **19** (at stagnation) in
+`1 − cos`; the measured local exponents are **3.2 and 5.1**. §6's "f32 walls at n ≈ 1 200–2 000" is
+hereby scoped to the dense-f32 recipe it was measured on, and **`[A38 item 8]`'s per-shape walls are
+likewise dense-f32 numbers** — they bound a *factorisation*, never this matvec (which `[A38 item 4(e)]`
+already warned about; this is the measurement that confirms it).
+
+**THE LOWER BOUND, and it cuts both ways.** At the measured stagnation exponent 5.1, six orders of
+growth puts the genuine wall at `n ≈ 960 × 10^(6/5.1) ≈ 14 400`. **CORRECTED 2026-10-12 by `[A42]`: the
+stagnation statistic has a 0.44–1.91× NULL-REALISATION spread, so a two-point exponent over a 4× n-range
+carries ≈ ±1.0, and the bound is a RANGE — `n* ≈ 9 300 … 28 300`, not 14 400.** The conclusions survive
+the widening and are stated against the range: the genuine f32 arm **clears the dense path's hard ceiling
+`N ≈ 5 793` (`GPU_SOLVE_MAX_N`) at every point of the range** — f32 is safe across the entire
+dense-reachable regime — while the whole range lies **at or below the project's 30 000 target**, so f32 is
+**NOT established as safe at 30k** (at N = 30 000 the central extrapolation gives `1 − cos ≈ 4`). Still a
+two-point extrapolation, which on this branch is the class of claim that has failed most often
+(`[A39 item 1]`, 9c's helix ladder).
+>
+> ⚠ **CORRECTED AGAIN 2026-10-12 by `[A44]`, and the clause that failed is "at every point of the
+> range".** That range (9 300 … 28 300) is **torusKnot's**, and row 10's 3-rung ladder found the
+> **circle's** stagnation bound reaches **5 356 at `p_worst+1` — BELOW the 5 793 ceiling.** So "clears the
+> ceiling at every point of the range" holds for torusKnot and **fails for the circle at that width.**
+> It is not repaired by more seeds and must not be: the circle's own stagnation spread at n = 1 920 is
+> **33×** on a single seed, so **the stagnation reading cannot support a ceiling claim for any shape** —
+> which is `[A42] §3`'s own ruling (bound, never an instrument) applied to a number I then published
+> anyway. **The ceiling claim is withdrawn at the stagnation reading entirely** and survives only at
+> `K_s`, where `[A44]` puts the bar at ≥ 5.5e4 on every shape.
+
+### The mechanism, and the half of it that is reassociation-proof
+
+First order: `e = A_σ^{-1}(A_arm − A_bct) x`, which reproduces all three arms' angles within 1.3×. Apply
+noise on the solution vector is comparable across arms; `A_σ^{-1}` amplifies the **dense** arms' error
+~80× more, because the genuine apply keeps `A·1 = 0` **exactly** and so puts no weight on the near-null
+constant mode that `A_σ^{-1}` amplifies. On random vectors the genuine apply is 5.5× *noisier*
+(1.05e-6 vs 1.9e-7) — **the advantage is specific to the solution vector**, which is why §6's
+random-vector "UNSAFE" caveat read the sign backwards for this quantity.
+
+**The two terms of Eq. 31 do NOT have equally safe zeros** (controller-verified against `apply.ts:6-8`):
+
+- **High-order `Mᵀ(diag(K1) − K) M`: `M·1 = 0` is EXACT in any precision and REASSOCIATION-PROOF.**
+  `(M u)_I = ((u_i2 − u_i1)/l_I) T_I`, and `u_i1 == u_i2` ⇒ the subtraction is exactly 0 in IEEE754
+  regardless of width, rounding mode or op order. No WGSL reassociation can break this half.
+- **Low-order `Eᵀ(diag(K⁰1) − K⁰) E`: the zero is CONDITIONAL.** `(E·1)_I = 1`, so it needs
+  `diag(K⁰1)·1` and `K⁰·1` to agree, i.e. identical summation order in the diagonal and the matvec.
+  **This is the only half WGSL reassociation (gpuweb#2076) threatens**, which bounds the GPU risk to the
+  low-order term's share of the operator rather than leaving it open-ended.
+
+> ⚠ **THE MECHANISM IS UNFALSIFIED AS OF THIS AMENDMENT.** The first-order model measures
+> `(A_arm − A_bct)x` and numerically applies `A_σ^{-1}`, so it is a *decomposition of the observation,
+> not a prediction* — it cannot discriminate between mechanisms. The falsifier has been commissioned and
+> has not run: **a mutant that breaks `A·1 = 0` inside the genuine apply** (perturb the low-order
+> diagonal so `diag(K⁰1) ≠ K⁰·1`, which is also the realistic GPU failure), with the prediction stated
+> first that the genuine arm's angle must rise toward the dense arms'. **If it does not rise, this entire
+> amendment's mechanism is withdrawn, not weakened** — the measured 88–1370× would stand as an
+> unexplained observation. Pending alongside it: the per-term decomposition, and exclusion of the
+> competing hypothesis that the kernel chain is not genuinely f32 throughout — `apply.test.ts:664-692`
+> documents itself as **BLIND to kernel-chain rounding** (one `fround` on an otherwise-f64 chain moved
+> `delta_precision` by −1.2 % and the test still passed), so the matching δ of 1.0515067e-6 is consistent
+> with both. The rounding-placement PINs (`nearField.test.ts:262-303`, `apply.test.ts:736-781`, run green
+> at Stage 1), **not** the δ band, are what bear on that hypothesis.
+> **§6's "UNSAFE" caveat is NOT struck until the mutant runs.**
+
+### Rulings carried (controller, 2026-10-12)
+
+1. **The genuine arm is the decision arm; Q2 is the pessimistic bracket, NOT the decision arm.** Row 10's
+   charge is "locate the wall, **do not inherit it**", and the shipped path *is* the hierarchical apply —
+   adopting a dense-f32 stand-in as the decision arm would re-inherit §6's number through a side door.
+   Q2's role is to **price the structural zero**. Named trigger for revisiting: mechanism confirmed AND a
+   GPU-side `A·1 = 0` check fails — both outside row 10, the second is Phase 3.
+2. **The wall is OPERATING-POINT DEPENDENT** — 100× in level and 3.2 vs 5.1 in exponent between `K_s` and
+   stagnation. The pre-registered both-reported branch fires; **stagnation is primary** (conservative, and
+   it is the reading a solver user experiences). No single wall number for the genuine arm either.
+3. **Stage 2 bounds the wall rather than locating it** — locating costs hours for a number no reachable
+   configuration can use. Shape dependence (`[A38 item 10]`'s question) is answered by `1 − W` **levels
+   and local exponents at fixed n**, one cell per shape, with no bracket and no extrapolation.
+4. **No wall, bound or exponent from two points.** Local exponents per adjacent rung pair in 9c's ladder
+   format, never a single fit; if adjacent locals disagree by >15 % the quantity is not asymptotic and the
+   bound is quoted from the **worst** local exponent.
+5. **G4 (`adjacentSkipped` equality) is VACUOUS, not PASS** — `3m` at every θ is structurally determined,
+   so the gate cannot fail and a passing read is not evidence (`[A38 item 6]`; memory
+   `gates-name-their-impossible-values`). No mutant is to be built for it.
+6. **The `uOp` mislabel asymmetry of `[A38 item 11]` is now MEASURED**, not argued: an f32 operator
+   labelled `U_F64` reads `η_bct_min/uOp = 1.5e8` and **INVALID clause 2 stays silent**, while the
+   two-sided band catches it. Recorded on #92.
+
+---
+
+## A41 — A38 item 10's binding requirement is UNEXECUTABLE: the arc and the helix cannot be solved in this repo at all (2026-10-12)
+
+`[A38 item 10]` requires row 10 to **"locate the wall on at least the ARC and the HELIX"**, chosen because
+they are the two measured extremes of the 4 506× conditioning prefactor. **Both are open chains, and no
+open chain can go through left-preconditioned GMRES here.** Adjudicated in writing rather than dropped.
+
+**Five independent barriers (controller-verified at every site):**
+1. `prepareLowOrder` throws `CurveTopologyError` — `lowOrder.ts:426-431`: *"vertex N starts no edge, so it
+   has no slot to collocate on; the 'vertex' variant needs a closed curve (|E| = |V|)"*.
+2. It is **deliberate**, not an oversight — `lowOrder.ts:61-65`: the vertex variant collocates
+   `sE[2·slot]`, a bijection *exactly* on a closed curve; an open chain has `m = n − 1` and no slot for the
+   last vertex, so it throws "rather than silently dropping a vertex." Pinned by `lowOrder.test.ts:719-733`.
+3. **`laplacian.ts` restricts the preconditioner's topology anyway** (`lowOrder.ts:65`), so lifting
+   barrier 1 alone would not suffice.
+4. The only open-chain-capable variant, the **rs-identity knock-out**, is refused by `makePreconditioner`
+   (`precond.ts:306-313`) for a sound reason: *nullity 2 for even n ⇒ `Ã` singular on the checkerboard ⇒
+   `Ã⁻¹` stops being a preconditioner*.
+5. `makeHierarchicalSaddle` asserts a closed natural ring (`hierarchicalSaddle.ts:284`).
+
+Unpreconditioned runs do not converge at the n of interest. **Filed as utof/repulsive-test2#93.**
+
+### Ruling
+
+- **Open chains are OUT OF THE PRODUCTION DOMAIN at solve level.** Phase 2H's domain is the closed natural
+  ring; nothing shipped needs an open chain. This is a research-capability gap, not a defect.
+- **NO scratch-local open-chain preconditioner.** Row 10 proposed it and it is DECLINED: it puts
+  uncharacterised new numerics in front of the question being measured, so the f32 result would stop being
+  interpretable. If #93 is ever built it needs its own characterisation (spectrum, nullity, κ ladder)
+  before any f32 figure is read through it.
+- **No closed substitute reproduces the extremes, so none is adopted.** Among closed shapes the reachable
+  `cond₂` spread is ~14× (circle 1.75e7 vs trefoil 1.23e6 at n=960) against arc/helix's 4 506×. A fourth
+  closed shape (e.g. the (2,5) `cinquefoil`) adds geometry but not range; optional coverage at most.
+- **The arc's and helix's cond-proxy walls (394, 4 907) now carry a NARROWER status than `[A38 item 8]`
+  gave them: they are unpreconditioned dense-`A_σ` FACTORISATION numbers, for shapes that cannot be solved
+  in this repo at all.** Per `[A40]` they were already not the genuine arm's walls; per #93 they are also
+  unreachable. They remain valid as conditioning data and as the input to item 10's spread, and must be
+  quoted with that scope attached.
+- **`[A38 item 10]`'s "must locate the wall on the arc and the helix" is SUPERSEDED**, in two parts: by
+  `[A40]` (the per-shape walls are a dense-f32 factorisation concept that does not transfer to the shipped
+  matvec) and by this item (the shapes are unsolvable). **Item 10's underlying question — is the f32
+  ceiling geometry-dependent? — survives and is answered on closed shapes at solve level and on ALL FIVE
+  shapes at apply level** (next item).
+
+### The open shapes ARE available at apply level, and that is where the mechanism question belongs
+
+Row 10 measured, on arc, helix and `openHelix`: `A·1 = 0` **exactly in both F64 and F32**, `A_σ·1 = σ`
+exactly, symmetry ~1e-16. No preconditioner is needed for an apply-level differential, so all five shapes
+are measurable there — and `[A40]`'s mechanism, now the branch's most load-bearing claim, needs no solve.
+
+> ⚠ **`[A40]`'s MECHANISM MAY NAME THE WRONG MODE — including in my own wording, and this is now the first
+> thing to measure.** A40 says the genuine apply "puts no weight on the near-null constant mode that
+> `A_σ^{-1}` amplifies." But `A_σ` **pins** the constant mode at `σ` (that is what `A_σ·1 = σ` means; σ ≈
+> 1.9e4 at trefoil n=960), while `A_σ`'s smallest eigenvalue belongs to the lowest *non-constant* smooth
+> mode. So `A_σ^{-1}` **damps** the constant mode by `1/σ` and amplifies smooth low-frequency modes by
+> `1/λ₂` — and excluding the constant mode would buy approximately NOTHING, which cannot explain 88–1370×.
+>
+> **Competing hypothesis, pre-registered (controller, not yet measured):** the genuine error is `d = Mᵀ r`,
+> a discrete *divergence* on the outside. `Mᵀ` differentiates, suppressing low-wavenumber content —
+> precisely what `A_σ^{-1}` amplifies — while the dense arm's error is broadband. `M·1 = 0` is then the
+> `k = 0` special case of a suppression acting across all low `k`, which *can* explain a factor of hundreds.
+>
+> **Discriminating measurement, commissioned:** resolve `d_arm = (A_arm − A_bct64)x` by wavenumber (DFT on
+> closed curves, smooth-basis projections on open ones), both arms, five shapes. **If the genuine spectrum
+> is suppressed at low `k` by ~one power of `k`, the divergence account holds; if both spectra are flat at
+> low `k` and differ only at `k = 0`, the constant-mode account holds; if neither pattern appears, A40's
+> mechanism is WITHDRAWN.** `⟨1,d⟩/(‖1‖‖d‖)` is reported per arm as the direct constant-mode test.
+> **Until this returns, A40's measured 88–1370× stands and its EXPLANATION does not.**
+
+---
+
+## A42 — the mechanism SURVIVED its falsifier, the constant-mode account is REFUTED, and both of my explanations were wrong in different ways (2026-10-12)
+
+Row 10 ran `[A40]`'s commissioned mutant and the per-term decomposition. All figures `torusKnot` n=960,
+seeds 0–4, A-angle to the f64 solution, worst-of-5.
+
+### 1. The mutant: PASSED, with a dose-response and a prediction fixed before the run
+
+A ulps-per-slot perturbation of `k1Low` inside the real `applyA(H32)`, with the predicted angle
+`hypot(GEN32, C2 · null-defect ratio)` — **coefficient taken from the dense-cast arm C2, not fitted.**
+
+| dose | angle at `K_s` | measured / predicted |
+|---|---|---|
+| 10³ ulps | 4.4e-3 … 7.9e-3° | 0.60–0.92, **5/5 seeds** (band ⅓–3) |
+| 10⁴ ulps | 4.3e-2 … 7.9e-2° | same |
+| 10⁵ ulps | 0.44 … 0.80° | same |
+
+Log-log slope **0.996–1.006** (band 0.7–1.3). A realistic 10-ulp mismatch gives 1.00–1.02× the genuine
+value — **invisible**; matching the dense cast would take ≈ 6 450 ulps.
+
+### 2. It is SPECTRAL LOCATION, not error size — and that REFUTES the constant-mode account
+
+At a = 10³ the apply error **on the solution vector is unchanged** (`dpX` 5.66e-4 vs 5.60e-4) while the
+angle rises **7–10×**. Angle per unit `dpX` moves 0.015–0.028 rad (genuine) → 0.14–0.24 → 0.75–1.4 →
+0.9–1.8. So the same amount of error, placed differently in the spectrum, costs 10× more.
+
+**`[A41]`'s pre-registered three-way verdict resolved as NEITHER — see `[A43]`.** The constant-mode
+account is REFUTED (0/10) and my own divergence-prefilter account was **NOT CONFIRMED** by its own
+registered threshold (6/10 against 7/10). ⚠ **The sentence this paragraph originally carried — "errors
+entering through `Mᵀ` stay derivative-shaped and are damped; errors entering through `Eᵀ` are white and
+amplified ≈ 80×" — is SUPERSEDED by `[A43]`**: that contrast names *one way of having zero row sums*, not
+the property itself, and row 10 withdrew it. Read it as "zero row sums of the error operator preserved /
+broken". What survives here unchanged is the **refutation**, which is **direct, not inferential**:
+perturbing `diag(K1)` leaves
+`A·1 = 0` **exactly** zero (because `M·1 = 0` happens first, so the perturbed diagonal never sees the
+constant vector) yet it is the **more** harmful mutant. A protection that is fully intact while the damage
+grows is not the protection doing the work.
+
+> ⚠ **`[A41]`'s "the GPU risk is bounded to the low-order term's share" is WRONG and is withdrawn.**
+> (Its replacement framing below is itself re-scoped by `[A43]`: the operative property is zero row sums,
+> and the high/low asymmetry is about *which chain preserves them under reassociation*, not about `Mᵀ`
+> versus `Eᵀ` as such.)
+> Measured: a `diag(K1)` mismatch is **≈ 4× more harmful per ulp** than a `diag(K⁰1)` mismatch, even
+> though the high-order constant-mode zero survives it. The two chains fail differently —
+> **low-order: reassociation destroys a structural zero and buys the ≈ 80× amplification; high-order: no
+> zero to lose, but ≈ 4× the per-ulp magnitude sensitivity** (the high-order term dominates the operator;
+> `LO32` is only 2.8–4.5 % of `HI32`). **WGSL consistency is therefore required on BOTH diagonals**,
+> not only on `diag(K⁰1)`. Qualitative risk is low-order; quantitative sensitivity is high-order; A41
+> conflated them.
+
+Additivity in squares 0.98–1.04 (band 2×) and `HI32` = 0.99–1.03× `GEN32` at `K_s`: the high-order chain
+carries the angle. **`[§6]`'s "UNSAFE" is struck for the A-angle at `K_s` and stands for random-direction
+apply noise** (annotated in place at `:1157`).
+
+### 3. THE STAGNATION READING IS A DIFFERENT MECHANISM, AND IT IS NOT AN INSTRUMENT
+
+Two of row 10's own pre-registered predictions **failed at stagnation**, and it reported both:
+
+- `BOTH32_OUT64` (both chains f32, output accumulation f64) is **0.04–0.28× `GEN32`** — band was 2×,
+  **fails 5/5 seeds**.
+- Additivity in squares reaches **2.43** on one seed — band was 2×.
+- **Cause, identified:** rounding the stored apply result to f32 **once** (`BOTH32_OUT1`) reproduces the
+  `GEN32` range (0.26–1.58×). **The stagnation excess is the f32 STORAGE of `A·x` — the generic `κ·u`
+  noise path — which the structural zero never protected.** That is why the genuine/dense gap collapses
+  from 88–1370× at `K_s` to 2.9–61× at stagnation.
+
+> ⚠ **Binding: the stagnation reading is a BOUND, never an instrument.** A null control (a = 1, nothing
+> physical changed) moves it **0.44–1.91×**, so it cannot support any band tighter than ~2× and **P-M2
+> cannot be tested there at all.** Consequences: (a) every stagnation figure is published **with its seed
+> distribution**, never as a point; (b) **all mechanism tests and all tight-band ratios go to `K_s`**;
+> (c) `[A40]`'s wall bound widens to the range in §1 above. Row 10's own correction, recorded: the
+> first-order model's "≤1.3× on all three arms" holds **at `K_s` only** — at stagnation it under-predicts
+> the noise-driven arms by ≈ 12×.
+
+**ACTIONABLE DESIGN FINDING, not just a caveat:** since the stagnation excess is output *storage*,
+**f32 chains with f64 output accumulation cut the stagnation error 3.5–25×** (`BOTH32_OUT64` =
+0.04–0.28× `GEN32`). That is a cheap mitigation available to any consumer that can afford an f64 output
+buffer, and it is the configuration a GPU path should prefer.
+
+### 4. The kernel-chain alternative hypothesis is EXCLUDED, by a pin shown to have power
+
+`[A40]`'s competing hypothesis (the chain not genuinely f32, exploiting
+`apply.test.ts:664-692`'s documented blindness) is excluded: an independent per-op `Math.fround`
+transcription over **every** near pair (86 658/kernel) and **every** far block (3 530/kernel) of the actual
+`H32` gives **0 mismatches in all four sets**, and the round-once mutant disagrees on **2 488/3 530 and
+3 068/3 530** far blocks — **so the pin is not vacuous.** This is the A38-item-6 standard met.
+
+**Remaining honest gap (row 10 flagged it itself):** the accumulation chain inside `applyK` has no
+**independent** per-op pin. `terms.ts` is bit-identical to the real `applyA` at n=240 and n=960, but it is
+a *transcription*, so it shares the original's op order by construction — it proves faithfulness, not
+correctness of the order (memory `common-mode-blindness`). The order is covered end-to-end by the
+`out-accuracy.json` oracles (`apply.ts:10-16`), not by a per-op pin. **Filed as utof/repulsive-test2#94.**
+
+### 5. Gate bookkeeping executed (`[A40]` ruling 6)
+
+- **G3** renamed `G3.inBand_atKs_f64NotAtFloor`, with `G3.inBand_floorRuns_VALID` true 10/10. The
+  `[A38 item 11]` asymmetry is now measured at two n: clause-2 ratio **1.49e8** (n=960) and **1.35e8**
+  (n=240) with clause 2 **silent**, the band flagging it, and the opposite mislabel firing at 1.2e-5 (#92).
+- **G4** relabelled **VACUOUS**, reason recorded, no mutant built (as ruled).
+- Operating point declared dependent; stagnation primary **as a bound**, `K_s` beside it — now qualified
+  by §3 above.
+
+---
+
+## A43 — the spectrum test returned NEITHER: MY hypothesis failed its own threshold, and the real property is ZERO ROW SUMS (2026-10-12)
+
+Row 10 ran `[A41]`'s commissioned wavenumber decomposition on **all five shapes × n ∈ {480, 960}** (10
+cells, flat test field, rules registered before running). **The registered outcome is NEITHER, and the
+hypothesis that failed is mine.**
+
+| registered rule | result |
+|---|---|
+| **INSTRUMENT** (`p(HIGH) − p(LOW) ≥ 0.7` on ≥7/10) | **10/10**, differences 0.80–1.24 — it genuinely separates a derivative-shaped error from a white one |
+| **H_C — constant mode only** | **0/10. REFUTED.** `R = a_k(GEN32)/a_k(C2)` is **0.0009–0.05 at `k = 2…16`** and 0.0002–0.031 at `k = 1` in **every** cell: the genuine error is 20–1 000× below the dense cast at **every** low wavenumber, not only at `k = 0`. Independently, GEN32's `k = 0` amplitude sits at the same level as its `k = 1…8` amplitude in every cell — **`k = 0` is not special.** |
+| **H_L — suppression across low `k` (the CONTROLLER's hypothesis)** | **6/10 against a registered 7/10. NOT CONFIRMED.** All four misses fail on the **slope criterion alone** (torusKnot 960 at 0.36, trefoil 480 at 0.22, helix 480 at **0.48 — 0.02 under the window**, helix 960 at −0.23); `R(1) ≤ 0.3` and `|p(C2)| ≤ 0.5` hold **10/10**. |
+| **P-S3** (a gap exists on every shape, `amp(C2)/amp(GEN32) ≥ 10` on ≥8/10) | **10/10**, min 11.4 (helix 480) |
+
+> ⚠ **RULING ON MY OWN HYPOTHESIS: H_L IS NOT CONFIRMED, AND I AM NOT RESCUING IT.** I wrote that
+> threshold in `[A41]`, before the data. Three rescues were available and all three are refused:
+> **(i)** moving the 0.5 slope window that helix 480 missed by 0.02 — forbidden, and maximally
+> self-serving on my own hypothesis; **(ii)** using the post-hoc F1 result (removing output rounding
+> steepens the slope to 1.06–1.45 on four shapes) to explain away the misses — **a post-hoc finding
+> cannot un-fail a pre-registered test**; **(iii)** calling it "confirmed in substance" because
+> `R ≪ 1` held 10/10 — that is rescue (i) in prose. **Row 10 declined to move the window and explicitly
+> left the call to me; the call is NEITHER.** H_L was **directionally right and wrong about functional
+> form**: the measured genuine spectrum is a *low flat floor* plus a branch rising ∝ `k` above `k ≈ 10–16`,
+> not a graded power law, so a slope criterion was the right instrument and it caught the error. Anyone
+> wanting H_L must register the no-output-rounding version and test it fresh.
+
+### What the property actually is — post-hoc, but with its own confound control
+
+**The error operator has exactly zero row sums, so it acts on DIFFERENCES of `x`.** `A·1 = 0` is the
+`k = 0` shadow of a statement about every row, and **the `Mᵀ…M` factorisation is NOT necessary**:
+
+- **F2 (registered before running): a dense f32 cast with each row repaired in f64 to sum to zero (C2R)
+  reproduces the GENUINE arm's amplification — 0.79–1.03×, 10/10** — and is 0.001–0.089× C2's.
+- **F3 (a control row 10 added after spotting a confound in F2, registered before running): the same cast
+  with the diagonal kept exact but row sums NOT zero (C2D) stays at the dense level, 0.62–1.38× C2,
+  10/10**, slope −0.16…0.04 (white). **So it is the zero row sums, not the unrounded diagonal.**
+
+For the genuine arm the property holds **by construction** in the high-order chain (`M·1 = 0`,
+reassociation-proof) and **conditionally** in the low-order chain (while `diag(K⁰1)` and `K⁰·1` agree).
+`[A42]`'s "`Mᵀ` versus `Eᵀ`" contrast is **superseded**: it names one way of having zero row sums, not the
+property. Row 10 withdrew two of its own earlier sentences on the same ground.
+
+**Not shown (row 10 states it):** that the genuine arm's *own rounding* errors are suppressed for this
+reason rather than for something specific to the hierarchical kernels — (3) is demonstrated on a dense
+probe and on the mutants. **The helix's spectrum is flat even without output rounding and is unexplained.**
+
+### A38 item 10's SHAPE-DEPENDENCE QUESTION IS ANSWERED, and the answer inverts it
+
+`amp = relA/dpX` at n = 960, across all five shapes:
+
+| | spread | ordering |
+|---|---|---|
+| **genuine F32** | **0.034–0.045 (1.3×) — SHAPE-INDEPENDENT** | circle .0445, torusKnot .0444, trefoil .0419, arc .0424, helix .0341 |
+| dense f32 cast | **0.65–49 (75×) — tracks CONDITIONING** | helix .65, trefoil 1.4, torusKnot 1.9, circle 7.1, **arc 49** |
+
+**The genuine error's cost does not track conditioning at all.** So the genuine/dense gap is **largest
+exactly where the dense cond-proxy wall is lowest** (arc: 430–1 163×, wall 394) and **smallest where it is
+highest** (helix: 11–19×, wall 4 907). Three statements are all true and are recorded together:
+
+1. **`[A38 item 10]`'s criticism was CORRECT about the dense route** — per-shape walls really do span
+   4 506× in prefactor there, and quoting one fixture's was wrong.
+2. **`[§7.11]`'s geometry-independence instinct is right for the SHIPPED operator** — but it was
+   unjustified, because it was measured on the route where amplification *is* geometry-dependent.
+3. **Item 10's deliverable is met in a different currency than it asked for**: not a per-shape wall
+   (unexecutable, `[A41]`/#93) but a per-shape *error-structure* measurement, on all five shapes
+   including the two that cannot be solved. Item 10 is **CLOSED**.
+
+Arc and helix figures keep their standing scope: unpreconditioned dense-`A_σ` factorisation numbers for
+shapes that cannot be solved in this repo at all (#93), the helix additionally resting on exponents still
+rising at the last rung.
+
+### The θ = 0 σ check (controller-required) CONFIRMS compression and proves something stronger
+
+The σ gap collapses to **≤ 1.5e-14 on all 8 (shape, n) cells** at θ = 0, against **−0.8 % … −4.1 %** at
+θ = 0.5. So the 1–4 % gaps are BCT compression of the diagonal, as asserted — **and, beyond the asserted
+claim, the TS operator on the TS generators IS the Python dense `A` to round-off.** That licenses
+transferring figures between the Python probes and the TS harness, which `[A39 item 3]`'s
+fixture-provenance mess had put in doubt. The generators are also bit-for-bit against `mhat_lib`
+(max vertex difference 0.0).
+
+### Process: row 10 self-reported an ordering erratum, which is reference behaviour
+
+F1's "prediction" was written **after** its arms had already run. Row 10 caught this, labelled F1 "a
+post-hoc description in prediction clothing" carrying **no falsification weight**, and — where F1's own
+criterion was ambiguous between "at `k = 1`" and "at every `k ≤ 4`" — **reported both readings rather than
+choosing the favourable one.** F2 and F3 were each registered before running. This is the standard the
+branch should be held to, and it is why F1 is not permitted to rescue H_L above.
+
+---
+
+## A44 — row 10's closed-shape ladder: f32 ARITHMETIC clears 30k by 2–20×, and the binding constraint is OUTPUT STORAGE (2026-10-12)
+
+3 shapes × n ∈ {480, 960, 1 920}, genuine F32 arm, Q2/C2 dense stand-ins on `torusKnot`, all
+pre-registered rows met. **Row 10 is answered. The two operating points give OPPOSITE answers about the
+30k target, and the reason is now known, so the disagreement is a result rather than an ambiguity.**
+
+### 1. `K_s` (isolates the ARITHMETIC): f32 clears 30 000 with margin
+
+| shape | local exponents of `1 − cos` | agreement |
+|---|---|---|
+| torusKnot | **3.30, 3.44** (Stage 1's two-point value was 3.2) | 4 % |
+| trefoil | 2.95, 3.16 | 7 % |
+| circle | 3.22, 3.49 | 8 % |
+
+All three pass the <15 % rule of `[A42]`'s ruling 5, so for the **first time on this branch a wall-class
+exponent is ASYMPTOTIC rather than a two-point fit.** Per-seed locals scatter 2.75–3.85, so a single local
+carries ≈ ±0.5 — quoted, not hidden.
+
+**The 0.1 bar sits at or above 5.5e4 on every shape even at `p_worst+1`**; at `p_worst` it is 3.9e5
+(torusKnot), 6.4e5 (trefoil), 1.4e5 (circle). **At N = 30 000, `1 − cos ≤ 6.6e-3`** — a factor ~15 inside
+the bar. The f32 error also stays **below the compression error** up to n ≈ 3.4e4 (circle) … 1.6e5
+(trefoil), i.e. across the whole target range f32 is not the dominant error. `E_c/E_p` at n=960 is
+**500–4 150**.
+
+### 2. Stagnation (bound-only): every shape crosses below 30 000, and it is a DIFFERENT constraint
+
+Bound **6.4e3 … 2.4e4** across shapes (torusKnot 9.8k/19.5k, trefoil 10.4k/20.1k, circle 6.4k/23.7k at
+`p_worst`/`p_min`). **Stagnation exponents are uninformative — per-seed locals run −1.7 … 9.4**, which is
+`[A42] §3`'s non-instrument ruling reconfirmed on a ladder. `n*(K_s)/n*(∞)` is **22–62** at `p_worst` and
+≥ 8.6 in every pairing.
+
+> **THE SYNTHESIS, and it is the actionable conclusion of row 10.** `K_s` isolates the f32 **arithmetic**;
+> stagnation is dominated by the f32 **storage** of `A·x` (`[A42] §3`, identified and reproduced there).
+> The two readings therefore do not disagree about the operator — they measure different things, and
+> **the binding constraint on f32 at 30k is output-storage precision, NOT hierarchical f32 arithmetic.**
+> `[A42]` already measured the mitigation: **f32 chains with f64 output accumulation cut the stagnation
+> error 3.5–25×** (one cell). **So the supported design statement is: run the chains in f32, accumulate the
+> output in f64.** ⚠ The mitigation is measured at ONE cell and has NOT been laddered, so this is
+> conditional until the `OUT64` ratio is measured across rungs — commissioned as the only remaining
+> measurement row 10 is authorised to take.
+
+### 3. The genuine/dense gap GROWS with n at `K_s`, and is NOT a power law
+
+Median dense/genuine angle ratio across the three rungs: **Q2 37 → 108 → 245** (locals 1.54, 1.19),
+**C2 18.1 → 76.6 → 121** (locals 2.09, 0.66). **The locals decelerate and disagree by 29 % and 216 %, so
+the gap is NOT extrapolated** — correctly refused rather than fitted. The dense arms' own exponents
+decelerate too (C2 8.06 → 4.21, Q2 6.63 → 5.18). Dense walls at `K_s`: **5.6k–15k against ≥ 1.2e5 for the
+genuine arm**; at stagnation Q2 is 2.4k–3.2k against torusKnot's 7.9k–19.5k. The `DEN64` densifier control
+is within **4.7e-7** of the genuine angle, so the comparison is not a densification artefact.
+
+### 4. P1 / P2: formally NEITHER, with the descriptive reading on P1's side
+
+No bracket exists and the absolute reading is uncalibrated, so `[§2.4]`'s verdict is **NEITHER** — the
+pre-registered outcome, and the expected one once `[A40]` scoped the band to the dense recipe.
+**Descriptively, at `K_s`, geometry dependence is real and in P1's direction**: circle/trefoil angle ratio
+4.2, 4.6, 5.2 (P1's own number was 3.5) and extrapolated `n*_c/n*_t` **0.21–0.22** against P1's `< 0.6`
+threshold — valid to quote because the exponents agree within 10 %. At stagnation it is uninformative
+(0.61–1.18). **Reported as descriptive, not as a verdict.**
+
+**This closes a loop with `[A43]` cleanly.** A43 measured `A_σ⁻¹` amplification as **shape-independent**;
+the ladder finds the cross-shape angle differences live in **`dpX`** instead — the circle's `dpX` is 10–19×
+the other shapes' while its amplification is not. Together: **geometry affects the f32 error through the
+APPLY-ERROR MAGNITUDE, not through conditioning-driven amplification.** Mechanically, the `K_s` angle is
+the f32 apply error on the smooth solution growing ≈ `n^2.6`, partly offset by amplification falling
+≈ `n^-0.9`.
+
+### 5. Gates
+
+`L-PL` and `L-KS128` met; `K_s` is 41–52 in every cell with none coarse or censored; **G1, G2a, G3 (34/34
+seeds), G6 (0 prefix mismatches)** and the bitwise f32 re-run (**8/8 cells**) all pass. `G4` remains
+**VACUOUS** per `[A42]`'s ruling.
+
+---
+
+## A45 — row 10 CLOSED: the f64-output mitigation STRENGTHENS with n, and the same WGSL clause that creates the hazard blocks its GPU form (2026-10-12)
+
+`[A44] §2`'s commissioned measurement, run as a **ratio at fixed n** (never a wall or an exponent, since
+stagnation per-seed locals run −1.7…9.4). `ρ = OUT64/GEN32` stagnation angle, torusKnot, median seeds 0–2:
+
+| n | ρ | improvement |
+|---:|---:|---:|
+| 480 | 0.154 | 6.5× |
+| 960 | 0.094 | 10.7× |
+| 1 920 | **0.044** | **23×** |
+
+**Pre-registered outcome: STRENGTHENS** (registered rule ρ(1920) ≤ 0.5·ρ(480); measured **0.28**). It does
+**not** decay toward 1, so `[A44] §2` needs no rescoping. **And the direction does not rest on a median of
+three**: the per-seed range at 1 920 (0.023–0.067) sits **entirely below** the 480 range's minimum (0.093).
+
+**The control that matters most: with an f64 output accumulator the stagnation reading COLLAPSES ONTO
+`K_s`** — OUT64's stagnation angle sits at its own `K_s` level (ratio 1.07–1.24, max 1.33) while leaving
+the `K_s` angle itself unchanged (0.97–1.01×). Since `[A44] §1` puts the `K_s` bar at ≥5.5e4 on every
+shape, **the two operating points stop disagreeing once the output is accumulated in f64.** OUT1 reproduces
+the GEN32 excess to within 1.6–2.0×, so the store is *most* of the excess but not all — stated as measured,
+not rounded to "all".
+
+> **ESTABLISHED:** *if an f64-grade output accumulator exists, stagnation collapses onto `K_s` and f32
+> clears 30 000.* The arithmetic-model conditionality in `[A44] §2` is discharged.
+
+### ⚠ The GPU form of this mitigation is blocked by the SAME clause that created the hazard
+
+**Portable WGSL has no native f64**, so a GPU accumulator must be emulated (df64 / compensated summation).
+The repo's own prior research already settled the portability, and more sharply than row 10 stated it —
+`docs/2026-08-13-ai-research-gpu-precision.md` **Q3**, cited in the Phase-2 design spec's source list as
+`[PREC Q3]`: *"compensated arithmetic is NOT portable in WGSL — §15.7.5 permits reassociation; df64 ≈ 4×
+cost."*
+
+**The coupling is the point, and it is not a coincidence.** Compensated summation (Dekker/Knuth two-sum)
+is correct only because specific intermediate roundings happen at specific points. **WGSL §15.7.5's
+reassociation permission is the very same clause `[A42]` identified as the threat to the low-order
+structural zero.** So one WGSL licence simultaneously (a) creates the precision hazard and (b) invalidates
+the standard software fix for it. A GPU port cannot assume either the structural zero or the emulated
+accumulator survives; both need measuring on the real kernel, and at ≈4× cost the accumulator is not free
+even where it works.
+
+**Scope of the established statement, both limits recorded:**
+1. **Measured on torusKnot only**, as instructed. The **circle** is the shape where the stagnation
+   precision angle comes within **7–17×** of the compression angle (`[A44]`), and it is **unmeasured** —
+   the first place to look if the mitigation is ever load-bearing.
+2. **Phase 3 must re-test this on the real WGSL kernel** with the same OUT64-vs-shipped ratio. A
+   transcription cannot answer it — that is exactly **#94**'s gap (a transcription shares the op order by
+   construction, so it cannot detect a reassociation the compiler is permitted to make).
+
+### Stage 3 applied, and verified by the controller
+
+`src/` carries **two comment-only edits**: `bct.ts` +13/−1 (a `Why:` on `traverseBct`, a pointer in
+`buildBct`) and `gmres.ts` +8 (the `exactApplyA` TSDoc). **Controller-verified: `git diff -U0 -- src/`
+contains ZERO non-comment added or removed lines**, 20 insertions / 1 deletion across the two files.
+Biome format and lint clean; `bct.test.ts` + `gmres.test.ts` **109 pass / 0 fail**. Both cite spec
+amendments (`[A44] §5`, `[A42] §5`, `[A44] §1`) rather than task numbers, per the repo's anchoring rule.
+
+### ROW 10 IS CLOSED
+
+Delivered: the genuine f32 hierarchical apply through the whole solve (`[A40]`), its mechanism with a
+surviving falsifier and a refuted alternative (`[A42]`, `[A43]`), the per-shape question closed in a
+different currency than it was asked in (`[A43]`, `[A41]`/#93), an asymptotic `K_s` exponent ladder
+(`[A44]`), and a discharged design statement with its GPU limit named (this item). P1/P2: **formally
+NEITHER**, descriptive reading on P1's side. Issues opened: **#92, #93, #94**.
