@@ -4734,3 +4734,137 @@ surviving falsifier and a refuted alternative (`[A42]`, `[A43]`), the per-shape 
 different currency than it was asked in (`[A43]`, `[A41]`/#93), an asymptotic `K_s` exponent ladder
 (`[A44]`), and a discharged design statement with its GPU limit named (this item). P1/P2: **formally
 NEITHER**, descriptive reading on P1's side. Issues opened: **#92, #93, #94**.
+
+---
+
+## A46 — row 11's Stage 0: H4b′ CANNOT FAIL, the harness cannot publish, and A45's mitigation has no code path (2026-10-12)
+
+Eight defects, two of them blocking. **Both of the two things I invited row 11 to attack are real, and one
+is worse than I stated.** Every item below was controller-verified at its cited site before being ruled.
+
+### 1. CRITICAL — H4b′ is VACUOUS on the matvec §7.6 rules for, and there is NOTHING to re-register
+
+`[§7.6]` is the amendment that diagnosed H4b's *first* vacuity. **Its repair is vacuous on the production
+(θ) matvec it rules for**, and task 0c had already measured and reported this:
+`q_prod > 0` on **69/69 rhs at n=960 and 66/66 at n=2000**, including **38 and 36 rhs whose
+`cos < 0.9`**; `badAndNonPositive` is **empty** (`task-0c-report.md:34`). 0c's own words: *"First measured
+confirmation outside the random-rhs regime that **H4b′ cannot see the bad directions**"*, and *"it does not
+make production q able to see cos < 0.9"* (`:62`).
+
+**And it cannot be repaired, which is the real cost.** `[§7.6:2071-2077]` already *proves* it: all
+computable quantities are functions of `(x̃, b, A_σx̃)` and `cos² = c²/(aP)`, so `cos ≥ 0.9` is exactly an
+**upper**-bound test on `P = bᵀA⁻¹b`, while from `x̃` alone only *lower* bounds on `P` exist — *"A
+reference-free lower bound on `cos∠_A` from a single iterate does not exist."* The χ=0 matvec is not a
+repair either: `0c:61` shows it **false-kills** rhs whose `cos_exact` is 1.0.
+
+> **RULING: H4b′ emits VACUOUS, not GREEN** (`[A42]` ruling 5 — a gate that cannot fail reads exactly like
+> one that passed). **`[§7.12:2729]`'s `"H4b": "GREEN"` example is wrong and is withdrawn.**
+> **Consequences, both of which are amendments to this spec:** `[§7.1:1239]` calls H4b′ *"per-solve,
+> production"* and the only such gate binding at 30k; `[§7.11:2608]` names it the mitigation above n=960
+> where H4a's dense reference stops. **Both are withdrawn. No gate in H1–H6 certifies direction quality
+> above n ≈ 960, at any n, and none can be written reference-free.**
+
+**THE SECOND HALF, which must be recorded with the first or the hole reads worse than it is.** 0c also
+measured *why* `q` is blind, and it is not a direction defect: *"the direction is right and the step length
+is wrong by a known factor"* (the BCT overshoots the bad modes by `1/λ` — 2.75× at n=960, 3.46× at
+n=2000), so *"within these data it is a line-search/step-scale input, not a direction defect"*, consistent
+with `[§7.7]`'s *"τ measures step scale, not quality"*. **0c's own caveat is the open question: it stays
+benign only if the line search actually runs on those modes, and 0c did not measure that.**
+**So the honest record is two claims, not one: (a) no gate certifies direction quality above n ≈ 960, and
+(b) it is NOT ESTABLISHED that one is needed.** Filed as **utof/repulsive-test2#95**.
+
+### 2. CRITICAL — the harness cannot emit a publishable artefact, and the predicate CANNOT NOT FIRE
+
+H1's INVALID clause 4 (`adapterCert.classification ≠ 'hardware'`, `[§7.2:1327]`) fires on **every row** of
+a CPU harness. Verified in source: `certifyAdapter` (`bench/gpu/adapterCert.ts:73-123`) has three routes;
+two require `GPUAdapterInfo` or browser `HostEvidence`, and **the fall-through returns
+`classification: 'software'`** (`:117-122`). A CPU Bun harness supplies neither input, **and there is no
+GPU anywhere in H1–H6.** `[§7.0:1219]` then forbids publishing the run.
+
+> **This is `gates-name-their-impossible-values` INVERTED: a predicate that cannot NOT fire reads exactly
+> like a broken harness.** **RULING, adopting row 11's option (a):** emit `adapterCert: null` plus a
+> `host` block (runtime, versions, CPU, load), and **clause 4 is scoped to GPU runs and emitted
+> `NOT APPLICABLE` on the CPU arm**, using `[§7.9]`'s own NOT APPLICABLE precedent. The clause stays live
+> and unchanged for any future GPU arm.
+
+### 3. My §7.12 output-accumulation hypothesis is CONFIRMED — and the gap is TWO-SIDED, which corrects `[A45]`
+
+There is no schema field **and no way to set one**. `AccumulatorVariant` (`nearField.ts:101-115`) exposes
+`round`/`roundNear`/`alloc`/`cast` but **no output hook**, and `applyColumns` writes
+`out[o+i] = fr(out[o+i] ± r)` (`apply.ts:620-627`, controller-verified) — **so the shipped F32 operator IS
+`[A45]`'s OUT32 configuration.** Row 10's OUT64 arm was a scratch-local re-implementation
+(`scratch-10/mutant.ts:33 makeTwoTermOp`), not a variant of the shipped operator.
+
+> ⚠ **`[A45]` IS CORRECTED.** It scoped its design statement on the WGSL limit alone (*"if an f64-grade
+> output accumulator exists"*), implying one exists on CPU. **It does not exist on EITHER backend.** The
+> 6.5×/10.7×/23× mitigation is measured on a re-implementation of the operator, not on anything shippable.
+> So the statement is: *the mitigation is real and measured, and no code path in this repo can apply it.*
+> The schema field can only ever read `"f32"` and **must carry the reason**. Making it configurable is an
+> exported-interface change ⇒ **utof/repulsive-test2#96**, not row 11.
+
+### 4. My "a `.py` harness cannot reach them" premise is FALSE PER GATE (the conclusion survives)
+
+- **H5 is ALREADY a shipped TS gate**, and the test says so in its own comment: `precond.test.ts:442`
+  asserts `κ_excl < 40`, `:447` asserts `κ_eig·u_f32 < 1e-2` with *"H5 property 3 on the SHIPPED operator
+  for the first time (it was quoted from `e0-closer-0b.json` before)"*; nullity and both INVALID clauses at
+  `:527` + `lowOrder.test.ts:802-812`, via `denseSpectrum.ts`. **Sending H5 back to Python would
+  re-measure the LAB `pinv` operator — the exact provenance `[A32]` and `[A38 item 9(a)]` withdrew figures
+  from. RULING: H5 is emitted from the shipped TS instrument; only H6 stays Python** (generalized pencil;
+  TS has no such eigensolver).
+- **`scratch/*.py` DOES NOT EXIST.** There is no `scratch/` at the repo root; all 17 `scratch*`
+  directories are under `.superpowers/sdd/**`, and the Python lab instruments live in the
+  **2026-09-11-phase2h-queue** session, **gitignored**. Row 11's instruction pointed at a nonexistent path.
+- **H4c is f64-OPERATOR-ONLY** — `makeHierarchicalSaddle` has no precision variant and calls `prepareA`
+  with none (`hierarchicalSaddle.ts:321` → F64 default). So `[§7.12]`'s `precision.operator: "f32"` is
+  **false for H4c**; widening `HierarchicalSaddleOptions` is a hard-gate change.
+- **H4a's INVALID 1 is NOT A COMPUTABLE PREDICATE** — *"`x*` not from an f64 dense solve"* is provenance,
+  not a function of outputs, so it cannot be "reachable in a test" as the row requires. Its INVALID 2 is
+  near-vacuous (`cosHat² ≥ 1` always per `[§7.6:2057]` while `cos ≤ 1`, so bit-equality needs exactly 1.0).
+- **Good news, and it removes work:** H1-a, H1-b, H2 and H3 **already have every INVALID predicate
+  reachable in a test** (`apply.test.ts:596-614`, `:720-727`; `gmres.test.ts:347-416`, `:1225-1264`,
+  `:560-868`). **Row 11 cites those; it does not re-implement four files of coverage.**
+- `lineSearchStepSet` was **not** built in tasks 3–8 (introduced in `5c526d7`) and **does** have a Python
+  counterpart (`oracle/tpe_constraints_oracle.py:554`). **The correct reason for "TS not Python" is that
+  the hierarchical OPERATOR and the GMRES `η` hook have no Python counterpart at all.**
+
+### 5. §7.12's H1 anchors are a DIFFERENT FIXTURE from its own `fixtures.family` — `[A39 item 3]` inside the schema
+
+`kappaNear: 93.3`, `kappaFar: 3.68`, `h1bBar: 5.78e-5` are **torusKnot bbox-normalised** (reproduced from
+`out-bct-torusKnot-*.json` n=960: `nFar` 3530, `nearPairs` 89538, m=960 → 3.677 and 93.27). On the
+**trefoil at native extent** that `fixtures.family` names, the same quantities are 1186/36532 → κ_far
+1.2354, κ_near 38.054, **bar 2.3416e-5 — 2.467× TIGHTER**, and σ is **18959.27, not 19168.9**.
+**An implementer copying the schema ships the wrong bar.** Also: **κ_far = nFar/m is never defined in this
+spec.** And `[§7.12]` has ONE top-level `fixtures` object while **H1 needs torusKnot (every anchor),
+H2/H3 need trefoil (every shipped ladder), and H1-a's must-NOT-trip cell needs circle.**
+**RULING: the schema gains per-gate fixture provenance, every bar is computed from the run's own counts
+rather than copied, and κ_far gets a definition.** Row 11's ten proposed keys are adopted.
+
+### 6. R1: BOTH of the first two ceilings changed this session, and the schema cannot express the answer
+
+- **`servedN_f32only`: its binding instrument is RETRACTED.** The 0.7732 figure is the dense-f32 cast
+  `[A40]` scoped away; at `K_s` **nothing binds below 30k** (`[A44] §1`), and the stagnation route is one
+  `[A44]`/`[A42] §3` explicitly withdrew as a ceiling basis. **Honest value: `NOT ESTABLISHED`** — which
+  the schema cannot express (bare number, no `Status`, no shape field, against `[A38 item 10]`'s per-shape
+  requirement).
+- **`servedN_mixed`: both named blockers are DISCHARGED** (7b + row 10 for the f32 apply; `[A38 item 9]`
+  for `κ_precond` to n=4000 on four shapes with 720× headroom). **It stays `NOT ESTABLISHED`, but its
+  `blockedBy` array is rewritten** to flatness-not-established plus `[A45]`/§3-above's conditionality on an
+  accumulator that has no code path.
+
+### 7. θ: the RED was MIS-ATTRIBUTED, and I never issued the ruling 0c asked for
+
+`apply.test.ts:644` says 0.25 is production after H6 read RED; `[A32:2303]` says 0.5 is the ruled target
+pending #51; **0c read RED with CONCERN 1 that "the RED is a stopping-rule effect, not a theta effect"** and
+said *"Controller must rule on this before acting on RED."* Row 11 found no record that I did, and it is
+right — my ledger engaged the substance but issued no ruling.
+
+> **RULING, issuable now from evidence already in hand:** θ=0.25 reads 0.7649, θ=0.5 reads 0.7856, and the
+> **exact δ=0 operator reads 0.7644** — so **θ is not the variable and switching it changes nothing.** The
+> θ=0.5 *operator* passes (`min cosExact` = 0.9062 ≥ 0.9 at n=960); the RED comes from the **stopped
+> iterate** (6–9 iterations against ~29–39 for random rhs, because the recurrence residual hits 1e-4 while
+> the true error is still large) — which is `[§5.3]`'s own ruling that the recurrence residual *"is not a
+> convergence criterion … under-reports by 3.9e3–6.6e3×"*, and the same artefact `[§7.6]` used to forbid
+> reading any H4 bar at τ=1e-2. **The RED is WITHDRAWN as a θ signal**, and `apply.test.ts:644`'s
+> "0.25 is production because H6 read RED" rests on a withdrawn inference. **The CHOICE of production θ
+> stays open on #51's own evidence and is NOT row 11's to make:** row 11 gates at BOTH θ wherever a gate is
+> per-θ and emits `thetaProduction: null` citing #51 and this item.
