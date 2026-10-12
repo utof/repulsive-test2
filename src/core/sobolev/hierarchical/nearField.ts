@@ -35,9 +35,20 @@
  * mirroring innerProduct.ts:96 and :242-246. Per-exponent `pow` (`d ** p`) is used rather than a
  * combined `d^4 * d^p`: the repo's low-order kernel writes `k24 / dNorm ** distExp` with
  * `k24 = cross^2 / dNorm^4`, and this file evaluates `cross^2 / d ** pLow` with
- * `pLow = pHi + 4` — algebraically identical, pinned to the repo at 4e-15 by
- * `nearField.test.ts`; keep whichever form is here, do not "simplify" to the other without
- * re-running that pin, because the two differ in f32 by more than the H1-b band is wide.
+ * `pLow = pHi + 4` — algebraically identical. **Keep whichever form is here. Do not "simplify" to
+ * the other without re-running the pin in `nearField.test.ts`'s `endpoint4Kernel` f64 test, which
+ * builds its oracle with the OTHER form (`k24 / dNorm ** pHi`) and pins this file's `d ** pLow`
+ * against it at 4e-15** — a hard, executed, cross-form bar, which is the reason not to touch the
+ * form.
+ *
+ * CORRECTED 2026-10-12. This paragraph previously justified the instruction with *"because the two
+ * differ in f32 by more than the H1-b band is wide"*. That magnitude claim is WRONG and is
+ * withdrawn: MEASURED in f32 over 12 004 samples (`d ∈ [1e-3, 1]` × four numerator magnitudes), the
+ * two forms differ by **4.1e-8 mean / 2.4e-7 max per evaluation**, against an H1-b band at
+ * torusKnot n=960 θ=0.5 that is **5.768e-5 wide** — i.e. the difference is ~240× NARROWER than the
+ * band, not wider, and swapping the form would not move H1-b out of band on this evidence. The
+ * INSTRUCTION is unchanged and correct; only the quantity it was anchored to was.
+ * @see docs/superpowers/plans/phase2h-review-ledger/probes/powform.ts (the 12 004-sample f32 measurement)
  *
  * PRECONDITION of the f32 variant (per-exponent `pow` underflow): `fr(d ** pLow)` with
  * `pLow = 19/3` flushes to 0 for `d` below ~8e-8 (binary32 min normal 1.18e-38), and the low

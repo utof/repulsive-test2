@@ -142,7 +142,7 @@ try {
 
 `solverWorker.ts:34-36` is `self.onmessage = (event) => { const msg = event.data; try { …`, and the matching `catch` posts `{ type: 'error', message }` back to the main thread (`:89-99` — the file is 100 lines). **Decision: the guard is the first statement inside the `try`, not before it.** Placed before the `try` the throw becomes an unhandled worker error with no message channel; placed inside, the existing error path reports it to the caller that made the mistake. Either spelling "fails loudly"; only one fails *legibly*.
 
-**And it must inspect `msg.args`, not `msg`.** `SolverWorkerRequest`'s `step` arm is `{ type: 'step'; graphVersion: number; args: DispatchStepArgs }` (`dispatch.ts:397-400`) and `DispatchStepArgs = Omit<DispatchDescentStepArgs, 'edges' | 'disjointPairs'>` (`:371`), so adding `saddle?` to `DispatchDescentStepArgs` admits it at **`msg.args.saddle`** and nowhere else. `'saddle' in msg` is `false` for every message the protocol can carry — dead code that reads as a live safety property, while `dispatchDescentStep({ ...msg.args, … })` at `:75-79` spreads `saddle` straight through. `msg.type === 'step' && 'saddle' in msg.args` needs no cast: `msg.type === 'step'` has already narrowed `msg.args` to `DispatchStepArgs`, and `in` accepts any object-typed right operand (verified under this repo's `compilerOptions`). Task 1 Step 7 writes the falsifier — no test in an earlier draft touched the worker at all, so the dead guard would have shipped green.
+**And it must inspect `msg.args`, not `msg`.** `SolverWorkerRequest`'s `step` arm is `{ type: 'step'; graphVersion: number; args: DispatchStepArgs }` (`dispatch.ts:422-425`) and `DispatchStepArgs = Omit<DispatchDescentStepArgs, 'edges' | 'disjointPairs'>` (`:371`), so adding `saddle?` to `DispatchDescentStepArgs` admits it at **`msg.args.saddle`** and nowhere else. `'saddle' in msg` is `false` for every message the protocol can carry — dead code that reads as a live safety property, while `dispatchDescentStep({ ...msg.args, … })` at `:75-79` spreads `saddle` straight through. `msg.type === 'step' && 'saddle' in msg.args` needs no cast: `msg.type === 'step'` has already narrowed `msg.args` to `DispatchStepArgs`, and `in` accepts any object-typed right operand (verified under this repo's `compilerOptions`). Task 1 Step 7 writes the falsifier — no test in an earlier draft touched the worker at all, so the dead guard would have shipped green.
 
 ### D5 — CR gates three physically-reachable rhs and RECORDS a ten-vector ensemble
 
@@ -818,7 +818,7 @@ import type { PreparedSaddle } from './sobolev/linsolve';
         // than solve with a silently missing factorization. Inside the try so the
         // existing catch (:89-99) reports it as { type: 'error' } to the caller that
         // erred. It must read `msg.args`, NOT `msg`: SolverWorkerRequest's 'step' arm is
-        // { type, graphVersion, args } (dispatch.ts:397-400) and DispatchStepArgs =
+        // { type, graphVersion, args } (dispatch.ts:422-425) and DispatchStepArgs =
         // Omit<DispatchDescentStepArgs, 'edges' | 'disjointPairs'> (:371), so `saddle`
         // can only ever appear at msg.args.saddle — `'saddle' in msg` is false for every
         // message the protocol can carry, i.e. a guard that can never fire while

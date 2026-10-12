@@ -167,7 +167,32 @@ export interface DispatchDescentStepArgs {
      * A saddle solve prepared for `vertices` (WebGPU Phase 2a seam). Forwarded to
      * `sobolevStepSet` exactly like `dE`. Carries closures ⇒ never cloneable ⇒ it
      * must not ride the worker payload.
+     *
+     * TWO ARMS, and the second one has a REQUIREMENT THIS FIELD ALONE CANNOT EXPRESS.
+     * `PreparedSaddle` is a `kind`-tagged union (Phase 2H, spec §5.1):
+     *  - `kind: 'dense'` — the Phase 2a path. Producer: `makePreparedSaddle` (`src/gpu/saddle.ts`).
+     *  - `kind: 'hierarchical'` — the Phase 2H matrix-free path. Producer:
+     *    `makeHierarchicalSaddle` (`src/core/sobolev/hierarchical/hierarchicalSaddle.ts`).
+     *    **Passing it REQUIRES `projectionMode: 'frozen'` on the same args, or
+     *    `sobolevStepSet` THROWS** ("a hierarchical saddle requires projectionMode 'frozen'").
+     *    Not a defensive check: the other projection branch calls `assembleAFlat` per projection
+     *    iterate (O(N²) f64, 7.2 GB at N = 30 000), so without the refusal a step would solve its
+     *    gradient hierarchically and then silently reassemble a DENSE `Ā` for every projection
+     *    iterate — a measurement that reads like a hierarchical step and is not. `dispatch.ts`
+     *    forwards `projectionMode` already, so the route works; the pairing is the caller's.
+     *  - The hierarchical arm is MAIN-THREAD / INLINE ONLY. `solverWorker.ts` throws whenever
+     *    `'saddle' in msg.args`, and the object holds closures, so it is not structured-cloneable
+     *    by construction. Under the default `solverDriver: 'worker'` (`store.ts`) passing it
+     *    through here therefore throws, by design and pinned by a test.
+     *
+     * Why this lives on the consumer side too, when the producer already documents it: this field
+     * is the only caller-facing surface, and it silently WIDENED when `PreparedSaddle` became a
+     * union — a public field that accepts a value which throws unless a SECOND field is set is
+     * exactly the non-obvious runtime behaviour `CLAUDE.md` requires anchored in place.
      * @see SobolevStepOptions.saddle (optimizer.ts)
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b, A33 item 2
+     * @see src/core/sobolev/hierarchical/hierarchicalSaddle.ts (the producer, and its REACHABILITY paragraph)
+     * @issue utof/repulsive-test2#62
      */
     saddle?: PreparedSaddle;
 }

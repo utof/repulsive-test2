@@ -155,7 +155,7 @@ export class GpuDriver {
                     DEFAULTS,
                 );
             }
-            // `buildStepArgs` passes `st.live` by REFERENCE (dispatch.ts:333) and PinControls.tsx:169-174 mutates
+            // `buildStepArgs` passes `st.live` by REFERENCE (dispatch.ts:358) and PinControls.tsx:169-174 mutates
             // `live` in place across our `await` below — so copy ONCE here and hand the SAME copy to the kernel
             // and to the step; otherwise dE would be evaluated at different vertices than the step uses
             // (dE seam contract — `src/core/optimizer.ts` `dE?: Vec3[]` TSDoc; plan

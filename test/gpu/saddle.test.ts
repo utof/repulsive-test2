@@ -372,7 +372,7 @@ const IR_SCALE = 2 ** -20;
 const IR_DEEP_SCALE = 2 ** -60;
 
 test('the IR criterion is scale-free: the residual curve is BIT-IDENTICAL under an exact rhs rescale', () => {
-    // The criterion at `src/gpu/saddle.ts:412` is the PURE relative residual
+    // The criterion at `src/gpu/saddle.ts:418` is the PURE relative residual
     // `||r_i||/||r||`, and `||r_i||/max(1, ||r||)` — the spelling [DESIGN §4.1] step 4
     // forbids in bold and §4.4 forbids again — is scale-DEPENDENT below ||r|| = 1, which
     // the projection rhs `[0; -Phi]` always is. Nothing in the suite bound that before this

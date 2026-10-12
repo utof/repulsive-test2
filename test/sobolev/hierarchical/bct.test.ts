@@ -497,7 +497,7 @@ test('determinism: identical input gives bit-identical lists', () => {
     expect(a.stats).toEqual(b.stats);
 });
 
-test('defaults: omitted theta/thetaT resolve to the named constants, and theta is 0.25 (gate H6 RED)', () => {
+test('defaults: omitted theta/thetaT resolve to the named constants, and the shipped theta is 0.25', () => {
     const bvh = tree('torusKnot', 960);
     const dflt = buildBct(bvh, {});
     const explicit = buildBct(bvh, { theta: DEFAULT_THETA, thetaT: DEFAULT_THETA_T });
@@ -506,11 +506,22 @@ test('defaults: omitted theta/thetaT resolve to the named constants, and theta i
     expect(dflt.params.adjacencyCertificate).toBe(true);
     expect(dflt.params.invertAdmissibility).toBe(false);
     expect(DEFAULT_THETA_T).toBe(Number.POSITIVE_INFINITY); // theta_T off (spec §5.5)
-    // The value WAS deliberately unpinned while gate H6 was in flight. H6 read RED on 2026-10-09
-    // (min cos∠_A = 0.8585 < 0.9 at n=2000), and §7.9's pre-registered rule flips the default to
-    // the fallback 0.25 — so the value is now decided and pinned. A silent drift back to 0.5
-    // would restore an operator with a measured sub-0.9 adversarial direction.
-    // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §4.1, §7.9
+    // WHAT THIS PINS, AND WHAT IT NO LONGER CLAIMS. It pins the SHIPPED default: 0.25, so a silent
+    // drift to another value cannot pass unnoticed and every oracle measured against the default
+    // stays comparable. It does NOT claim the value is decided.
+    //
+    // SUPERSEDED, quoted not deleted:
+    // > "The value WAS deliberately unpinned while gate H6 was in flight. H6 read RED on 2026-10-09
+    // >  (min cos∠_A = 0.8585 < 0.9 at n=2000), and §7.9's pre-registered rule flips the default to
+    // >  the fallback 0.25 — so the value is now decided and pinned. A silent drift back to 0.5
+    // >  would restore an operator with a measured sub-0.9 adversarial direction."
+    // WITHDRAWN: `[A46 item 7]` withdrew H6's RED as a theta signal — theta=0.25 reads 0.7649,
+    // theta=0.5 reads 0.7856 and the EXACT δ=0 operator reads 0.7644, so theta is not the variable
+    // the RED was responding to and 0.5 is not shown to be the worse operator. The PRODUCTION
+    // choice is open on #51's evidence. `bct.ts` `DEFAULT_THETA`'s own TSDoc carries the full
+    // withdrawal and the live cost figures that now feed #51.
+    // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §4.1, §4.4, §4.5, A46 item 7
+    // @issue utof/repulsive-test2#51
     expect(DEFAULT_THETA).toBe(0.25);
 });
 

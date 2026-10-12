@@ -298,9 +298,9 @@ export function sobolevStepSet(
     if (opts.dE && opts.dE.length !== vertices.length)
         throw new Error('sobolevStepSet: dE length mismatch');
     // The saddle mirror of the line above. `saddle.A` goes straight into
-    // FrozenSaddleOperator.a, and solveSaddleFrozen (linsolve.ts:932-955) validates
+    // FrozenSaddleOperator.a, and solveSaddleFrozen (linsolve.ts) validates
     // rhsTop/rhsBottom lengths ONLY — while the path it replaces DOES validate A
-    // (solveSaddleFromA, :804-806). Without this the seam path is strictly less checked
+    // (solveSaddleFromA, linsolve.ts:881-883). Without this the seam path is strictly less checked
     // than the CPU path, and a short A reads out of range → undefined → NaN, which
     // nothing downstream thresholds: the run would auto-pause on `armijo_failed` with
     // usedGpuSolve still true.

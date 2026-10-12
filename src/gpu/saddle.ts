@@ -20,7 +20,7 @@ import {
  * `TS2339` and every `bunx tsc --noEmit` in this plan would fail on it. The test suites
  * and gate CR all need `solve`, so the narrowing lives here once rather than being
  * re-spelt in three files. Uses the SAME `'kind' in fac && fac.kind === 'external'` test
- * D3 pins for `solveFactored`: `LuFactorization` (`linsolve.ts:219-223`) has no `kind`
+ * D3 pins for `solveFactored`: `LuFactorization` (`linsolve.ts`) has no `kind`
  * field, so `fac.kind === …` alone is a TS error on this union.
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
  * @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md (## Decisions, D3)
@@ -33,7 +33,7 @@ export function asExternal(fac: SaddleFactorization): ExternalFactorization {
 
 /**
  * IR stops at this PURE relative residual `‖r_i‖₂/‖r‖₂`. Deliberately NOT the core's
- * own `residual` stat: `structuredSaddleResidual` (`linsolve.ts:860`) normalises by
+ * own `residual` stat: `structuredSaddleResidual` (`linsolve.ts`) normalises by
  * `max(1, ‖r‖₂)` and is therefore ABSOLUTE for any rhs with `‖r‖₂ ≤ 1` — which the
  * projection rhs `[0; −Φ]` always is — so reusing it would accept a solve ~1e4× worse
  * than this criterion claims.
@@ -60,7 +60,7 @@ export const SADDLE_IR_MAX_REFINEMENTS = 4;
  * rank-1 shift is enough to make A_σ SPD — and it is positive exactly on the null
  * direction, `A_σ(𝟙/√n) = σ(𝟙/√n)`. It is removed EXACTLY by the Woodbury step, so it
  * does not perturb the metric (do not confuse with `buildSaddleMatrix`'s "no
- * regularizing identity" rule, `linsolve.ts:133-154`, which protects the METRIC).
+ * regularizing identity" rule, `buildSaddleMatrix` in `linsolve.ts`, which protects the METRIC).
  * `out` lets a caller reuse one buffer across steps — a per-step N×N allocation is a
  * measured throughput regression, not a style question ([CAL §H.1]: the "A_σ build +
  * f32 cast" constant spreads 10.7× at N=480 between the churn and reuse regimes).
@@ -127,7 +127,7 @@ function solveWithL(L: Float64Array, n: number, rhs: ArrayLike<number>, out: Flo
  * Â⁻¹ applied to a 3n vector — three INDEPENDENT n-backsolves, one per coordinate block.
  * COORDINATE-MAJOR, and that is load-bearing: `Ā = I₃ ⊗ A`, so block `b` is coordinate
  * `b` over ALL vertices and occupies rows `[b·n, (b+1)·n)`. This is the layout the core
- * writes (`linsolve.ts:823-827`, `off = b * n` / `dst = (off + i) * size + off`), the
+ * writes (`linsolve.ts:900-904`, `off = b * n` / `dst = (off + i) * size + off`), the
  * layout `flatten` produces (`layout.ts:23-32`), and the layout the oracle uses
  * (`oracle/tpe_stage1_oracle.py:245-248`, `np.block([[A,0,0],[0,A,0],[0,0,A]])`).
  * The interleaved vertex-major spelling `A ⊗ I₃` — indexing `v[3*i + b]` instead of
@@ -410,7 +410,7 @@ export function makePreparedSaddle(
                         for (let i = 0; i < r.length; i++) rn += r[i] * r[i];
                         // The PURE relative residual — divided by ‖r‖₂, NEVER by
                         // max(1, ‖r‖₂). The core's own stat uses the latter
-                        // (`structuredSaddleResidual`, `linsolve.ts:860`) and is therefore
+                        // (`structuredSaddleResidual`, `linsolve.ts`) and is therefore
                         // ABSOLUTE for the projection rhs `[0; −Φ]`, whose ‖r‖₂ is always
                         // ≤ 1; delegating to it would certify a solve ~1e4× worse than
                         // this criterion claims, in the PERMISSIVE direction.

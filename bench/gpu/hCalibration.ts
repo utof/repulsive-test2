@@ -15,7 +15,7 @@
  * a Python counterpart (`oracle/tpe_constraints_oracle.py:554`) and H5's dense-eigenvalue
  * instrument exists on both sides. The surviving reason is narrower and sufficient: **the
  * hierarchical operator and the GMRES `η` hook have no Python counterpart at all**, and H5 is
- * ALREADY a shipped TS gate (`precond.test.ts:383-447`), so re-measuring it in Python would
+ * ALREADY a shipped TS gate (`precond.test.ts:383-461`), so re-measuring it in Python would
  * regress its provenance to the lab `pinv` operator that `[A32]` and `[A38 item 9(a)]` withdrew.
  * **H6 alone stays Python** (generalized symmetric-definite pencil; TS has no such eigensolver) —
  * its measured values are transcribed here from `task-0c-report.md` and labelled as transcribed.
@@ -30,7 +30,7 @@
  * FOREGROUND (a backgrounded run makes the agent go idle and the campaign stops silently) inside a
  * 10-minute cap — `scratch-7b/h23.ts:74-80`'s precedent, created for the same reason. Sharding
  * changes NO pinned parameter. It is the substitute for the χ=0 probe sparsification: `η_exact` and
- * `η_bct` share one `schedule` and one `exactApplyA` by construction (`gmres.ts:344-382`, and
+ * `η_bct` share one `schedule` and one `exactApplyA` by construction (`gmres.ts:362-400`, and
  * `probeAt` at `:688-716` computes both on every probe), so they cannot be scheduled independently
  * without changing an exported interface — utof/repulsive-test2#96's class of change, not row 11's.
  *
@@ -104,7 +104,7 @@ import { calculateDisjointPairs, calculateEnergy } from '../../src/core/tangentP
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
 // `bench/ → test/` import, PERMITTED by the controller's Stage-1 ruling 2 and deliberate.
 // Why: `denseSpectrum.ts` IS the instrument H5's shipped gate is measured with
-// (`precond.test.ts:383-447` calls exactly these functions), and `[A46 item 4]` rules that H5 is
+// (`precond.test.ts:383-461` calls exactly these functions), and `[A46 item 4]` rules that H5 is
 // emitted from the SHIPPED TS instrument rather than re-measured. Duplicating `cholesky`/`spectrum`
 // into `bench/` would publish H5 from a second implementation, which is the common-mode defect
 // memory `common-mode-blindness` records: a bug both copies share passes both.
@@ -129,17 +129,42 @@ const BETA = DEFAULTS.beta;
 const EPS_A = DEFAULTS.epsilon;
 /** `bvh.ts` `DEFAULT_LEAF_SIZE`, and the leaf size of every anchor in the corpus. */
 const LEAF = 8;
-/** H1's rhs seed — `apply.test.ts:181` `rhs(n, seed = 12345)`, the seed every `relErrRandom` used. */
+/** H1's rhs seed — `apply.test.ts:192` `rhs(n, seed = 12345)`, the seed every `relErrRandom` used. */
 const H1_RHS_SEED = 12345;
-/** H1-b's lower bound: a decade under the MEASURED f32 apply noise (spec §7.2; `apply.test.ts:655`). */
+/** H1-b's lower bound: a decade under the MEASURED f32 apply noise (spec §7.2; `apply.test.ts:678`). */
 const H1B_LOWER = 1e-7;
+/**
+ * The rung {@link H1B_LOWER} was CALIBRATED at, and therefore the smallest rung at which this
+ * harness is willing to publish an H1-b verdict. Below it {@link gateH1b} returns
+ * `NOT ESTABLISHED` instead of a verdict.
+ *
+ * Why a validity rung and not a scaled floor: the floor is a flat literal while `δ_precision` grows
+ * with `n`, so its margin collapses as `n` falls. MEASURED (torusKnot, scalar apply, seed 12345,
+ * `docs/superpowers/plans/phase2h-review-ledger/probes/h1bprobe.ts`): `δ_precision / 1e-7` is
+ * **10.52× at n=960, 4.75× at 480, 3.02× at 240, 2.42× at 120, 1.61× at 64 and 1.07× at 32**, so at
+ * n=32 the floor is 6.6 % from publishing RED on a correct operator and the crossing sits just
+ * below it (log-log fit `n^0.63` over n=32…960 ⇒ n ≈ 31.5; `n^0.70` over n=120…960 ⇒ n ≈ 41.5 —
+ * the fit range moves the estimate, the n=32 margin of 1.07× does not).
+ *
+ * **The floor's FUNCTIONAL FORM is deliberately NOT changed here.** Replacing a literal with a
+ * fitted `n`-scaling is a bar redesign, and fitting it from the run that revealed the weakness is
+ * the data-dependent bar-setting refused at `[A42]` ruling 5, `[A43]` and `[A47 item 6]`. It needs a
+ * pre-registered sensitivity analysis with its own point set. Until then this constant is the honest
+ * statement of where the existing floor is known to hold.
+ *
+ * The floor itself must stay: `apply.test.ts:687-693` records what it is for — an "f32" path
+ * reporting ~1e-16 is an unrounded f64 simulation, not a precise one (memory
+ * `simulate-bugs-at-target-precision`).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.2
+ */
+const H1B_FLOOR_VALID_FROM_N = 960;
 /**
  * f16 unit roundoff, `2**-11` — 10 stored mantissa bits plus the implicit one. Used ONLY to
  * reproduce §7.11 item 7's knock-out MODEL beside the measurement; the f16 path itself is
  * `F16_NEAR_KNOCKOUT`, never production.
  */
 const U_F16 = 2 ** -11;
-/** H1-a's slack: `apply.test.ts:604` asserts `d25 <= 1.001 * d5`. */
+/** H1-a's slack: `apply.test.ts:615` asserts `d25 <= 1.001 * d5`. */
 const H1A_SLACK = 1.001;
 /** H2's bar, spec §7.3: `50 · u_f32`. Computed from {@link U_F32}, never written as 2.98e-6. */
 const H2_BAR = 50 * U_F32;
@@ -242,7 +267,7 @@ function lcg(seed: number): () => number {
     };
 }
 
-/** Uniform `[-0.5, 0.5)` — `apply.test.ts:89-97`, the APPLY-direction generator (H1-a / H1-b). */
+/** Uniform `[-0.5, 0.5)` — `apply.test.ts:100-108`, the APPLY-direction generator (H1-a / H1-b). */
 function seeded(n: number, seed: number): Float64Array {
     const rnd = lcg(seed);
     const u = new Float64Array(n);
@@ -315,13 +340,28 @@ function fitExponent(ns: number[], ys: number[]): number {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Verdicts. FIVE values, not two (schema gap G8). §7.0:1219 mandates GREEN/RED/INVALID; `[A42]`
-// ruling 5 adds VACUOUS ("a gate that cannot fail reads exactly like one that passed"), and
-// `[A46 item 2]` adds NOT APPLICABLE for H1's adapter clause on a CPU arm. §7.12:2729's
-// `"H4b": "GREEN"` example is WITHDRAWN by `[A46 item 1]`.
+// Verdicts. SEVEN values, not two (schema gap G8). §7.0:1219 mandates GREEN/RED/INVALID; `[A42]`
+// ruling 5 adds VACUOUS ("a gate that cannot fail reads exactly like one that passed"),
+// `[A46 item 2]` adds NOT APPLICABLE for H1's adapter clause on a CPU arm, and `[A47 item 7]` adds
+// MIS-AXED. §7.12:2729's `"H4b": "GREEN"` example is WITHDRAWN by `[A46 item 1]`.
+//
+// VACUOUS vs MIS-AXED, verbatim from `[A47 item 7]`: *"VACUOUS = the predicate cannot fire.
+// MIS-AXED = it fires, but not on the variable it is written against. Both are distinct from GREEN
+// and NEITHER MAY BE REPORTED AS GREEN, because a gate that passed and a gate that could not have
+// failed on the tested axis read identically in an artefact. H4b′ is VACUOUS; H4c conjunct 1 is
+// MIS-AXED."* Both labels are therefore members of this union and not free-text fields: a label
+// that only exists in a `reason` string is a label a reader can miss (memory
+// `gates-name-their-impossible-values`).
 // ---------------------------------------------------------------------------------------------
 
-type Verdict = 'GREEN' | 'RED' | 'INVALID' | 'VACUOUS' | 'NOT APPLICABLE' | 'NOT ESTABLISHED';
+type Verdict =
+    | 'GREEN'
+    | 'RED'
+    | 'INVALID'
+    | 'VACUOUS'
+    | 'MIS-AXED'
+    | 'NOT APPLICABLE'
+    | 'NOT ESTABLISHED';
 
 interface GateVerdict {
     verdict: Verdict;
@@ -489,7 +529,7 @@ function cellCounts(cell: CellCounts) {
 
 /**
  * H1-b's bar from the operator's OWN counts: `10 (κ_near + κ_far) u_f32` (spec §7.2,
- * `apply.test.ts:632-634`).
+ * `apply.test.ts:643-645`).
  *
  * ⚠ **A near-coincidence that must not become load-bearing.** On the trefoil at θ=0.25 the counts
  * are κ_near 93.65 / κ_far 3.1875, within 0.4 % and 13 % of the torusKnot's AT θ=0.5 (93.27 /
@@ -506,7 +546,7 @@ const h1bBar = (counts: { kappaNear: number; kappaFar: number }): number =>
 // ---------------------------------------------------------------------------------------------
 
 /**
- * `δ_compress(θ)` of spec §7.2: `‖A_χ0 u − A_θ u‖ / ‖A_χ0 u‖`, both f64 — `apply.test.ts:216-230`,
+ * `δ_compress(θ)` of spec §7.2: `‖A_χ0 u − A_θ u‖ / ‖A_χ0 u‖`, both f64 — `apply.test.ts:227-241`,
  * which is exactly `run-accuracy.ts:119`'s `relErrRandom`. The rhs is `seeded(n, 12345)` and the
  * reference is in the first slot; both are load-bearing for reproducing the archived anchors.
  */
@@ -525,7 +565,7 @@ function prepareAt(
 ): HierarchicalA {
     const { vertices, edges } = FIXTURES[fixture].build(n);
     const bvh = buildBvh(vertices, edges, LEAF, EPS_A);
-    // θ=0 takes the STREAM path, exactly as `apply.test.ts:160-163` does, so the archived
+    // θ=0 takes the STREAM path, exactly as `apply.test.ts:171-174` does, so the archived
     // `relErrRandom` anchors reproduce through the same code they were measured through.
     const source: BlockSource =
         theta === 0
@@ -653,7 +693,7 @@ function gateH1a(ns: number[]) {
     const verdict: Verdict = tieWithDifferingCounts ? 'INVALID' : monotoneOk ? 'GREEN' : 'RED';
     return {
         bar: `delta_compress(theta_{k+1}) <= ${H1A_SLACK} * delta_compress(theta_k), theta descending`,
-        barSource: 'spec §7.2; apply.test.ts:604',
+        barSource: 'spec §7.2; apply.test.ts:615',
         valueKey: 'rows[].deltaCompress',
         operator: 'f64 vs f64 (compression only; precision is H1-b’s job)',
         rows,
@@ -693,6 +733,33 @@ function gateH1a(ns: number[]) {
 function gateH1b(ns: number[]) {
     const n = ns.includes(960) ? 960 : ns[ns.length - 1];
     const fixture = 'torusKnot';
+    // RUNG VALIDITY, before any measurement. `ns[ns.length - 1]` used to be taken SILENTLY, so a
+    // shard driven at a small `n` would publish a two-sided verdict whose lower side is not valid
+    // there — and the invalid direction is a RED on a correct operator, which stops a branch. A gate
+    // that cannot know whether its own bar applies must say so, not pick the nearest rung.
+    // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.2
+    if (!(n >= H1B_FLOOR_VALID_FROM_N)) {
+        return {
+            bar: '10 * (kappa_near + kappa_far) * u_f32, from the run’s OWN counts; two-sided with a 1e-7 floor',
+            barSource:
+                'spec §7.2; apply.test.ts:643-645, :655-659; [A46 item 5] (computed, never copied)',
+            valueKey: 'rows[].deltaPrecisionF32',
+            rungRequested: n,
+            rungsRequested: ns,
+            floorValidFromN: H1B_FLOOR_VALID_FROM_N,
+            lowerBound: H1B_LOWER,
+            rows: [],
+            invalid: [],
+            limitations: [
+                'NOT MEASURED AT ALL at this rung: the gate refused before building the operator, so no value below is a partial reading.',
+            ],
+            verdict: verdictOf(
+                'NOT ESTABLISHED',
+                'GREEN',
+                `n = ${n} is below the rung the 1e-7 FLOOR was calibrated at (${H1B_FLOOR_VALID_FROM_N}). The upper side of the band scales with the run's own counts; the lower side does not, and delta_precision grows with n, so below the calibration rung the floor's margin collapses (MEASURED 1.61x at n=64, 1.07x at n=32, crossing just below n=32 — probes/h1bprobe.ts). Publishing GREEN/RED here would risk a RED on a CORRECT operator. Re-run with n >= ${H1B_FLOOR_VALID_FROM_N}, or redesign the floor under a PRE-REGISTERED sensitivity analysis — fitting a scaling from this run is the data-dependent bar-setting refused at [A42] ruling 5 / [A43] / [A47 item 6].`,
+            ),
+        };
+    }
     const { vertices } = FIXTURES[fixture].build(n);
     const u = seeded(n, H1_RHS_SEED);
     const rows: Record<string, unknown>[] = [];
@@ -705,7 +772,7 @@ function gateH1b(ns: number[]) {
         const bar = h1bBar({ kappaNear, kappaFar });
         const ref = scalarApplyOf(Href, u);
         const d32 = relErr(ref, scalarApplyOf(prepareAt(fixture, n, theta, F32), u));
-        // The 12-column vector apply, same band — `apply.test.ts:680-689`.
+        // The 12-column vector apply, same band — `apply.test.ts:703-712`.
         const U = new Float64Array(3 * n);
         for (let c = 0; c < 3; c++) U.set(seeded(n, 300 + c), c * n);
         const vecOut = (H: HierarchicalA): Float64Array => {
@@ -737,6 +804,11 @@ function gateH1b(ns: number[]) {
             deltaPrecisionF32VectorApply: d32v,
             marginBelowBar: bar / d32,
             lowerBound: H1B_LOWER,
+            // The FLOOR-side margin, published beside the bar-side one. It was missing, and that
+            // asymmetry is the finding: `marginBelowBar` made the upper side's 55x headroom visible
+            // while the lower side's headroom — the one that shrinks with falling n — was invisible
+            // in the artefact. A two-sided band needs both margins or half of it is unaudited.
+            marginAboveFloor: d32 / H1B_LOWER,
             inBand,
             knockOutF16: {
                 label: 'KNOCK-OUT, NOT A MEASUREMENT OF PRODUCTION',
@@ -763,16 +835,48 @@ function gateH1b(ns: number[]) {
     return {
         bar: '10 * (kappa_near + kappa_far) * u_f32, from the run’s OWN counts; two-sided with a 1e-7 floor',
         barSource:
-            'spec §7.2; apply.test.ts:632-634, :655-659; [A46 item 5] (computed, never copied)',
+            'spec §7.2; apply.test.ts:643-645, :655-659; [A46 item 5] (computed, never copied)',
         valueKey: 'rows[].deltaPrecisionF32',
         operatorPair: 'f32 vs f64 at the SAME theta (precision only; compression is H1-a’s job)',
         uF32Definition: 'U_F32 = 2**-24 (UNIT ROUNDOFF, not machine epsilon 2**-23) — [A39 item 1]',
         rows,
         invalid: [],
+        // The two sides of this band do NOT have the same provenance, and the artefact now says so.
+        floorScope: {
+            lowerBound: H1B_LOWER,
+            form: 'FLAT LITERAL — n-independent, unlike the upper side (10 * (kappa_near + kappa_far) * u_f32, computed from the run’s own counts)',
+            calibratedAtN: H1B_FLOOR_VALID_FROM_N,
+            validFromN: H1B_FLOOR_VALID_FROM_N,
+            gateRefusesBelowValidFromN: true,
+            measuredMarginAboveFloor: {
+                32: 1.07,
+                64: 1.61,
+                120: 2.42,
+                240: 3.02,
+                480: 4.75,
+                960: 10.52,
+            },
+            measuredMarginProvenance:
+                'torusKnot, scalar apply, seed 12345, theta=0.5 (theta=0.25 within 1 % at every rung) — docs/superpowers/plans/phase2h-review-ledger/probes/h1bprobe.ts, re-run 2026-10-12',
+            growthExponent: {
+                value: 0.6292,
+                range: 'n = 32..960',
+                alternative: { value: 0.7019, range: 'n = 120..960' },
+                note: 'the quantity the FLAT floor guards grows with n, so the floor is the one side of this band whose margin DEGRADES as n falls',
+            },
+            projectedCrossingN: {
+                fromFullLadder: 31.5,
+                fromUpperLadder: 41.5,
+                note: 'the fit range moves the estimate; the DIRECTLY MEASURED 1.07x margin at n=32 does not, and it is what bounds the crossing from above. Below the crossing the gate would publish RED on a CORRECT operator.',
+            },
+            redesignDeferred:
+                'A fitted n-scaling floor is a BAR REDESIGN and is NOT done here: fitting it from the run that revealed the weakness is the data-dependent bar-setting refused at [A42] ruling 5, [A43] and [A47 item 6]. It requires a pre-registered sensitivity analysis with its own point set. The floor itself must stay — apply.test.ts:687-693 records its purpose: an "f32" path reporting ~1e-16 is an unrounded f64 simulation.',
+        },
         limitations: [
-            'A GREEN H1-b is NOT evidence that the kernel chain is f32. MEASURED (apply.test.ts:660-664): evaluating the whole hi chain in f64 with ONE fround on the return moved delta_precision by -1.2 % and the band still passed. The claim "the chain is rounded" is carried by the ROUNDING-PLACEMENT PINS (nearField.test.ts), not by this band.',
+            'A GREEN H1-b is NOT evidence that the kernel chain is f32. MEASURED (apply.test.ts:683-687): evaluating the whole hi chain in f64 with ONE fround on the return moved delta_precision by -1.2 % and the band still passed. The claim "the chain is rounded" is carried by the ROUNDING-PLACEMENT PINS (nearField.test.ts), not by this band.',
             'The band bounds ACCUMULATION noise only (kappa_near + kappa_far terms per row).',
             'Output accumulation is f32 and NOT CONFIGURABLE — see precision.outputAccumulation.',
+            `The two sides of the band have DIFFERENT provenance: the bar is computed from this run's counts and scales with n, the 1e-7 floor is a flat literal calibrated at n=${H1B_FLOOR_VALID_FROM_N}. The gate refuses to publish below that rung rather than extrapolating the floor — see floorScope.`,
         ],
         verdict: verdictOf(
             allInBand ? 'GREEN' : 'RED',
@@ -1020,7 +1124,7 @@ function gateH2(ns: number[], arms: Arm[], seeds: number[]) {
         ],
         limitations: [
             'H2 certifies BACKWARD error, not solution or direction quality (spec §7.3:1557). A GREEN H2 says the residual is as small as the precision allows, not that x̃ is close to x*.',
-            'eta_exact and eta_bct share ONE schedule and ONE exactApplyA by construction (gmres.ts:344-382; probeAt at :688-716 computes both on every probe), so the chi=0 probe cost cannot be reduced without changing an exported interface. The chi=0 share of one solve is 79 % at n=960 and 89 % at n=1920 (MEASURED, scratch-11/budget.json).',
+            'eta_exact and eta_bct share ONE schedule and ONE exactApplyA by construction (gmres.ts:362-400; probeAt at :688-716 computes both on every probe), so the chi=0 probe cost cannot be reduced without changing an exported interface. The chi=0 share of one solve is 79 % at n=960 and 89 % at n=1920 (MEASURED, scratch-11/budget.json).',
             'INVALID clause 3 (exact-equals-bct) is scoped by the HARNESS, not by etaViolations: it is an inversion only where nFar > 0. nFar is MEASURED > 0 at every gated cell (1186 at n=960), so no gated row is exempt.',
             'CENSORED BY DESIGN at n >= 240: every solve exhausts maxit=600 and stops with `maxit`, so `censored` is true and the gated floor is a MINIMUM OVER A CENSORED TRAJECTORY, not a converged limit. §7.3:1401 pins maxit precisely so the floors transfer literally, and gmres.ts records that under run-to-floor censoring "is expected true and is not an INVALID trigger" — but it is published per row (`censoredAny`) because a reader who does not know it would read the floor as a limit.',
         ],
@@ -1605,14 +1709,30 @@ function denseExactExport(cell: Cell) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// H4c — spec §7.7. The end-to-end descent gate: K accepted steps, hierarchical vs dense f64.
+// H4c — spec §7.7 as re-purposed by `[A47 item 6]`. K accepted steps, hierarchical vs dense f64.
+//
+// WHAT CONJUNCT 1 ACTUALLY DETECTS: α/β/ε DRIFT between the saddle operator and the step that
+// consumes it. *"§7.7's framing of it as an end-to-end COMPRESSION check is withdrawn"*
+// (`[A47 item 6]`), on this measurement: across the exact dense `A`, θ=0.5, θ=4, ε drift
+// 1e-10→1e-2, β drift 6→4.5 and massWeight 100, `R_E` spans only **0.9987–1.0034**, with β drift
+// and θ=4 scoring ABOVE production, because τ=1 on every step makes `R_E ≈ 1` for any roughly
+// downhill direction. Compression's instrument is H1-a's `δ_compress`, which already discriminates,
+// and by `[A47 item 5]` θ could not have served as the axis anyway (the adjacency certificate pins
+// `nFar`/`nearPairs` for every θ ≥ 4, so no θ over-compresses this operator).
+//
+// The drift it DOES fire on is the one `hierarchicalSaddle.ts`'s own factory TSDoc warns about and
+// that `[A47 item 6]` calls the only instrument in §7 covering it: a saddle built with a different
+// α/β/ε than the step's is *"invisible everywhere else — the residual is self-consistent and
+// nothing thresholds it"*. That is why this gate is MIS-AXED rather than weak, and why the 0.95 bar
+// is NOT tightened: choosing a tighter bar from the run that revealed the narrow band is the
+// data-dependent bar-setting refused at `[A42]` ruling 5 and `[A43]` (#98).
 // ---------------------------------------------------------------------------------------------
 
 /**
  * Runs `K` steps of {@link sobolevStepSet} and accumulates `ΔE_total`.
  *
  * **f64 OPERATOR ON BOTH ARMS, and it cannot be otherwise.** `makeHierarchicalSaddle` admits no
- * precision variant and calls `prepareA` with none (`hierarchicalSaddle.ts:321` ⇒ the `F64`
+ * precision variant and calls `prepareA` with none (`hierarchicalSaddle.ts:442` ⇒ the `F64`
  * default), so `[§7.12]`'s `precision.operator: "f32"` is FALSE for H4c (`[A46 item 4]`); widening
  * `HierarchicalSaddleOptions` is an exported-interface change ⇒ utof/repulsive-test2#96's class.
  *
@@ -1677,6 +1797,14 @@ function runDescent(
  * H4c's aggregates and verdict from WHATEVER rows the document holds — the {@link finaliseH2}
  * contract. Both conjuncts are evaluated over the merged rows: a shard that measured only n=240
  * must not publish a verdict that reads as if n=480 had passed.
+ *
+ * **THE PASSING VERDICT IS `MIS-AXED`, NOT `GREEN`** (`[A47 item 7]`). Conjunct 1 fires, but not on
+ * the axis §7.7 wrote it against, and item 7 forbids reporting that as GREEN. The two conjuncts are
+ * labelled SEPARATELY because `[A47 item 4]` showed them independent — acceptance stays 1.0 while α
+ * drift drives `R_E` to 0.868108 — so conjunct 2's GREEN is a real GREEN and is published as one.
+ * RED is untouched and still reachable: a `R_E` below the bar, or an accepted fraction under 1.0,
+ * publishes RED exactly as before (the α-drift ladder in {@link gateH4c} executes that path).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md A47 items 4, 6, 7
  */
 function finaliseH4c(block: Record<string, unknown>): void {
     const rows = ((block.rows ?? []) as Record<string, unknown>[])
@@ -1703,20 +1831,44 @@ function finaliseH4c(block: Record<string, unknown>): void {
         ...(anyShortRun ? ['K_run < K'] : []),
         ...(anyNonPositiveReference ? ['deltaE_total(reference) <= 0'] : []),
     ];
+    // Per-conjunct labels, published beside the gate's own verdict because `[A47 item 4]` proved
+    // the conjuncts independent and item 7 rules only conjunct 1 MIS-AXED. Collapsing them into one
+    // label would hide which half of the conjunction carries information.
+    block.conjunct1 = {
+        predicate: `R_E >= ${H4C_RE_BAR}`,
+        label: (measured
+            ? worstRe >= H4C_RE_BAR
+                ? 'MIS-AXED'
+                : 'RED'
+            : 'NOT ESTABLISHED') satisfies Verdict,
+        axisAsWritten: 'end-to-end COMPRESSION accuracy (spec §7.7) — WITHDRAWN by [A47 item 6]',
+        axisItActuallyFiresOn:
+            'alpha/beta/epsilon DRIFT between the saddle operator and the step consuming it; the only instrument in §7 that covers it (hierarchicalSaddle.ts HierarchicalSaddleOptions: "NOTHING downstream can see the disagreement")',
+        why: 'MIS-AXED per [A47 item 7]: the predicate FIRES (the alpha ladder below reaches 0.868108 < 0.95) but not on the variable it was written against — R_E spans only 0.9987-1.0034 across the exact dense A, theta=0.5, theta=4, epsilon 1e-10->1e-2, beta 6->4.5 and massWeight 100. [A47 item 7]: VACUOUS and MIS-AXED are "both distinct from GREEN and NEITHER MAY BE REPORTED AS GREEN".',
+        barUnchanged: `${H4C_RE_BAR} — [A47 item 6]: a tighter bar chosen from the run that revealed the narrow band is the data-dependent bar-setting refused at [A42] ruling 5 and [A43]; a new bar must come from a pre-registered sensitivity analysis (#98)`,
+    };
+    block.conjunct2 = {
+        predicate: 'accepted fraction == 1.0',
+        label: (measured ? (allAccepted ? 'GREEN' : 'RED') : 'NOT ESTABLISHED') satisfies Verdict,
+        why: 'A REAL GREEN, reported as one: [A47 item 4] measured acceptance staying 1.0 while alpha drift drove conjunct 1 to 0.868108, so this conjunct is independent of the mis-axed one.',
+    };
     const verdict: Verdict = !measured
         ? 'NOT ESTABLISHED'
         : anyShortRun || anyNonPositiveReference
           ? 'INVALID'
           : worstRe >= H4C_RE_BAR && allAccepted
-            ? 'GREEN'
+            ? // NOT 'GREEN' — see this function's TSDoc and `[A47 item 7]`.
+              'MIS-AXED'
             : 'RED';
     block.verdict = verdictOf(
         verdict,
+        // Pre-registration was GREEN; MIS-AXED is therefore an UNPREDICTED verdict and lands in
+        // `doc.unpredicted` on purpose — the pre-registration is not retro-fitted to the ruling.
         'GREEN',
         !measured
             ? 'no rung measured yet'
-            : verdict === 'GREEN'
-              ? `worst R_E ${worstRe.toFixed(5)} >= ${H4C_RE_BAR} with accepted fraction 1.0 on every rung (${rows.map((r) => r.n).join(',')})`
+            : verdict === 'MIS-AXED'
+              ? `worst R_E ${worstRe.toFixed(5)} >= ${H4C_RE_BAR} with accepted fraction 1.0 on every rung (${rows.map((r) => r.n).join(',')}) — but conjunct 1 is MIS-AXED, not GREEN: [A47 item 6] withdrew §7.7's compression framing (R_E spans only 0.9987-1.0034 across every operator tried) and [A47 item 7] forbids reporting a mis-axed conjunct as GREEN. Conjunct 2 (accepted fraction) IS GREEN and is labelled separately in block.conjunct2.`
               : verdict === 'INVALID'
                 ? 'a run was short of K steps, or the reference energy decrease was not positive'
                 : `worst R_E ${worstRe.toFixed(5)} against the bar ${H4C_RE_BAR}, accepted-fraction conjunct ${allAccepted}`,
@@ -1732,7 +1884,7 @@ function gateH4c(ns: number[]) {
         // The UNPERTURBED barycenter: the constraint is satisfied at step 0, so the projection is
         // exercised without the step also having to travel to a displaced target. k=0 (the EMPTY
         // set) is deliberately NOT used — `[A36 item 3]` makes it the invalid choice on a
-        // translation-singular set, and `lineSearch.ts:193` records that the empty set "converges
+        // translation-singular set, and `lineSearch.ts:191-192` records that the empty set "converges
         // trivially at iteration 0", i.e. it would exercise no projection at all.
         const set: ConstraintSet = [barycenterBlock(barycenterTarget(vertices, edges))];
 
@@ -1776,7 +1928,7 @@ function gateH4c(ns: number[]) {
     // The knock-out that DOES fire is the kernel-exponent DRIFT this factory's own TSDoc warns
     // about: *"THE CALLER MUST NOT LET THESE DRIFT FROM THE STEP'S ... NOTHING downstream can see
     // the disagreement — the residual is self-consistent and nothing thresholds it"*
-    // (`hierarchicalSaddle.ts:104-120`). It is production-REACHABLE, it trips no guard, and it
+    // (`hierarchicalSaddle.ts:114-130`). It is production-REACHABLE, it trips no guard, and it
     // produces an operator that is not the Ā of the step consuming it.
     // IT IS A REACHABILITY DEMONSTRATION, NOT A MEASUREMENT OF THE REAL RED SIDE.
     const koN = ns[0];
@@ -1812,7 +1964,7 @@ function gateH4c(ns: number[]) {
             n: koN,
             dial: 'alpha drift (the kernel exponent the saddle factory is built with, against the step\u2019s own DEFAULTS.alpha = 3)',
             dialSource:
-                'hierarchicalSaddle.ts:104-120 — the factory\u2019s own documented trap, production-reachable and unguarded',
+                'hierarchicalSaddle.ts:114-130 — the factory\u2019s own documented trap, production-reachable and unguarded',
             ladder,
             firesAt: firing,
             demonstratesRedSideReachable: firing !== null,
@@ -1827,7 +1979,7 @@ function gateH4c(ns: number[]) {
                 why: 'MEASURED (scratch-11/kocheck.ts, n=240): nFar is pinned at 274 and nearPairs at 7128 for EVERY theta >= 4, because raising theta converts would-be-admissible blocks into ADJACENCY-VETOED near blocks (adjacencyVetoed 50 -> 196) rather than far ones. delta_compress saturates at 1.568e-2 (1.7x the theta=0.5 value) and goes no further. The adjacency certificate is the floor on the operator accuracy, so no theta can over-compress this operator.',
             },
             spreadFinding:
-                'CONJUNCT 1 IS A WEAK GATE. Across operators spanning the exact dense A, theta=0.5, theta=4 and epsilon drift 1e-10 -> 1e-2, R_E spans only 0.9987-1.0034 (MEASURED, scratch-11/koc.ts): the line search accepts tau=1 on every step and R_E is near 1 for any roughly-downhill direction. The bar at 0.95 is reached only by an exponent drift of a whole 1.5, and alpha=2 lands at 0.9652 — 0.0152 from RED.',
+                'CONJUNCT 1 IS MIS-AXED, NOT WEAK — [A47 item 6]. The measurement below is accepted and the conclusion it was first filed under ("CONJUNCT 1 IS A WEAK GATE", quoted here rather than deleted) is REJECTED: a gate that uniquely covers an otherwise-undetectable failure is not weak, it was mis-named. MEASUREMENT, unchanged: across operators spanning the exact dense A, theta=0.5, theta=4 and epsilon drift 1e-10 -> 1e-2, R_E spans only 0.9987-1.0034 (MEASURED, scratch-11/koc.ts): the line search accepts tau=1 on every step and R_E is near 1 for any roughly-downhill direction. The bar at 0.95 is reached only by an exponent drift of a whole 1.5, and alpha=2 lands at 0.9652 — 0.0152 from RED. CONCLUSION, as ruled: the narrow span is evidence that COMPRESSION is the wrong axis (its instrument is H1-a delta_compress), not that the gate is powerless on the axis it does cover — alpha/beta/epsilon drift, which the alpha ladder above drives to 0.868108.',
         };
     }
 
@@ -1838,7 +1990,7 @@ function gateH4c(ns: number[]) {
         valueKey: 'rows[].Re and rows[].acceptedFractionHierarchical',
         operator: 'f64',
         operatorReason:
-            '[A46 item 4]: makeHierarchicalSaddle admits NO precision variant and calls prepareA with none (hierarchicalSaddle.ts:321 => F64 default), so §7.12’s precision.operator "f32" is false for H4c; widening HierarchicalSaddleOptions is a hard-gate change (#96)',
+            '[A46 item 4]: makeHierarchicalSaddle admits NO precision variant and calls prepareA with none (hierarchicalSaddle.ts:442 => F64 default), so §7.12’s precision.operator "f32" is false for H4c; widening HierarchicalSaddleOptions is a hard-gate change (#96)',
         rows,
         knockOut,
         conjunct1RedSide: {
@@ -1913,7 +2065,7 @@ function finaliseH5(block: Record<string, unknown>): void {
         if (!r.secondEigenvalueAboveOne) {
             invalid.add('lambda2 <= 1.5 (kappa_excl is not the named quantity)');
         }
-        // H5 property 1's INVALID clause, as `lowOrder.test.ts:802-812` states it.
+        // H5 property 1's INVALID clause, as `lowOrder.test.ts:810-820` states it.
         if (r.nullDim !== 0) invalid.add('nullDim(Atilde^-1 A_sigma) != 0');
         worstKappaExcl = Math.max(worstKappaExcl, r.kappaExcl as number);
         worstP3 = Math.max(worstP3, r.kappaInclTimesUF32 as number);
@@ -1937,6 +2089,124 @@ function finaliseH5(block: Record<string, unknown>): void {
     }
     block.rows = measured;
     block.exponents = exponents;
+    // WHAT PROPERTY 2's GREEN MEANS, and what it does not. The level bound is published with its
+    // reachability SCOPE for the same reason H3's primary bar carries
+    // `status: 'NOT MEASURABLE AT THESE RUNGS'` rather than a projection: a GREEN that cannot be
+    // distinguished from "this bar has no reachable RED side here" is the failure
+    // `gates-name-their-impossible-values` names, and `lefthook.yml:7-11` writes the standard down
+    // ("A check that cannot fail is indistinguishable from one that passed").
+    //
+    // The two axes are stated separately because they have DIFFERENT answers:
+    //  - MASS WEIGHT: no RED is reachable inside the quantity's own validity band. `κ_excl` is
+    //    `λ_max/λ₂` "excluding the constant mode" ONLY while λ₁ == 1 and λ₂ > 1.5, and every m̂ that
+    //    pushes `κ_excl` over 40 has already broken that. MEASURED at n=960 at the SHIPPED θ=0.25
+    //    by the shipped test: the band ends between m̂=69 (λ₂=1.51526, `κ_excl`=37.7469, IN band)
+    //    and m̂=70 (λ₂=1.474705, `κ_excl`=38.6578, out of band and still under 40), while m̂=85
+    //    reads 53.5356 — over the bar — with λ₂=1.02047. So the in-band supremum is 37.7469 against
+    //    40: a **1.06x** shortfall at the shipped θ, TIGHTER than θ=0.5's 1.10x (35.8543 / ≈36.2).
+    //    Now published as a MARGIN by `precond.test.ts`'s in-band sweep instead of being invisible.
+    //  - n: a RED IS reachable in principle and is NOT reachable with this instrument.
+    //    `kappaExclExponentInN` above is measured per θ from this run's own rungs, and the
+    //    projected crossing below follows from it; but the instrument is O(n³) (see
+    //    `limitations`), so the gate cannot be executed where its bar discriminates.
+    // THE BAR IS NOT MOVED. Choosing ~37.7 from the run that revealed the shortfall is the
+    // data-dependent bar-setting refused at [A42] ruling 5, [A43] and [A47 item 6]; #71 owns the
+    // redesign.
+    const crossings = exponents.map((e) => {
+        const rung = measured.filter((r) => r.theta === e.theta);
+        const last = rung[rung.length - 1];
+        const p = e.kappaExclExponentInN as number;
+        const k = last?.kappaExcl as number | undefined;
+        return {
+            theta: e.theta,
+            fromN: last?.n ?? null,
+            fromKappaExcl: k ?? null,
+            exponent: p,
+            projectedNAtBar:
+                k !== undefined && p > 0
+                    ? (last?.n as number) * (H5_KAPPA_EXCL_BAR / k) ** (1 / p)
+                    : null,
+            label: 'PROJECTION from this run’s own fitted exponent, NOT a measurement',
+        };
+    });
+    block.levelBarScope = {
+        bar: `kappa_excl < ${H5_KAPPA_EXCL_BAR}`,
+        status: 'BOUNDED AT THE MEASURED RUNGS — NOT A PASSED DISCRIMINATOR',
+        barUnchanged: `${H5_KAPPA_EXCL_BAR} — [A32] superseding [A22]. NOT re-chosen here: a bar taken from the run that revealed its own shortfall is the data-dependent bar-setting refused at [A42] ruling 5, [A43] and [A47 item 6]. The redesign belongs to #71 under a pre-registered analysis.`,
+        massWeightAxis: {
+            redSideReachable: false,
+            reason: 'every m_hat that drives kappa_excl over 40 has already broken the quantity’s own precondition (lambda1 == 1 AND lambda2 > 1.5), so finaliseH5 returns INVALID there, never RED',
+            bandBoundary: [
+                {
+                    quantity: 'lambda2 = 1.5',
+                    n: 960,
+                    theta: 0.25,
+                    thetaNote:
+                        'the SHIPPED default (bct.ts DEFAULT_THETA) and the TIGHTER of the two gated theta — this is the binding row',
+                    lastInBand: { mHat: 69, lambda1: 1.0, lambda2: 1.51526, kappaExcl: 37.7469 },
+                    firstOutOfBand: {
+                        mHat: 70,
+                        lambda1: 1.0,
+                        lambda2: 1.474705,
+                        kappaExcl: 38.6578,
+                        note: 'out of band and STILL under 40',
+                    },
+                    overBarButInvalid: [
+                        {
+                            mHat: 85,
+                            lambda1: 1.0,
+                            lambda2: 1.02047,
+                            kappaExcl: 53.5356,
+                            invalidBy: 'lambda2 <= 1.5',
+                        },
+                    ],
+                },
+                {
+                    quantity: 'lambda2 = 1.5',
+                    n: 960,
+                    theta: 0.5,
+                    lastInBand: { mHat: 69, lambda2: 1.519888, kappaExcl: 35.8543 },
+                    firstOutOfBand: { mHat: 70, lambda2: 1.479087, kappaExcl: 36.7279 },
+                    overBarButInvalid: [
+                        {
+                            mHat: 85,
+                            lambda2: 1.022432,
+                            kappaExcl: 50.9964,
+                            invalidBy: 'lambda2 <= 1.5',
+                        },
+                        {
+                            mHat: 100,
+                            lambda1: 0.748643,
+                            kappaExcl: 65.9672,
+                            invalidBy: 'lambda1 != 1',
+                        },
+                    ],
+                },
+            ],
+            inBandSupremum: {
+                theta: 0.25,
+                largestMeasuredInBand: 37.7469,
+                marginToBar: H5_KAPPA_EXCL_BAR / 37.7469,
+                atTheta0p5: { largestMeasuredInBand: 35.8543, bisectedSupremum: 36.2 },
+                note: 'At the SHIPPED theta=0.25 the largest in-band reading is 37.7469 at m_hat=69 — a 1.06x shortfall against the bar, TIGHTER than theta=0.5’s 1.10x. ASSERTED by precond.test.ts ("kappa_excl’s in-band supremum"), which also asserts BOTH sides of the lambda2 = 1.5 boundary, so neither the in-band nor the out-of-band claim is a one-sided reading.',
+            },
+            provenance:
+                'theta=0.25 rows MEASURED 2026-10-12 by the SHIPPED test test/sobolev/hierarchical/precond.test.ts ("kappa_excl’s in-band supremum", n=960, trefoil at native extent 5.4716); theta=0.5 rows from docs/superpowers/plans/phase2h-review-ledger/probes/h5band.ts and h5probe960.ts, re-run 2026-10-12',
+        },
+        nAxis: {
+            redSideReachableInPrinciple: true,
+            redSideExecutableHere: false,
+            crossings,
+            provenance:
+                'exponent fitted from this run’s own rungs; docs/superpowers/plans/phase2h-review-ledger/probes/h5ladder.ts independently measured p = 0.3297 over n=64..960 and 0.2611 dropping n=64 at theta=0.5, projecting kappa_excl = 40 at n ~ 6913 and ~11615 — inside CLAUDE.md’s 1000-30000 scale target',
+            whyNotExecutable:
+                'the instrument is O(n^3) (see limitations): ~8 s at n=960, 46 s at n=1920, 442 s at n=3840. The rungs where the bar would discriminate are two to three doublings beyond that.',
+        },
+        fixtureAxis: {
+            redSideReachableHere: false,
+            reason: 'the K=40 bound is trefoil-scoped (§7.8, see limitations) and gateH5 builds trefoil and nothing else, so off-fixture values (arc 138, helix 159) are NOT a RED for this bar',
+        },
+    };
     block.rungsMeasured = [...new Set(measured.map((r) => r.n))].sort(
         (a, b) => (a as number) - (b as number),
     );
@@ -1957,7 +2227,7 @@ function finaliseH5(block: Record<string, unknown>): void {
         measured.length === 0
             ? 'no rung measured yet'
             : verdict === 'GREEN'
-              ? `worst kappa_excl ${worstKappaExcl.toFixed(4)} < ${H5_KAPPA_EXCL_BAR} over theta ${THETAS_GATED.join(',')}, with the constant mode pinned at 1 and lambda_2 > 1.5 on every row`
+              ? `worst kappa_excl ${worstKappaExcl.toFixed(4)} < ${H5_KAPPA_EXCL_BAR} over theta ${THETAS_GATED.join(',')}, with the constant mode pinned at 1 and lambda_2 > 1.5 on every row. READ THIS WITH block.levelBarScope: property 2's level bound is BOUNDED AT THE MEASURED RUNGS, not a passed discriminator — no RED is reachable on the mass-weight axis inside the quantity's own validity band (in-band supremum 37.7469 against 40 at the shipped theta=0.25, a 1.06x shortfall), and the n axis crosses 40 inside the 1000-30000 scale target but beyond what an O(n^3) instrument can execute. Property 1 (nullDim/lambda1) DOES have an executed RED side.`
               : verdict === 'INVALID'
                 ? `the kappa_excl precondition or the nullity clause failed: ${[...invalid].join(', ')}`
                 : `worst kappa_excl ${worstKappaExcl.toFixed(4)} or property 3 ${worstP3.toExponential(3)} reaches its bar`,
@@ -2003,7 +2273,7 @@ function gateH5(ns: number[]) {
         rowKey: 'n,theta',
         bar: `property 2 (PRIMARY): kappa_excl < ${H5_KAPPA_EXCL_BAR}; property 3 (RECORDED): kappa_incl * u_f32 < ${H5_P3_BAR}; property 1: nullDim == 0`,
         barSource:
-            'spec §7.8 as amended by [A32] (supersedes [A22]); asserted at precond.test.ts:427-447, :527 and lowOrder.test.ts:802-812',
+            'spec §7.8 as amended by [A32] (supersedes [A22]); asserted at precond.test.ts:428-461, :527 and lowOrder.test.ts:810-820',
         valueKey: 'rows[].kappaExcl',
         instrument:
             'test/sobolev/hierarchical/denseSpectrum.ts — the SAME instrument the shipped gate uses ([A46 item 4]: sending H5 back to Python would re-measure the LAB pinv operator whose figures [A32] and [A38 item 9(a)] withdrew)',
@@ -2055,7 +2325,7 @@ function gateH6() {
         withdrawalRuling:
             '[A46 item 7]: theta=0.25 reads 0.7649, theta=0.5 reads 0.7856 and the EXACT delta=0 operator reads 0.7644 — theta is not the variable and switching it changes nothing. The theta=0.5 OPERATOR passes (min cosExact 0.9062 >= 0.9 at n=960); the RED comes from the STOPPED ITERATE (6-9 iterations against ~29-39 for random rhs, because the recurrence residual hits 1e-4 while the true error is still large), which is §5.3’s own ruling that the recurrence residual "is not a convergence criterion ... under-reports by 3.9e3-6.6e3x". THE RED IS WITHDRAWN AS A THETA SIGNAL.',
         consequence:
-            'apply.test.ts:644’s comment "theta=0.25 is PRODUCTION after gate H6 read RED" rests on a withdrawn inference. The CHOICE of production theta stays open on #51’s evidence and is NOT row 11’s to make.',
+            'The CHOICE of production theta stays open on #51’s evidence and is NOT row 11’s to make. The six code sites that justified DEFAULT_THETA = 0.25 by "H6 read RED" — bct.ts DEFAULT_THETA, hierarchicalSaddle.ts HierarchicalSaddleOptions.bct, apply.test.ts’s H1-b BARS comment, bct.test.ts’s defaults test, lowOrder.test.ts’s THETA, and THIS FIELD — have been RE-ANCHORED on [A46 item 7] + #51, each one quoting its superseded text rather than deleting it. The VALUE 0.25 was never challenged; only the dead anchor was.',
         verdict: verdictOf(
             'RED',
             'RED',
@@ -2109,7 +2379,7 @@ function reportR1() {
             measured:
                 '6.5x / 10.7x / 23x improvement from an f64-grade output accumulator ([A45], row 10)',
             applicable: false,
-            reason: '[A46 item 3] CORRECTS [A45]: the mitigation is measured on a scratch RE-IMPLEMENTATION (scratch-10/mutant.ts:33 makeTwoTermOp), and no code path in this repo can apply it on EITHER backend. AccumulatorVariant (nearField.ts:101-115) exposes round/roundNear/alloc/cast and NO output hook. Filed as utof/repulsive-test2#96.',
+            reason: '[A46 item 3] CORRECTS [A45]: the mitigation is measured on a scratch RE-IMPLEMENTATION (scratch-10/mutant.ts:33 makeTwoTermOp), and no code path in this repo can apply it on EITHER backend. AccumulatorVariant (nearField.ts:112-126) exposes round/roundNear/alloc/cast and NO output hook. Filed as utof/repulsive-test2#96.',
         },
 
         servedNReferenced: 960,
@@ -2178,7 +2448,7 @@ function constantsBlock() {
         thetaDefaultInCode: DEFAULT_THETA,
         thetaProduction: null,
         thetaProductionReason:
-            'OPEN. [A46 item 7] withdrew H6’s RED as a theta signal, so apply.test.ts:644’s "0.25 is PRODUCTION after H6 read RED" rests on a withdrawn inference; the choice stays open on utof/repulsive-test2#51’s evidence and is NOT row 11’s to make. Row 11 gates at BOTH theta.',
+            'OPEN. [A46 item 7] withdrew H6’s RED as a theta signal, so apply.test.ts:667’s "0.25 is PRODUCTION after H6 read RED" rests on a withdrawn inference; the choice stays open on utof/repulsive-test2#51’s evidence and is NOT row 11’s to make. Row 11 gates at BOTH theta.',
         probeSchedule: DEFAULT_PROBE_SCHEDULE,
         maxitRule:
             'defaultMaxit(3n) = min(600, 2*dim) — spec §7.3:1401 pins it so the measured floors transfer literally',
@@ -2192,7 +2462,7 @@ function constantsBlock() {
             outputAccumulation: 'f32',
             outputAccumulationConfigurable: false,
             outputAccumulationReason:
-                'applyColumns writes out[o+i] = fr(out[o+i] +/- r) (apply.ts:620-627), so the shipped F32 operator IS [A45]’s OUT32 configuration. AccumulatorVariant (nearField.ts:101-115) exposes round/roundNear/alloc/cast and NO output hook, on EITHER backend — [A46 item 3] corrects [A45], which had scoped the limitation to WGSL and so implied a CPU path exists. Making it configurable is an exported-interface change: utof/repulsive-test2#96.',
+                'applyColumns writes out[o+i] = fr(out[o+i] +/- r) (apply.ts:620-627), so the shipped F32 operator IS [A45]’s OUT32 configuration. AccumulatorVariant (nearField.ts:112-126) exposes round/roundNear/alloc/cast and NO output hook, on EITHER backend — [A46 item 3] corrects [A45], which had scoped the limitation to WGSL and so implied a CPU path exists. Making it configurable is an exported-interface change: utof/repulsive-test2#96.',
         },
         clock: null,
         clockReason:

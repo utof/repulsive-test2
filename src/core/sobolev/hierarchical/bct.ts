@@ -68,28 +68,42 @@ import type { Bvh } from './bvh';
 /**
  * Default spatial separation parameter `theta` of Eq. 28.
  *
- * The VALUE is decided by gate H6 (spec §7.9, task 0c — the adversarial-rhs measurement): GREEN
- * keeps 0.5 (the authors' own default; Repulsor `far_theta2 = 0.25`), RED flips it to the
- * pre-registered fallback **0.25**.
+ * **THE PRODUCTION CHOICE OF `theta` IS OPEN. 0.25 IS THE SHIPPED DEFAULT, NOT A DECIDED VALUE.**
+ * `[A46 item 7]` withdrew gate H6's RED as a theta signal, so nothing currently decides this number
+ * and the choice stays open on utof/repulsive-test2#51's own evidence — explicitly NOT row 11's to
+ * make. The calibration artefact complies already (`thetaProduction: null`,
+ * `thetaProductionReason: "OPEN. [A46 item 7] withdrew H6's RED as a theta signal …"`).
  *
- * **H6 read RED (measured 2026-10-09), so this is 0.25.** `min cos∠_A` over the sub-0.9
- * generalized-eigenmode rhs is 0.8585 at n=2000, below the 0.9 bar and equal to the analytic
- * Kantorovich bound `2√(c₁c₂)/(c₁+c₂)` to zero difference; at theta=0.25 the bad-mode set is
- * EMPTY at every n tested, so no adversarial direction exists. §7.9's pre-registered rule is "RED
- * ⇒ the default flips to 0.25; it does not kill the phase".
+ * SUPERSEDED JUSTIFICATION, quoted rather than deleted because the measurement behind it stands
+ * and only the inference drawn from it was withdrawn:
+ * > "The VALUE is decided by gate H6 (spec §7.9, task 0c — the adversarial-rhs measurement): GREEN
+ * >  keeps 0.5 (the authors' own default; Repulsor `far_theta2 = 0.25`), RED flips it to the
+ * >  pre-registered fallback 0.25. **H6 read RED (measured 2026-10-09), so this is 0.25.**
+ * >  `min cos∠_A` over the sub-0.9 generalized-eigenmode rhs is 0.8585 at n=2000, below the 0.9 bar
+ * >  and equal to the analytic Kantorovich bound `2√(c₁c₂)/(c₁+c₂)` to zero difference; at
+ * >  theta=0.25 the bad-mode set is EMPTY at every n tested … Both facts are why the decision rests
+ * >  on H6's pre-registration and not on a post-hoc reading."
  *
- * The flip is NOT free and the cost is recorded rather than hidden: near-field work rises 2.09x
- * (nearPairs 3 245 868 → 6 785 670 at n=30 000) and the 12-column apply 1.98x (128.65 → 254.87 ms,
- * MEASURED), which §4.4 extrapolates to a 0.20–1.07 s GPU solve — above the top of the 0.05–0.5 s
- * band claimed in utof/repulsive-test2#51. §4.5 separately measures that theta buys no step-quality
- * improvement (end-to-end ΔE spread ≤0.0008 across all theta, non-monotone). Both facts are why the
- * decision rests on H6's pre-registration and not on a post-hoc reading.
+ * WHY IT WAS WITHDRAWN (`[A46 item 7]`, verbatim): *"theta=0.25 reads 0.7649, theta=0.5 reads
+ * 0.7856, and the exact δ=0 operator reads 0.7644 — so **theta is not the variable and switching it
+ * changes nothing**. … The RED is WITHDRAWN as a theta signal."* The control row is the decisive
+ * one: the EXACT, uncompressed operator scores essentially the same as theta=0.25, so the quantity
+ * H6 gated was never responding to theta. `[A47 item 5]` reaches the same conclusion from the other
+ * end — the adjacency certificate pins `nFar` and `nearPairs` for every theta ≥ 4, so theta cannot
+ * over-compress this operator and *"theta is not a knock-out axis for any accuracy gate in §7"*.
+ *
+ * The COST of 0.25 over 0.5 is unchanged and still the reason the choice matters: near-field work
+ * rises 2.09x (nearPairs 3 245 868 → 6 785 670 at n=30 000) and the 12-column apply 1.98x
+ * (128.65 → 254.87 ms, MEASURED), which §4.4 extrapolates to a 0.20–1.07 s GPU solve — above the top
+ * of the 0.05–0.5 s band claimed in #51. §4.5 separately measures that theta buys no step-quality
+ * improvement (end-to-end ΔE spread ≤0.0008 across all theta, non-monotone). With H6 withdrawn,
+ * these two facts are the live input to #51's decision and there is no gate standing in for it.
  *
  * Flipping it is this one line by design (CLAUDE.md: prefer swappable strategies over one hardcoded
  * kernel). Nothing else in `src/` or `test/` may hardcode the default: tests that pin theta=0.5
  * oracles pass `theta: 0.5` explicitly, because those are theta=0.5 measurements regardless of
  * what the default becomes.
- * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §4.1, §4.4, §4.5, §7.9, §11.2 task 0c
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §4.1, §4.4, §4.5, §7.9, A46 item 7, A47 item 5
  * @issue utof/repulsive-test2#51
  */
 export const DEFAULT_THETA = 0.25;

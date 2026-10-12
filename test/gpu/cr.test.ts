@@ -122,7 +122,7 @@ function crBar(n: number): number {
  * γ^q — a deterministic displacement off the constraint manifold. Φ is evaluated at the
  * fixture's own x0/L0, so a projection rhs taken AT γ₀ would be roundoff-scale — a
  * vacuous gate. The frozen projection solves exactly this shape: K(γ₀) frozen, Φ
- * evaluated at the MOVED iterate (`src/core/sobolev/lineSearch.ts:257`, `negPhi`, passed
+ * evaluated at the MOVED iterate (`src/core/sobolev/lineSearch.ts:269`, `negPhi`, passed
  * at `:267`). Drawn from {@link uniforms}, not numpy's `default_rng(0)` (PCG64 + a
  * ziggurat, not reproducible in JS) and not `Math.sin` (ECMA-262 §21.3.2
  * implementation-approximated). CR must be re-runnable to the bit, and this value feeds
@@ -234,7 +234,7 @@ const rows: CrRow[] = [];
  * All thirteen rhs of one fixture × one constraint set, measured against the core's own
  * `solveSaddleFromA`. ONE f64 Cholesky, ONE `prepared.factor(C)` and ONE reference LDLᵀ
  * serve all thirteen — the reference factor is reused through the already-exported
- * `solveSaddleFrozen` (`src/core/sobolev/linsolve.ts:932-955`), which is what makes the
+ * `solveSaddleFrozen` (`src/core/sobolev/linsolve.ts`), which is what makes the
  * N=960 fixture affordable (its LDLᵀ of the 2884×2884 K dominates the runtime).
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §5 (CR)
  */
@@ -289,10 +289,10 @@ function measure(name: string, vertices: Vec3[], edges: Edge[], withPin: boolean
     const zeroM = new Array<number>(m).fill(0);
     const zeroK = new Array<number>(k).fill(0);
     // rhs (a): the gradient shape [b; 0] — exactly what the frozen constrained-gradient
-    // solve passes (`src/core/sobolev/gradient.ts:133`, `flatten(dE)` as rhsTop).
+    // solve passes (`src/core/sobolev/gradient.ts:167`, `flatten(dE)` as rhsTop).
     const b = flatten(gradientAnalytical(vertices, edges, dp, alpha, beta, epsilon));
     // rhs (b): the projection shape [0; d], d = −Φ(γ^q) — exactly what the frozen
-    // projection passes (`src/core/sobolev/lineSearch.ts:267`), with C and A frozen at γ₀
+    // projection passes (`src/core/sobolev/lineSearch.ts:279`), with C and A frozen at γ₀
     // and Φ at the displaced iterate.
     const { phi } = evaluateConstraintSet(set, displaced(vertices), edges);
     const d = phi.map((v) => -v);

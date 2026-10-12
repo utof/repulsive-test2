@@ -44,6 +44,7 @@ import {
     type ConstraintSet,
     edgeLengthsBlock,
     evaluateConstraintSet,
+    pointBlock,
     totalLength,
     totalLengthBlock,
 } from '../../src/core/sobolev/constraintSet';
@@ -54,10 +55,12 @@ import {
     HierarchicalSaddleUnsupportedError,
     makeHierarchicalSaddle,
 } from '../../src/core/sobolev/hierarchical/hierarchicalSaddle';
+import type { NullspaceSolver } from '../../src/core/sobolev/hierarchical/nullspace';
 import {
     SCHUR_MAX_K,
     SchurConvergenceError,
     SchurRouteError,
+    type SchurSolver,
 } from '../../src/core/sobolev/hierarchical/schur';
 import { assembleAFlat } from '../../src/core/sobolev/innerProduct';
 import { flatten } from '../../src/core/sobolev/layout';
@@ -165,6 +168,18 @@ function fixture(n: number) {
 function offsetBaryTarget(vertices: Vec3[], edges: Edge[]): Vec3 {
     const t = barycenterTarget(vertices, edges);
     return [t[0] + 0.05, t[1] + 0.05, t[2] + 0.05];
+}
+
+/**
+ * Which of §8.2's two routes `prepare(C)` picked. `report.projector` is the discriminant —
+ * `NullspacePrepareReport` is the only member of the union that carries one — and this is written as
+ * a TYPE PREDICATE on purpose: used as `if (!isNullspaceRoute(s)) throw`, the route claim and the
+ * narrowing are the same statement, so no `as` cast sits between the assertion and the reads that
+ * depend on it (a wrong route then fails the test instead of silently mistyping the body).
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §8.2, §11.2 row 9b
+ */
+function isNullspaceRoute(s: SchurSolver | NullspaceSolver): s is NullspaceSolver {
+    return 'projector' in s.report;
 }
 
 /** `projectionMode: 'frozen'` is MANDATORY on this arm (cross-task contract from task 8, `a8569d8`). */
@@ -638,18 +653,170 @@ describe('the factory refuses what the stack cannot build, before the deep throw
         expect(makeHierarchicalSaddle(ring.vertices, ring.edges, dp).build.n).toBe(n);
     });
 
-    test('an edgeLengths set is refused by prepare() as a ROUTE error, not solved badly', () => {
-        // Row 9's territory (`nullspace.ts`, k = |E| = n). Until it exists there is no hierarchical
-        // route for it, so this throw IS the documented dense fallback. A33 corrected row 8b: the
-        // `edgeLengths` cell is NOT 8b's.
+    // -----------------------------------------------------------------------
+    // SUPERSEDED, kept visible rather than deleted (CLAUDE.md: a retracted claim stays on the page
+    // with its amendment marker, the way `lowOrder.test.ts:1026-1040` keeps §7.8's `p = 0.0010`).
+    //
+    // > test('an edgeLengths set is refused by prepare() as a ROUTE error, not solved badly')
+    // >   // Row 9's territory (`nullspace.ts`, k = |E| = n). Until it exists there is no
+    // >   // hierarchical route for it, so this throw IS the documented dense fallback. A33
+    // >   // corrected row 8b: the `edgeLengths` cell is NOT 8b's.
+    // >   expect(caught).toBeInstanceOf(SchurRouteError);
+    //
+    // WITHDRAWN as a statement about `edgeLengths` sets. The premise "until it exists" expired:
+    // `nullspace.ts` shipped (row 9) and §11.2 row 9b's dispatch now routes the `|E|` rows to it in
+    // `makeHierarchicalSaddle.prepare`, so an `edgeLengths` set is SOLVED here, not refused. What
+    // the old test actually pinned — a route refusal escaping the step's `'singular_system'` fold —
+    // is NOT withdrawn and is re-asserted below on the set the refusal really belongs to: an
+    // all-`O(1)` set above `maxK`, which has no `O(n)` block for a projection to absorb.
+    // -----------------------------------------------------------------------
+
+    test("§8.2's hybrid set {barycenter, edgeLengths, pins} is SOLVED, not refused", () => {
+        // The combination §8.2 names as one of exactly two that "must actually work", at the size
+        // this describe block already builds (n = 24 ⇒ k = 3 + 24 + 3 = 30, i.e. above `maxK`, so
+        // the all-Schur route would throw `SchurRouteError` here and did until row 9b's dispatch
+        // landed). MEASURED on this fixture, all five numbers below from one run.
+        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §8.2, §11.2 row 9b
+        const s = makeHierarchicalSaddle(ring.vertices, ring.edges, dp);
+        const ell0 = ring.edges.map(([p, q]) => {
+            const a = ring.vertices[p];
+            const b = ring.vertices[q];
+            return Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) * 1.01;
+        });
+        const pinTo: Vec3 = [ring.vertices[0][0] + 0.01, ring.vertices[0][1], ring.vertices[0][2]];
+        const set: ConstraintSet = [
+            barycenterBlock(offsetBaryTarget(ring.vertices, ring.edges)),
+            edgeLengthsBlock(ell0),
+            pointBlock(0, pinTo),
+        ];
+        const { C, phi } = evaluateConstraintSet(set, ring.vertices, ring.edges);
+        expect(C.length).toBe(n + 6);
+        expect(C.length).toBeGreaterThan(SCHUR_MAX_K);
+
+        const sol = s.prepare(C);
+        // It took the NULLSPACE route, and the dispatch found the block where it really is: the
+        // `|E|` rows start at 3 (behind `barycenterBlock`) and the 6 `O(1)` rows went to
+        // `prepareSchur`. A dispatch that guessed `rowStart = 0` would project onto the wrong
+        // subspace and still report a self-consistent residual, so these three are the assertion.
+        if (!isNullspaceRoute(sol)) {
+            throw new Error("the hybrid set took the SCHUR route, not §8.2's nullspace route");
+        }
+        const rep = sol.report;
+        expect(rep.kEdge).toBe(n);
+        expect(rep.kOther).toBe(6);
+        expect(rep.edgeRowStart).toBe(3);
+        expect(rep.schur.k).toBe(6);
+        // The knobs are the factory's, not re-chosen by the route (A35 item 4's ruled `tol`).
+        expect(rep.schur.tol).toBe(1e-12);
+        // `‖P A_σ P‖₂` is estimated on the PROJECTED operator, NOT taken from the cached
+        // unprojected `build.normA2` — substituting the larger norm would shrink `η` and loosen the
+        // certificate (`NullspaceOptions.normA2`). MEASURED 17.898 vs the build's 18.0-ish.
+        expect(rep.normA2).toBeGreaterThan(0);
+        expect(rep.normA2).toBeLessThan(s.build.normA2);
+        // The projector is a projector: MEASURED idempotence 1.1e-16, annihilation 1.5e-16,
+        // self-adjointness 2.0e-17, so 1e-12 is five decades of margin and still not vacuous (a
+        // `precond-unprojected` knock-out reads 4.1e-1, `nullspace.ts`).
+        expect(rep.projector.idempotenceDefect).toBeLessThan(1e-12);
+        expect(rep.projector.annihilationDefect).toBeLessThan(1e-12);
+        expect(rep.projector.selfAdjointDefect).toBeLessThan(1e-12);
+
+        const rhsTop = Array.from({ length: 3 * n }, (_, i) => Math.sin(1 + 7 * i));
+        const r = sol.solve(
+            rhsTop,
+            phi.map((v) => -v),
+        );
+        // Certified end to end: MEASURED residual 5.84e-13, edge-row satisfaction 1.07e-14,
+        // η = 8.76e-14 in 26 iterations. Bars are three decades above the measured values, which is
+        // the gap `schur.test.ts` uses for the same quantity.
+        expect(r.residual).toBeLessThan(1e-9);
+        expect(r.edgeConstraintResidual).toBeLessThan(1e-11);
+        expect(r.gmres.eta).toBeLessThan(1e-10);
+        expect(r.gmres.censored).toBe(false);
+        // Non-vacuity: the solve really ran, and `lambda` comes back in the STACKED row order with
+        // the `|E|` multipliers at `rowStart`, not as a bare 6-vector of the `O(1)` rows.
+        expect(r.gmres.iters).toBeGreaterThan(0);
+        expect(r.lambda.length).toBe(n + 6);
+        const edgeLambda = r.lambda.slice(3, 3 + n);
+        expect(Math.max(...edgeLambda.map(Math.abs))).toBeGreaterThan(0);
+    });
+
+    test('the PURE edgeLengths set also routes to the nullspace route (gauge, not refusal)', () => {
+        // Supersedes the withdrawn test quoted above. §8.2 routes `edgeLengthsBlock` by BLOCK, so a
+        // set with no `O(1)` rows beside it is `kOther = 0` — `prepareSchur`'s `k = 0` path, a
+        // first-class case. It is TRANSLATION-SINGULAR by construction (`C_edge N = 0`), so the
+        // route returns `schur.ts`'s gauge `Nᵀx = Nᵀb/σ` with `pinned: false`, and the rhs must be
+        // mean-free or the dense system is INCONSISTENT rather than merely gauged (`nullspace.ts`
+        // TRANSLATION GAUGE paragraph). MEASURED with a mean-free rhs: residual 4.82e-12.
         const s = makeHierarchicalSaddle(ring.vertices, ring.edges, dp);
         const set: ConstraintSet = [edgeLengthsBlock(ring.edges.map(() => 0.3))];
-        const { C } = evaluateConstraintSet(set, ring.vertices, ring.edges);
+        const { C, phi } = evaluateConstraintSet(set, ring.vertices, ring.edges);
         expect(C.length).toBe(n);
         expect(C.length).toBeGreaterThan(SCHUR_MAX_K);
+        const sol = s.prepare(C);
+        if (!isNullspaceRoute(sol)) {
+            throw new Error(
+                "the pure edgeLengths set took the SCHUR route, not §8.2's nullspace route",
+            );
+        }
+        const rep = sol.report;
+        expect(rep.kEdge).toBe(n);
+        expect(rep.kOther).toBe(0);
+        expect(rep.edgeRowStart).toBe(0);
+        expect(rep.schur.k).toBe(0);
+        expect(rep.schur.pinned).toBe(false);
+        const b = new Array<number>(3 * n).fill(0);
+        for (let c = 0; c < 3; c++) {
+            let mean = 0;
+            for (let i = 0; i < n; i++) {
+                b[c * n + i] = Math.sin(1 + 7 * (c * n + i));
+                mean += b[c * n + i];
+            }
+            mean /= n;
+            for (let i = 0; i < n; i++) b[c * n + i] -= mean;
+        }
+        const r = sol.solve(
+            b,
+            phi.map((v) => -v),
+        );
+        expect(r.residual).toBeLessThan(1e-9);
+        expect(r.edgeConstraintResidual).toBeLessThan(1e-11);
+    });
+
+    test('an all-O(1) set is still routed to prepareSchur, and above maxK still refused', () => {
+        // The control half of the dispatch: the route is chosen by BLOCK, so a set with no
+        // `edgeLengths` rows reaches `prepareSchur` exactly as before — `report` is a
+        // `SchurPrepareReport` (no `projector`), which is what pins that the dispatch did not
+        // quietly send everything through the projection.
+        const s = makeHierarchicalSaddle(ring.vertices, ring.edges, dp);
+        const ok: ConstraintSet = [
+            barycenterBlock(offsetBaryTarget(ring.vertices, ring.edges)),
+            totalLengthBlock(totalLength(ring.vertices, ring.edges) * 1.01),
+        ];
+        const okC = evaluateConstraintSet(ok, ring.vertices, ring.edges).C;
+        expect(okC.length).toBe(4);
+        const okSolver = s.prepare(okC);
+        if (isNullspaceRoute(okSolver)) {
+            throw new Error('an all-O(1) set took the nullspace route; the dispatch over-reaches');
+        }
+        expect(okSolver.report.k).toBe(4);
+
+        // And the refusal the withdrawn test was really pinning, on the set it belongs to: 6 pins
+        // is 18 `O(1)` rows, above `maxK = 16`, with NO `O(n)` block for a projection to absorb. It
+        // must still throw, because `SchurRouteError`'s own advice ("raise maxK only if k really is
+        // O(1)") is the advice that applies — rerouting it would hide a real cost decision.
+        const tooMany: ConstraintSet = Array.from({ length: 6 }, (_, i) =>
+            pointBlock(i * 3, [
+                ring.vertices[i * 3][0] + 0.01,
+                ring.vertices[i * 3][1],
+                ring.vertices[i * 3][2],
+            ]),
+        );
+        const bigC = evaluateConstraintSet(tooMany, ring.vertices, ring.edges).C;
+        expect(bigC.length).toBe(18);
+        expect(bigC.length).toBeGreaterThan(SCHUR_MAX_K);
         let caught: unknown;
         try {
-            s.prepare(C);
+            s.prepare(bigC);
         } catch (e) {
             caught = e;
         }
@@ -657,14 +824,6 @@ describe('the factory refuses what the stack cannot build, before the deep throw
         // It must ESCAPE the step's 'singular_system' fold: a dispatch bug is not a singular matrix.
         expect(caught).toBeInstanceOf(SolveNotCertifiedError);
         expect(caught).not.toBeInstanceOf(ExternalSolveError);
-        // A k = 4 set on the same saddle is accepted, so the refusal is about k and not about the set.
-        const ok: ConstraintSet = [
-            barycenterBlock(offsetBaryTarget(ring.vertices, ring.edges)),
-            totalLengthBlock(totalLength(ring.vertices, ring.edges) * 1.01),
-        ];
-        const okC = evaluateConstraintSet(ok, ring.vertices, ring.edges).C;
-        expect(okC.length).toBe(4);
-        expect(s.prepare(okC).report.k).toBe(4);
     });
 });
 
@@ -809,7 +968,7 @@ test('factorMode moves bits on the dense arm and NONE on the hierarchical arm', 
 // ---------------------------------------------------------------------------
 
 test('build.normA2 is bit-identical to estimateNorm2 and to what prepare would compute', () => {
-    // `estimateNorm2` is deterministic (fixed LCG seed, fixed iteration count, `gmres.ts:255-278`)
+    // `estimateNorm2` is deterministic (fixed LCG seed, fixed iteration count, `gmres.ts:273-296`)
     // and `op` is frozen, so caching it in the factory is a pure saving of 30 matvecs per
     // `prepare` — but only if it really is the same number. `Object.is`, not a tolerance: a
     // tolerance here would hide exactly the drift the caching could introduce.
@@ -831,8 +990,14 @@ test('build.normA2 is bit-identical to estimateNorm2 and to what prepare would c
         schur: { normA2: 123.5 },
     });
     expect(o.prepare(C).report.normA2).toBe(123.5);
-    // The default `tol` is 9b's ruled 1e-12 and is NOT re-chosen here (A35 item 4).
-    expect(s.prepare(C).report.tol).toBe(1e-12);
+    // The default `tol` is 9b's ruled 1e-12 and is NOT re-chosen here (A35 item 4). The narrowing
+    // is also the claim that a barycentre-only set is still an all-Schur set after §8.2's dispatch:
+    // the cached `normA2` above is the SCHUR route's input and would not be used on the other one.
+    const prepared = s.prepare(C);
+    if (isNullspaceRoute(prepared)) {
+        throw new Error('a barycentre-only set took the nullspace route');
+    }
+    expect(prepared.report.tol).toBe(1e-12);
     // The curve extent is RECORDED, not normalised (issue #69). Checked against a SECOND,
     // INDEPENDENT bbox loop rather than against `curveExtent` itself: importing the production
     // helper here would be checking production against itself and a shared defect (`hi` instead of

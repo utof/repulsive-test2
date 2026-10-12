@@ -34,6 +34,7 @@ import {
 } from '../../../src/core/sobolev/hierarchical/apply';
 import { buildBct, thetaLadder } from '../../../src/core/sobolev/hierarchical/bct';
 import { type Bvh, buildBvh, edgeData } from '../../../src/core/sobolev/hierarchical/bvh';
+import { U_F32 as GMRES_U_F32 } from '../../../src/core/sobolev/hierarchical/gmres';
 import {
     type AccumulatorVariant,
     exponents,
@@ -51,8 +52,18 @@ const EPS = 1e-10;
 const ALPHA = 3;
 const BETA = 6;
 const LEAF = 8;
-/** IEEE binary32 unit roundoff, as spec §7.2 H1-b writes it. */
-const U_F32 = 5.96e-8;
+/**
+ * IEEE binary32 UNIT ROUNDOFF, `2**-24`. IMPORTED, not re-literalised: this file is the one place
+ * on the branch that used to write it as the 3-significant-figure decimal `5.96e-8`, and
+ * `[A39 item 1]` pins the constant as `2**-24` precisely to disambiguate it from the machine
+ * epsilon `2**-23`. The decimal is a 7.6e-5 relative shift on the H1-b bar (5.77798e-5 vs
+ * 5.77842e-5) against a 55x margin, so it changed no verdict — which is exactly why it could sit
+ * here unnoticed, and why the fix is to stop having two spellings rather than to pick a better one
+ * (`[A46 item 5]`: bars are computed, never copied).
+ * @see src/core/sobolev/hierarchical/gmres.ts (U_F32, the single definition)
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.2, A39 item 1, A46 item 5
+ */
+const U_F32 = GMRES_U_F32;
 
 // The chi=0 reference is an O(m^2) apply; the first test to touch one for a fixture pays ~5 s at
 // n=960 (per-op rounding calls, apply.ts module TSDoc), well past bun's 5 s default.
@@ -638,9 +649,21 @@ describe('§7.2 H1-b: delta_precision band and the f64 / f32 / f16 ladder (torus
     }
 
     // theta=0.5 is the anchor the MEASURED f32 noise was taken against (f32NoiseHi 1.0639e-06,
-    // f32NoiseLow 3.0024e-06, out-accuracy.json); theta=0.25 is PRODUCTION after gate H6 read RED
-    // (spec §7.9, 2026-10-09). A precision gate anchored only at a theta the product no longer
-    // uses is a gate on nothing, so the band is asserted at both.
+    // f32NoiseLow 3.0024e-06, out-accuracy.json); theta=0.25 is `bct.ts`'s shipped `DEFAULT_THETA`.
+    //
+    // SUPERSEDED CLAUSE, quoted not deleted:
+    // > "theta=0.25 is PRODUCTION after gate H6 read RED (spec §7.9, 2026-10-09)"
+    // WITHDRAWN: `[A46 item 7]` withdrew H6's RED as a theta signal (theta=0.25 reads 0.7649,
+    // theta=0.5 reads 0.7856 and the EXACT δ=0 operator reads 0.7644 — theta is not the variable),
+    // so 0.25 is the shipped default and the PRODUCTION choice is OPEN on #51's own evidence, not
+    // row 11's to make. `hCalibration.ts`'s `gateH6` names this very line in its `consequence`
+    // field and the artefact emits `thetaProduction: null`.
+    //
+    // THE REASON FOR ASSERTING BOTH IS UNCHANGED AND IS NOW STRONGER, not weaker: a precision gate
+    // anchored only at one theta is a gate on nothing the day the default moves — and with #51 open,
+    // it can still move. So the band is asserted at both.
+    // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md A46 item 7
+    // @issue utof/repulsive-test2#51
     const BARS: [number, number, number, number][] = [
         // [theta, nearPairs, nFar, bar]:
         //   0.5:  kappa_near = 89538/960 = 93.26875 (§7.2 "93.3"), kappa_far = 3530/960 = 3.677

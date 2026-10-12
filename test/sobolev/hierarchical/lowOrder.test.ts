@@ -55,7 +55,15 @@ const BETA = 6;
 const EPS_A = 1e-10;
 const LEAF = 8;
 const U_F32 = 5.96e-8;
-/** The production default (`bct.ts` `DEFAULT_THETA`, H6 RED, commit 4c7af4d). */
+/**
+ * The SHIPPED default (`bct.ts` `DEFAULT_THETA`, commit 4c7af4d). Not "the production theta": the
+ * trailing "H6 RED" anchor this line used to carry is WITHDRAWN by `[A46 item 7]` (theta=0.25 reads
+ * 0.7649, theta=0.5 reads 0.7856, the exact δ=0 operator reads 0.7644 ⇒ theta is not the variable),
+ * and the production choice is open on utof/repulsive-test2#51. The figures below are measured AT
+ * this theta either way, which is what the constant is for.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md A46 item 7
+ * @issue utof/repulsive-test2#51
+ */
 const THETA = 0.25;
 const SCRATCH = `${import.meta.dir}/../../../.superpowers/sdd/2026-09-11-phase2h-queue/scratch`;
 

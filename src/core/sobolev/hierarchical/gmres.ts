@@ -35,12 +35,22 @@
  * calls a knock-out must not be production-reachable.
  *
  * THE RECURRENCE RESIDUAL IS NOT A CONVERGENCE CRITERION (spec §5.3). Left-preconditioned it is
- * `‖Ã⁻¹r‖/‖Ã⁻¹b‖`, and it under-reports the true relative residual by 4.372e8 / 1.404e9 /
- * 1.142e10 / 2.056e11 / 1.717e12 at n = 64…960 (spec §7.3 anti-trap 2, MEASURED; fitted exponent
- * +3.056, tracking `κ₂(A_σ) ∝ n^3.334`). It is exposed (`recurrence`) because the Givens
- * bookkeeping produces it and §5.6 requires it, and it is the `tol` stopping rule because that is
- * what GMRES can compute for free — but every convergence claim must form the residual from `b`
- * against the real operator, which is what the `η` probe does.
+ * `‖Ã⁻¹r‖/‖Ã⁻¹b‖`, and it under-reports the true relative residual by **85.6 → 2.28e4 at
+ * n = 64…960, fitted exponent ≈ +2.07, and 1.00e6 at n = 3840** — MEASURED ON THE SHIPPED OPERATOR
+ * (spec §10.2 / A30).
+ *
+ * DO NOT RE-QUOTE §7.3 ANTI-TRAP 2's OWN NUMBERS. Its table reads `4.372e8 → 1.717e12`, exponent
+ * `+3.056`, and §10.2 RETRACTS exactly that string: those are LAB figures, **6.7 decades** larger
+ * than this operator's, because the shipped `Ã⁻¹A_σ` is ~150× better conditioned. §10.2's own
+ * verdict on the row: *"Direction and growth reproduce; magnitudes are 6.7 decades smaller …
+ * §5.3's rule stands; its number does not."* The RULE above is therefore unchanged and the hazard
+ * is a future reader sizing a tolerance, a probe schedule or a knock-out bar off the retracted
+ * magnitude.
+ *
+ * `recurrence` is exposed because the Givens bookkeeping produces it and §5.6 requires it, and it
+ * is the `tol` stopping rule because that is what GMRES can compute for free — but every
+ * convergence claim must form the residual from `b` against the real operator, which is what the
+ * `η` probe does.
  *
  * COUNTS ARE STRUCTURAL INTEGERS (`matvecs`, `precondApplies`), for the reason `precond.ts:118-124`
  * gives for its own counters: a fourth `Ã⁻¹` apply per iteration (or a dense route) would read
@@ -180,13 +190,21 @@ function shiftedApply(
 /**
  * Rigal-Gaches normwise relative backward error `η = ‖r‖ / (‖A‖‖x‖ + ‖b‖)` (1967; Higham, *ASNA*
  * Thm 7.1), given the four norms. BOTH denominator terms matter: `‖A‖‖x‖` alone is not defined for
- * `x = 0` and `‖b‖` alone is the relative residual, whose floor degrades as `n^3.36`
- * (spec §7.4) where `η`'s grows as `n^0.34`.
+ * `x = 0`, and `‖b‖` alone is the relative residual, whose floor degrades as **`n^0.88` and is
+ * `> 1` at `n ≥ 1920`** while `η`'s own floor is flat-to-falling at **`n^(−0.1034)`** — MEASURED ON
+ * THE SHIPPED OPERATOR (spec §10.2 / A30; the `η` exponent is A47 item 11's re-measurement).
  *
- * It is NOT `structuredSaddleResidual` (`linsolve.ts:860`): that one's `max(1, ‖rhs‖)` denominator
+ * DO NOT RE-QUOTE §7.4's `n^3.36` / `n^0.34`. §10.2 retracts both: `trueFloorMin` is
+ * `8.3e-02 → 8.7e-01` (`n^0.88`), compression-dominated rather than roundoff-dominated, and A47
+ * item 11 records `−0.1034` against the predicted `+0.34` — a different SIGN. This STRENGTHENS the
+ * conclusion the comment is here for (§10.2: *"This REINFORCES §7.4's conclusion that `η` is the
+ * only viable currency — a 'floor' above 1 is no floor at all"*), which is why the retracted
+ * figures are replaced rather than the sentence being softened.
+ *
+ * It is NOT `structuredSaddleResidual` (`linsolve.ts`): that one's `max(1, ‖rhs‖)` denominator
  * is not relative for `‖rhs‖ < 1`, it sums the constraint rows, and it needs the dense matrix
  * (spec §7.3 anti-trap 1). Do not reuse it.
- * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.3, §10.2, A30, A47 item 11
  */
 export function backwardError(
     resNorm: number,

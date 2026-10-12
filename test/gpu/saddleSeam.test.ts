@@ -74,16 +74,16 @@ test('saddle seam ABSENT: the step is deterministic and leaks nothing between ca
 
 // D1's SECOND half — the one the `finally` spelling fails. A collected step that does
 // NOT throw must still return a populated ledger; an unconditional finally would have
-// nulled `acc` before optimizer.ts:514 reads it.
+// nulled `acc` before optimizer.ts:559 reads it.
 // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
 // @see docs/superpowers/plans/2026-09-04-webgpu-solver-phase2a-1.md ## Decisions (D1)
 test('saddle seam ABSENT: collectTimings still returns a ledger (the disarm is throw-path only)', () => {
     const r = dispatchDescentStep({ ...args(), collectTimings: true });
     expect(r.timings).toBeDefined();
     expect(r.timings?.step?.calls).toBe(1);
-    // NOT an exact count: `saddle` fires once for the gradient solve (gradient.ts:143 —
+    // NOT an exact count: `saddle` fires once for the gradient solve (gradient.ts:177 —
     // the CPU path, which is the one this seam-absent test takes; :132 is the seam path)
-    // plus once per frozen projection Newton iteration (lineSearch.ts:266), and that
+    // plus once per frozen projection Newton iteration (lineSearch.ts:278), and that
     // iteration count is fixture- and step-size-dependent. Asserting a literal here
     // would be pinning an incidental number, not the ledger's presence.
     expect(r.timings?.saddle?.calls).toBeGreaterThanOrEqual(1);
@@ -169,8 +169,8 @@ test('saddle seam PRESENT: routes through the external solve and agrees with the
 
 // A PreparedSaddle whose FIRST solve succeeds and whose every later solve throws —
 // "iterative refinement ran out of budget partway through the step". Call 1 is the
-// gradient solve (gradient.ts:132); calls 2..n are the frozen projection's, one per
-// Newton iterate (lineSearch.ts:266). `calls` is exposed so the test can prove it
+// gradient solve (gradient.ts:166); calls 2..n are the frozen projection's, one per
+// Newton iterate (lineSearch.ts:278). `calls` is exposed so the test can prove it
 // actually reached a projection solve rather than re-testing the gradient one.
 // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
 function lateBoomPrepared(a: DispatchDescentStepArgs): {
@@ -209,7 +209,7 @@ test('saddle seam: an ExternalSolveError from the GRADIENT solve propagates out 
     // NOT swallowed into 'singular_system': the driver must be able to see it and
     // re-run the step on the CPU path ([DESIGN §4.5] fallback trigger 3).
     // boomPrepared throws on the FIRST solve, so this covers the gradient solve ONLY —
-    // the catch at optimizer.ts:392. The projection solves are a different swallow site
+    // the catch at optimizer.ts:429. The projection solves are a different swallow site
     // and have their own test below; this name says which one it owns because the
     // previous general name read as a guarantee it could not deliver.
     // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.5
@@ -219,7 +219,7 @@ test('saddle seam: an ExternalSolveError from the GRADIENT solve propagates out 
 });
 
 // The other three of the four solves in a normal step. projectOntoConstraintSet wraps
-// its solve in a catch that returns { ok: false } for EVERY throw (lineSearch.ts:296),
+// its solve in a catch that returns { ok: false } for EVERY throw (lineSearch.ts:308),
 // so without the ExternalSolveError rethrow there, a failed GPU projection solve is
 // reported as a merely-unconverged projection: the line search backtracks, the step is
 // accepted at a smaller τ, `stats.reason` is undefined and `usedGpuSolve` stays true.
@@ -280,9 +280,9 @@ test('saddle seam: a leaked collector cannot accumulate into an UNCOLLECTED step
 });
 
 // The `saddle.A` contract ([DESIGN §4.4]: "the matrix of the SAME vertices the step
-// receives") enforced, not merely documented. solveSaddleFrozen (linsolve.ts:932-955)
+// receives") enforced, not merely documented. solveSaddleFrozen (linsolve.ts)
 // validates rhsTop/rhsBottom lengths ONLY, while the path it replaces does validate A
-// (solveSaddleFromA, :804-806: `if (a.length !== n * n) throw`) — so without this guard
+// (solveSaddleFromA, linsolve.ts:881-883: `if (a.length !== n * n) throw`) — so without this guard
 // the seam path is strictly LESS checked than the CPU path. A short A reads out of
 // range → undefined → NaN → structuredSaddleResidual returns NaN → nothing in src/core/
 // thresholds `residual`, so the line search rejects a NaN direction as `armijo_failed`
@@ -295,7 +295,7 @@ test('saddle seam: a wrong-sized saddle.A throws before anything is solved', () 
     const bad: PreparedSaddle = { ...identityPrepared(a), A: new Float64Array(4) };
     expect(() => dispatchDescentStep({ ...a, saddle: bad })).toThrow(/saddle\.A length/);
     // The guard is on the PRE-ARM path (before timingsBegin(), like the dE guard at
-    // optimizer.ts:281-282), so it needs no disarm — and this proves it, since a guard
+    // optimizer.ts:298-299), so it needs no disarm — and this proves it, since a guard
     // moved below timingsBegin() would leave the collector armed here (D1).
     expect(() => dispatchDescentStep({ ...a, saddle: bad, collectTimings: true })).toThrow(
         /saddle\.A length/,

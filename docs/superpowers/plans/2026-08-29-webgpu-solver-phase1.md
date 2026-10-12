@@ -1205,7 +1205,7 @@ export class GpuDriver {
             this.engine = new GpuTangentPoint(this.renderer, packTopology(st.live.length, st.graph.edges, st.disjointPairs));
             this.topoVersion = st.graphVersion;
         }
-        // `buildStepArgs` passes `st.live` by REFERENCE (dispatch.ts:333) and PinControls.tsx:169-174 mutates
+        // `buildStepArgs` passes `st.live` by REFERENCE (dispatch.ts:358) and PinControls.tsx:169-174 mutates
         // `live` in place across our `await` below — so copy ONCE here and hand the SAME copy to the kernel
         // and to the step; otherwise dE would be evaluated at different vertices than the step uses
         // (dE seam contract, Task 5 TSDoc). Do not "simplify" this to `args.vertices`.
