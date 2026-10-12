@@ -215,7 +215,17 @@ export interface BctTraversal {
  * expansions is at most `2 * depth` (each expansion descends at least one of A, B by one level),
  * so the stack never holds more than `1 + 6 * depth` frames; MEASURED peak 74 ints = 37 frames
  * at depth 12. The overflow throw is a guard against a corrupt tree, not an expected path.
+ *
+ * Why this takes NO accumulator variant, on purpose: admissibility and block structure are decided in
+ * f64 from `bvh` geometry alone, so the f32 and f64 hierarchical operators (`prepareA` variants) share
+ * ONE block structure -- the same `bvh` and `bct` objects -- and an f32-vs-f64 solve differential
+ * isolates ARITHMETIC error (the compression error is common-mode and cancels). Do NOT rebuild or
+ * re-test admissibility in f32, or per variant: that silently destroys the differential and no pin
+ * would notice. MEASURED: gate G1 (same `bvh`/`bct` objects, equal `stats`) holds on every cell of the
+ * f32 ladder and a cross-theta mutant (`buildAt(c, 0.25)`) trips it. The differential bounds
+ * arithmetic error on a FIXED structure; it does NOT test an f32 admissibility test (none exists).
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.5 (rules), §7.1 (streaming)
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md A44 §5 (G1 on the ladder), A42 §5 (gate bookkeeping)
  */
 export function traverseBct(
     bvh: Bvh,
@@ -379,7 +389,8 @@ class PairList {
 
 /**
  * Builds the block lists by running {@link traverseBct} once with list-pushing visitors. Same
- * traversal, same order; `stats` are the traversal's.
+ * traversal, same order; `stats` are the traversal's. Variant-free for the same reason as
+ * {@link traverseBct} (Why: one shared block structure across the f32 and f64 operators).
  * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.5, §7.1
  * @issue utof/repulsive-test2#57
  */

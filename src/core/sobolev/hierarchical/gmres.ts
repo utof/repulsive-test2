@@ -346,6 +346,14 @@ export interface EtaProbeOptions {
      * The χ=0 EXACT streaming `A_bct` (no shift): `A_σ x̃` is recomputed from `b` with this and
      * NEVER with the BCT used inside the iteration (spec §7.3). The shift is formed here from the
      * SAME `op.sigma` as the iteration's, so the two matvecs differ only in the BCT approximation.
+     *
+     * ⚠ That last clause holds only when the iteration operator and this hook share a precision
+     * variant. With an f32 `op` and an f64 hook the two matvecs differ in the BCT approximation PLUS
+     * the f32 rounding, so `η_exact` is compression ⊕ precision and cannot be split from one number;
+     * pair the hook with the iteration's variant, or separate the two offline. Why it matters: the
+     * compression part dominates the f32 part by 500–4 150× at n=960 (A-angle to the exact solution
+     * 2–3.7° against 6e-4–4e-3° for f32 vs f64), so a bare `η_exact` cannot see the f32 error at all.
+     * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md A44 §1 (E_c/E_p), §7.3
      */
     exactApplyA: (u: ArrayLike<number>, out: Float64Array) => void;
     /**
