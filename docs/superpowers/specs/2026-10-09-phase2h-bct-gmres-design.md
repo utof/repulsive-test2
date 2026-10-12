@@ -1439,6 +1439,15 @@ for n ≥ 240. **So the stopping rule is not a detail: H2 is only meaningful run
 2. **Not the recurrence residual.** Left-preconditioned, that is `‖Ã⁻¹r‖/‖Ã⁻¹b‖`, and its MEASURED
    under-report is **4.372e8 / 1.404e9 / 1.142e10 / 2.056e11 / 1.717e12** at n=64…960 — 3 926× growth,
    fitted exponent **+3.056**, tracking `κ₂(A_σ) ∝ n^3.334`. §5.3 is the rule; this is the number.
+   > **A30 / §10.2:2935, IN PLACE — THE NUMBERS IN ITEM 2 ABOVE ARE LAB NUMBERS AND DO NOT TRANSFER.
+   > THE RULE SURVIVES; ITS NUMBER DOES NOT.** On the SHIPPED operator the under-report is
+   > **85.6 → 2.28e4** at n=64…960, fitted exponent **≈+2.07**, and 1.00e6 at n=3840 — *"Direction
+   > and growth reproduce; magnitudes are **6.7 decades** smaller, because the shipped `Ã⁻¹A_σ` is
+   > ~150× better conditioned. §5.3's rule stands; its number does not"* (§10.2's own row). This box
+   > is attached HERE because A26's marker below scopes itself to *"the table and the fit above"* and
+   > anti-trap 2 sits above that table, so it was left unamended — the gap `src/core/sobolev/
+   > hierarchical/gmres.ts` cited into when it labelled `4.372e8…1.717e12` MEASURED. Do not size a
+   > tolerance, a probe schedule or a knock-out bar off item 2's magnitudes.
 
 | | n=64 | 120 | 240 | 480 | 960 |
 |---|---:|---:|---:|---:|---:|
@@ -1615,7 +1624,7 @@ entered the top eigenspace.
 > all-inadmissible path to exist as a runtime configuration, and on it `A_bct` IS the exact operator**
 > — so the two η legitimately agree, and clause 3 would rule a perfectly valid χ=0 run INVALID. That
 > is the mirror of the defect A21 fixed. **Ruling: clause 3 fires only when the iteration's operator
-> has at least one far-field block (`nFar > 0`, `bct.ts:170`). At `nFar == 0` the clause INVERTS —
+> has at least one far-field block (`nFar > 0`, `bct.ts:184`). At `nFar == 0` the clause INVERTS —
 > the two η must agree to roundoff, and a DISAGREEMENT is then the defect**, because it means the
 > χ=0 apply and the streaming exact matvec are not the same operator. Do not assert bit-equality
 > there: the two paths may legitimately differ in summation order, so the `nFar == 0` form is an
@@ -1633,7 +1642,7 @@ entered the top eigenspace.
 > transitively, via the NaN it induces in η (see #76).
 >
 > **Scope of the CODE change this ruling implies, kept deliberately small.** `etaViolations` already
-> receives `etaBct` (`gmres.ts:292`), so clauses 1 and 2 widen with **no signature change**.
+> receives `etaBct` (`gmres.ts:310`), so clauses 1 and 2 widen with **no signature change**.
 > **Clause 3's `nFar` scoping is a HARNESS obligation, not a `gmres.ts` change**: `etaViolations` has
 > no access to `nFar` and giving it one is an API change to an exported function, out of proportion to
 > a configuration nothing currently runs — H2 is defined at θ=0.5, and χ=0 is a baseline experiment.
@@ -1924,6 +1933,19 @@ target of 1e-4 is therefore **unreachable in f32 at n ≥ 480** — `e1-gmres.js
 all 5 seeds, which is exactly the censoring the INVALID set must catch — and 1e-2 is reachable only
 to n ≈ 1 225. **`η` is the only residual-family quantity whose floor does not degrade with n**, so it
 is the only one that can anchor an n-invariant count, and it unifies H2 and H3 on one instrument.
+
+> **A30 / §10.2:2936-2937, IN PLACE — BOTH EXPONENTS IN THE PARAGRAPH ABOVE ARE LAB NUMBERS AND ONE
+> OF THEM HAS THE WRONG SIGN. THE CONCLUSION IS REINFORCED, NOT WEAKENED.** On the SHIPPED operator
+> `trueFloorMin` is **8.3e-02 → 8.7e-01**, i.e. **`n^0.88`** and **`> 1` at n ≥ 1920** — it is
+> compression-dominated, not roundoff-dominated, and §10.2's own row reads: *"This **REINFORCES**
+> §7.4's conclusion that `η` is the only viable currency — a 'floor' above 1 is no floor at all."*
+> `etaFloorMax`'s exponent is **`n^(−0.1034)`** (A47 item 11, re-measured; A26 had `n^(−0.077)`), so
+> it is flat-to-FALLING, not `+0.34`: the sign is different, and the margin therefore grows with n
+> rather than shrinking. This box is attached HERE because the "LAB numbers … retained for
+> provenance only (A30, A31)" marker further down this section scopes itself to a DIFFERENT bullet
+> (the τ=1e-8 ladder), leaving this paragraph unamended — the gap
+> `src/core/sobolev/hierarchical/gmres.ts` cited into when it quoted `n^3.36` and `n^0.34` as this
+> operator's. Do not quote either exponent for the shipped operator.
 
 **Bar: `iters(30 000) ≤ 64`.** CHOSEN, and it has two independent derivations that agree to 1.3 %:
 
@@ -2288,7 +2310,7 @@ six points (**0.012152** over the first four), against the defect variant's 1.01
 >
 > **Unaffected by this re-registration:** property 1 (nullity); property 3, which passes under either
 > definition with ≥ 2 200× margin (`κ_excl·u_f32` worst **2.9e-5** at c = 30, helix n=960 — 341×
-> margin); and A15's knock-out detector (`nullDim == 0` ∧ `|λ₁ − 1|`, `precond.test.ts:441-443`),
+> margin); and A15's knock-out detector (`nullDim == 0` ∧ `|λ₁ − 1|`, `precond.test.ts:454-457`),
 > since `κ_excl` is structurally invariant to the knock-out that adds the checkerboard mode.
 > **Reporting requirement (#71 item 1, adopted):** both columns are emitted, labelled `incl_const`
 > and `excl_const`, and every fit names its point set.
@@ -2305,7 +2327,7 @@ six points (**0.012152** over the first four), against the defect variant's 1.01
 > `test/sobolev/hierarchical/denseSpectrum.ts` with no scratch JSON.
 >
 > **θ NOTATION, stated once because it is easy to get wrong:** `DEFAULT_THETA = 0.25` is the value
-> the code ships today (`bct.ts:95`, deliberate and anchored — the flip to 0.5 costs 2.09× near-field
+> the code ships today (`bct.ts:109`, deliberate and anchored — the flip to 0.5 costs 2.09× near-field
 > work and waits on H6's pre-registration, #51); **θ = 0.5 is §4.1's RULED TARGET, not the current
 > default.** Below, θ = 0.5 is labelled the *target* and θ = 0.25 the *shipped* value. **The level bar
 > passes at both, which is the whole reason it is the one that ships.**
@@ -2760,7 +2782,7 @@ const C: number[][] = Array.from({ length: m }, () => new Array<number>(3 * n).f
 ```
 
 So `C` is `|E| × 3n`. **On a closed polyline `|E| = n`, so `k = O(n)` exactly** — not a loose bound.
-With `barycenterBlock` stacked, `k = |E| + 3`. The set is assembled at `src/core/dispatch.ts:244`.
+With `barycenterBlock` stacked, `k = |E| + 3`. The set is assembled at `src/core/dispatch.ts:269`.
 
 With a dense factorization, `k+1` backsolves against an already-computed factor are cheap — the
 factor is the expensive part and it amortises. **With an iterative solve there is no factor to
@@ -3145,7 +3167,7 @@ new order is **9b → 8b → 9 → 9c → 10 → 11.** Row 9 (`nullspace.ts`) st
 `src/worker/solverWorker.ts:51-52` **throws** `'solverWorker: `saddle` cannot cross the worker
 boundary'`, `store.ts:362` defaults `solverDriver: 'worker'`, and a `HierarchicalPreparedSaddle` holds
 closures so it is **not structured-cloneable by construction** (`linsolve.ts:431-450` says so for the
-dense arm already). `dispatch.ts:282` merely forwards `saddle: args.saddle`; **no site in `src/` sets
+dense arm already). `dispatch.ts:307` merely forwards `saddle: args.saddle`; **no site in `src/` sets
 it.** **RE-SCOPED: 8b delivers reachability on the MAIN-THREAD / inline driver only**, and must say so
 in `stats` or TSDoc rather than leaving a UI path that throws. Making the hierarchical route work under
 the worker driver is **a separate, unscheduled task** — it needs the saddle BUILT INSIDE the worker from
@@ -3165,8 +3187,8 @@ implementer's wrong turn):**
   exactly one edge (`laplacian.ts:13-14` says dispatch must route everything else to dense). **The
   dense golden's fixtures (`crossing`, `junction-y`, `linked-rings`, `knot`) are not all rings**, so the
   end-to-end cell must use `trefoil` and the dispatch must have a documented dense fallback.
-- **NO PINNED PRODUCTION `tol`, and no stop rule.** `gmres` requires `tol` (`gmres.ts:444`) and
-  `gmres.ts:51-52` states the recurrence residual is not a convergence criterion. The spec gives
+- **NO PINNED PRODUCTION `tol`, and no stop rule.** `gmres` requires `tol` (`gmres.ts:462`) and
+  `gmres.ts:61-62` states the recurrence residual is not a convergence criterion. The spec gives
   iteration counts but never a production stop rule, and **nothing in `src/core/` thresholds the
   returned `residual`** (`linsolve.ts:410-413`). 8b must choose one and register it; `censored` /
   `stop` have no defined handling at the seam.
@@ -3574,7 +3596,7 @@ So a route whose solver is O(n) per iteration still cannot reach the target if i
 `C: number[][]`. `prepareNullspace` therefore takes the edge block **sparsely**
 (`{vertices, edges, rowStart}`, re-deriving `±T` in O(n)) and only the `O(1)` rows densely where
 `k ≤ 16` makes `k × 3n` fine. **That fixes one consumer only:** `constraintSet.ts` still materialises
-the dense `C` for `evaluateConstraintSet`, which `dispatch.ts:244` calls every step. **This is the
+the dense `C` for `evaluateConstraintSet`, which `dispatch.ts:269` calls every step. **This is the
 same shape of wall as the `4N²` dense-`A` cap that motivated the whole phase, one layer over, and it
 was unremarked until now.** Carried to task 10.
 
@@ -3863,7 +3885,7 @@ top. The claim rested on the **66.4 at m̂ = 60**, which is OUTSIDE the band the
 landed `c = 35` the ratio is **196.4, margin ×1.96**, and it survives at every measured n (1 103 at
 n = 120, 5 048 at 240 — the ratio grows ×4–6 per rung, so n = 64 binds at every `c`). The correct
 statement: **the bar needs no change for `c ≤ 48`; the margin at 45 is thin (×1.18) and shrinks as `c`
-rises.** `precond.test.ts:571` is sound as written.
+rises.** `precond.test.ts:690` is sound as written.
 
 **3. Output (2) — where `λ₂ = 1` falls in `(n, m̂)`.** `lam_min` crosses DOWN through 1 at
 **m̂ ≈ 85.4 (trefoil, n = 1 920 and 4 000; 84.0 → 85.4 over n = 64 → 4 000, essentially
@@ -3873,10 +3895,10 @@ arc and circle are below 1 while helix and trefoil are above — **`κ_excl` as 
 `κ_excl` on the arc and circle in the production regime**, which is #78 item 2 confirmed. Every figure
 in this phase that needs the 1⊥ minimum must use the explicit-`Q` projection, never
 deflation-by-value: in this regime the constant mode and the smallest 1⊥ mode cannot be told apart by
-value. **The shipped guard `precond.test.ts:1092` (`λ₂ > 1.5`, on the trefoil) is NOT near firing** —
+value. **The shipped guard `precond.test.ts:1211` (`λ₂ > 1.5`, on the trefoil) is NOT near firing** —
 margin **×2.48 at n = 4 000, m̂ = 30** (identical at every m̂ from 20 to 40, because the trefoil's
 `lam_min` is a mass-weight-independent mode there), ×2.21 at 45, ×1.82 at 50; it would fire at
-**m̂ ≈ 69** at every n. **Two conflicts go to issues:** `precond.test.ts:547`'s "`λ₂` extrapolates to
+**m̂ ≈ 69** at every n. **Two conflicts go to issues:** `precond.test.ts:666`'s "`λ₂` extrapolates to
 ≈1.3 at n = 30 000" is contradicted by a flattening trefoil `lam_min` (3.719 at n = 4 000, local slope
 −0.013; continuation gives ≈3.6) → **#89**; and the **helix `lam_min` is the one quantity still
 falling** (3.093 → 2.131 → **1.588** at n = 960/1 920/4 000, slopes −0.80, −0.54, −0.40, in a
@@ -4104,7 +4126,7 @@ the other three is **UNTESTED**, not established.
 side.** Found pre-dispatch while censusing the f32 seam (`task-10-f32-census.md` Q6); recorded here
 because it is a defect in a pre-registered INVALID predicate, not in code.
 
-`EtaProbeOptions.uOp` (`gmres.ts:355-358`) is documented *"REQUIRED, with no default, so it cannot
+`EtaProbeOptions.uOp` (`gmres.ts:373-376`) is documented *"REQUIRED, with no default, so it cannot
 silently be `u_f32` for an f64 run (INVALID clause 2)"*, and validation (`:564-566`) checks only
 `uOp > 0 && Number.isFinite(uOp)`. `HierarchicalOperator` (`operator.ts:30-33`) carries no variant, so
 **an f32 operator pairs with `U_F64` with no error.** Clause 2 fires on `0 < η < u_op/10`:
@@ -4116,7 +4138,7 @@ silently be `u_f32` for an f64 run (INVALID clause 2)"*, and validation (`:564-5
 
 The guard was built against the only misuse that existed when it was written (every operator was f64),
 and **row 10 introduces the mirror-image misuse it does not cover.** The self-check compounds it:
-`gmres.ts:305-306` states that an η below `u_op/10` means the residual was not formed in that
+`gmres.ts:323-324` states that an η below `u_op/10` means the residual was not formed in that
 precision, but `:687` forms the residual in f64 **regardless**, so that check also rests entirely on
 the caller's `uOp`. A green η with a mismatched `uOp` is a vacuous result — the defect class this
 branch has shipped ten times, pre-armed on the one seam row 10 must cross.
@@ -4165,10 +4187,25 @@ only job is to attack the brief pays for itself every time.
 ### 1. The `u_f32` convention was wrong by a factor of 2, so EVERY wall in A38 item 8 was 1.23× too small — CORRECTED IN PLACE
 
 `A38 item 8`'s walls were derived from `cond₂ · u = 1` with **`u = 2^-23 = 1.19e-7`, the machine
-EPSILON.** This repo's own constant is the **unit roundoff**: `gmres.ts:74` is
+EPSILON.** This repo's own constant is the **unit roundoff**: `gmres.ts:84` is
 `export const U_F32 = 2 ** -24`, with TSDoc that says so explicitly ("NOT the machine epsilon"), and
 five further sites agree numerically (`apply.test.ts:55`, `lowOrder.test.ts:57`, `precond.test.ts:92`,
 `oracle/check_kappa_peredge.py:61`, `bench/gpu/k1-calibration.py:89`, all `5.96e-8`).
+
+> **IN PLACE, 2026-10-12 (branch-review fix wave, item 9) — ONE OF THE FIVE SITES IS GONE.**
+> *No amendment number is minted here: the numbered ledger is the spec owner's, and this corrects a
+> site inventory rather than a ruling. Renumber into the A-series if that is wanted.*
+>
+> The sentence above is kept as written because it records why the convention had to be settled, but
+> `apply.test.ts:55` no longer exists as a decimal: this wave replaced that site with
+> `import { U_F32 as GMRES_U_F32 }` from `gmres.ts` (now `apply.test.ts:66`, `const U_F32 =
+> GMRES_U_F32`), so the count of re-literalising sites is **four**, not five. The surviving four
+> (`lowOrder.test.ts:57`, `precond.test.ts:92`, and the two Python oracles) were re-read on
+> 2026-10-12 and are still decimal; they are deliberately out of this wave's scope — the two Python
+> files cannot import the TS constant at all, and `precond.test.ts:92`'s decimal is used against a
+> 1e-2 bar where a 7.6e-5 shift cannot matter. This removes a second SPELLING, not a wrong value:
+> `[A39 item 1]` already settled the value.
+
 **The spec was internally inconsistent about its own constant:** `[A37]`'s `κ·u_f32 = 1.12` at
 N = 30 000 (`:3494`) is correct under `2^-24` (`1.883e7 × 5.9605e-8 = 1.1222`), so A38 contradicted A37.
 
@@ -4306,10 +4343,10 @@ random-vector "UNSAFE" caveat read the sign backwards for this quantity.
 > first that the genuine arm's angle must rise toward the dense arms'. **If it does not rise, this entire
 > amendment's mechanism is withdrawn, not weakened** — the measured 88–1370× would stand as an
 > unexplained observation. Pending alongside it: the per-term decomposition, and exclusion of the
-> competing hypothesis that the kernel chain is not genuinely f32 throughout — `apply.test.ts:664-692`
+> competing hypothesis that the kernel chain is not genuinely f32 throughout — `apply.test.ts:687-715`
 > documents itself as **BLIND to kernel-chain rounding** (one `fround` on an otherwise-f64 chain moved
 > `delta_precision` by −1.2 % and the test still passed), so the matching δ of 1.0515067e-6 is consistent
-> with both. The rounding-placement PINs (`nearField.test.ts:262-303`, `apply.test.ts:736-781`, run green
+> with both. The rounding-placement PINs (`nearField.test.ts:262-303`, `apply.test.ts:759-804`, run green
 > at Stage 1), **not** the δ band, are what bear on that hypothesis.
 > **§6's "UNSAFE" caveat is NOT struck until the mutant runs.**
 
@@ -4349,13 +4386,13 @@ open chain can go through left-preconditioned GMRES here.** Adjudicated in writi
    has no slot to collocate on; the 'vertex' variant needs a closed curve (|E| = |V|)"*.
 2. It is **deliberate**, not an oversight — `lowOrder.ts:61-65`: the vertex variant collocates
    `sE[2·slot]`, a bijection *exactly* on a closed curve; an open chain has `m = n − 1` and no slot for the
-   last vertex, so it throws "rather than silently dropping a vertex." Pinned by `lowOrder.test.ts:719-733`.
+   last vertex, so it throws "rather than silently dropping a vertex." Pinned by `lowOrder.test.ts:727-741`.
 3. **`laplacian.ts` restricts the preconditioner's topology anyway** (`lowOrder.ts:65`), so lifting
    barrier 1 alone would not suffice.
 4. The only open-chain-capable variant, the **rs-identity knock-out**, is refused by `makePreconditioner`
    (`precond.ts:306-313`) for a sound reason: *nullity 2 for even n ⇒ `Ã` singular on the checkerboard ⇒
    `Ã⁻¹` stops being a preconditioner*.
-5. `makeHierarchicalSaddle` asserts a closed natural ring (`hierarchicalSaddle.ts:284`).
+5. `makeHierarchicalSaddle` asserts a closed natural ring (`hierarchicalSaddle.ts:405`).
 
 Unpreconditioned runs do not converge at the n of interest. **Filed as utof/repulsive-test2#93.**
 
@@ -4489,7 +4526,7 @@ buffer, and it is the configuration a GPU path should prefer.
 ### 4. The kernel-chain alternative hypothesis is EXCLUDED, by a pin shown to have power
 
 `[A40]`'s competing hypothesis (the chain not genuinely f32, exploiting
-`apply.test.ts:664-692`'s documented blindness) is excluded: an independent per-op `Math.fround`
+`apply.test.ts:687-715`'s documented blindness) is excluded: an independent per-op `Math.fround`
 transcription over **every** near pair (86 658/kernel) and **every** far block (3 530/kernel) of the actual
 `H32` gives **0 mismatches in all four sets**, and the round-once mutant disagrees on **2 488/3 530 and
 3 068/3 530** far blocks — **so the pin is not vacuous.** This is the A38-item-6 standard met.
@@ -4793,7 +4830,7 @@ GPU anywhere in H1–H6.** `[§7.0:1219]` then forbids publishing the run.
 
 ### 3. My §7.12 output-accumulation hypothesis is CONFIRMED — and the gap is TWO-SIDED, which corrects `[A45]`
 
-There is no schema field **and no way to set one**. `AccumulatorVariant` (`nearField.ts:101-115`) exposes
+There is no schema field **and no way to set one**. `AccumulatorVariant` (`nearField.ts:112-126`) exposes
 `round`/`roundNear`/`alloc`/`cast` but **no output hook**, and `applyColumns` writes
 `out[o+i] = fr(out[o+i] ± r)` (`apply.ts:620-627`, controller-verified) — **so the shipped F32 operator IS
 `[A45]`'s OUT32 configuration.** Row 10's OUT64 arm was a scratch-local re-implementation
@@ -4808,10 +4845,10 @@ There is no schema field **and no way to set one**. `AccumulatorVariant` (`nearF
 
 ### 4. My "a `.py` harness cannot reach them" premise is FALSE PER GATE (the conclusion survives)
 
-- **H5 is ALREADY a shipped TS gate**, and the test says so in its own comment: `precond.test.ts:442`
+- **H5 is ALREADY a shipped TS gate**, and the test says so in its own comment: `precond.test.ts:456`
   asserts `κ_excl < 40`, `:447` asserts `κ_eig·u_f32 < 1e-2` with *"H5 property 3 on the SHIPPED operator
   for the first time (it was quoted from `e0-closer-0b.json` before)"*; nullity and both INVALID clauses at
-  `:527` + `lowOrder.test.ts:802-812`, via `denseSpectrum.ts`. **Sending H5 back to Python would
+  `:527` + `lowOrder.test.ts:810-820`, via `denseSpectrum.ts`. **Sending H5 back to Python would
   re-measure the LAB `pinv` operator — the exact provenance `[A32]` and `[A38 item 9(a)]` withdrew figures
   from. RULING: H5 is emitted from the shipped TS instrument; only H6 stays Python** (generalized pencil;
   TS has no such eigensolver).
@@ -4819,13 +4856,13 @@ There is no schema field **and no way to set one**. `AccumulatorVariant` (`nearF
   directories are under `.superpowers/sdd/**`, and the Python lab instruments live in the
   **2026-09-11-phase2h-queue** session, **gitignored**. Row 11's instruction pointed at a nonexistent path.
 - **H4c is f64-OPERATOR-ONLY** — `makeHierarchicalSaddle` has no precision variant and calls `prepareA`
-  with none (`hierarchicalSaddle.ts:321` → F64 default). So `[§7.12]`'s `precision.operator: "f32"` is
+  with none (`hierarchicalSaddle.ts:442` → F64 default). So `[§7.12]`'s `precision.operator: "f32"` is
   **false for H4c**; widening `HierarchicalSaddleOptions` is a hard-gate change.
 - **H4a's INVALID 1 is NOT A COMPUTABLE PREDICATE** — *"`x*` not from an f64 dense solve"* is provenance,
   not a function of outputs, so it cannot be "reachable in a test" as the row requires. Its INVALID 2 is
   near-vacuous (`cosHat² ≥ 1` always per `[§7.6:2057]` while `cos ≤ 1`, so bit-equality needs exactly 1.0).
 - **Good news, and it removes work:** H1-a, H1-b, H2 and H3 **already have every INVALID predicate
-  reachable in a test** (`apply.test.ts:596-614`, `:720-727`; `gmres.test.ts:347-416`, `:1225-1264`,
+  reachable in a test** (`apply.test.ts:607-625`, `:720-727`; `gmres.test.ts:347-416`, `:1225-1264`,
   `:560-868`). **Row 11 cites those; it does not re-implement four files of coverage.**
 - `lineSearchStepSet` was **not** built in tasks 3–8 (introduced in `5c526d7`) and **does** have a Python
   counterpart (`oracle/tpe_constraints_oracle.py:554`). **The correct reason for "TS not Python" is that
@@ -4857,7 +4894,7 @@ rather than copied, and κ_far gets a definition.** Row 11's ten proposed keys a
 
 ### 7. θ: the RED was MIS-ATTRIBUTED, and I never issued the ruling 0c asked for
 
-`apply.test.ts:644` says 0.25 is production after H6 read RED; `[A32:2303]` says 0.5 is the ruled target
+`apply.test.ts:667` says 0.25 is production after H6 read RED; `[A32:2303]` says 0.5 is the ruled target
 pending #51; **0c read RED with CONCERN 1 that "the RED is a stopping-rule effect, not a theta effect"** and
 said *"Controller must rule on this before acting on RED."* Row 11 found no record that I did, and it is
 right — my ledger engaged the substance but issued no ruling.
@@ -4868,7 +4905,7 @@ right — my ledger engaged the substance but issued no ruling.
 > iterate** (6–9 iterations against ~29–39 for random rhs, because the recurrence residual hits 1e-4 while
 > the true error is still large) — which is `[§5.3]`'s own ruling that the recurrence residual *"is not a
 > convergence criterion … under-reports by 3.9e3–6.6e3×"*, and the same artefact `[§7.6]` used to forbid
-> reading any H4 bar at τ=1e-2. **The RED is WITHDRAWN as a θ signal**, and `apply.test.ts:644`'s
+> reading any H4 bar at τ=1e-2. **The RED is WITHDRAWN as a θ signal**, and `apply.test.ts:667`'s
 > "0.25 is production because H6 read RED" rests on a withdrawn inference. **The CHOICE of production θ
 > stays open on #51's own evidence and is NOT row 11's to make:** row 11 gates at BOTH θ wherever a gate is
 > per-θ and emits `thetaProduction: null` citing #51 and this item.
@@ -4910,7 +4947,8 @@ items did not cover them — a dangling citation I created):
 - **Ruling 9 — conjunct 1's RED side is a LABELLED SYNTHETIC KNOCK-OUT.** It is produced by deliberate
   exponent drift, is marked as such in the artefact, and is **not** a claim that production can reach it.
 
-**4. H4c conjunct 1's RED side is now ESTABLISHED, and §7.11 item 10c CLOSES.** §9's table (:2969) recorded
+**4. H4c conjunct 1's RED side is now ESTABLISHED — SYNTHETICALLY; see A48 item 1, which
+corrects this item's bare "ESTABLISHED" — and §7.11 item 10c CLOSES.** §9's table (:2969) recorded
 the first draft's "6/6 random arms ≤ 0.86027" as **NOT ESTABLISHED**, because those arms had `K_run` =
 1,2,6,2,1,10 against K=20 — the gate's own INVALID clause forbids folding them into a ratio — leaving
 conjunct 2 to carry the separation. A valid RED now exists: **α drift at K=20 with acceptance 1.0 at every
@@ -4927,7 +4965,7 @@ draft's number was roughly right and its *derivation* was invalid; that is not a
 near** blocks (`adjacencyVetoed` 50 → 196) rather than far ones. `δ_compress` saturates at **1.568e-2**,
 only **1.7×** its θ=0.5 value. This is the asymptotic consequence of the O(1) certificate proved at
 `bct.ts:30-38`, and it is a **safety property**: no choice of θ makes this operator inaccurate.
-> **This does NOT contradict `bct.ts:438-448`**, which reports θ 0.5→0.25 holding `nearPairs` at 21 598
+> **This does NOT contradict `bct.ts:452-462`**, which reports θ 0.5→0.25 holding `nearPairs` at 21 598
 > while `nFar` goes 748→904. That is the **refining** end of the ladder (vetoed blocks become merely
 > inadmissible and split one level deeper); the saturation above is the **coarsening** end (would-be-far
 > blocks get vetoed into near). Different fixtures and opposite directions — both are the same certificate.
@@ -4945,7 +4983,7 @@ any roughly-downhill direction. Three rulings follow:
   data-dependent bar-setting — the move refused at A42 ruling 5 and A43. A new bar must come from a
   pre-registered sensitivity analysis, not from this artefact.
 - **H4c's documented purpose changes to what it actually detects: α/β/ε drift between the saddle operator
-  and the step that consumes it.** `hierarchicalSaddle.ts:110-118` states that this failure is invisible
+  and the step that consumes it.** `hierarchicalSaddle.ts:120-128` states that this failure is invisible
   everywhere else — *"NOTHING downstream can see the disagreement — the residual is self-consistent and
   nothing thresholds it"* (`linsolve.ts:410-413`). H4c conjunct 1 is the **only** instrument in §7 that
   fires on it. A gate that uniquely covers an otherwise-undetectable failure is not a weak gate; it was
@@ -5002,3 +5040,118 @@ set. Row 11 must not be cited as its source.
 two constructions differ — most likely because row 11 shifts the dense reference by the BCT run's own σ.
 Stage 1 declined to claim the better number and recorded `tr(A_exact)/n` per row so the discrepancy is
 checkable. **Neither column may be quoted against the other until #97 reconciles them.**
+
+---
+
+## A48 — the final blind whole-branch review: one Critical, a three-gate pattern, and a contradiction I wrote
+
+Two blind Opus reviewers (the numerics-critical split of the branch rule) read the 28 199-line
+`src/`+`test/` diff off merge base `9dd5551`, with no session history and no prior findings.
+Verdicts: **spec compliance FAIL, quality PASS WITH FINDINGS, numerical correctness PASS WITH
+FINDINGS, gate and test power PASS WITH FINDINGS.** One Critical, seven Important, thirteen Minor.
+One consolidated fix wave landed all ten briefed items (2 526 insertions / 504 deletions, 24 files).
+
+**1. A47 item 4 and the artefact contradicted each other, and BOTH were partial.** A47 item 4 ruled
+H4c conjunct 1's RED side "now ESTABLISHED"; the artefact publishes `NOT ESTABLISHED`. The fix wave
+surfaced the clash rather than silently picking a side. **Ruling: both qualifiers are required and
+neither statement is complete alone.**
+- The RED side **IS established synthetically** — α=1.5 ⇒ R_E 0.868108 with acceptance 1.0 at every
+  rung, which is what proves the two conjuncts independent.
+- It is **NOT established as production-reachable**, exactly as ruling 9 says: the knock-out is a
+  *labelled synthetic* one and is not a claim that production can reach it. Production α is 3.
+- **Therefore the artefact must publish BOTH**, and A47 item 4's bare "ESTABLISHED" is corrected in
+  place. *Why this matters beyond bookkeeping:* "ESTABLISHED" unqualified is exactly how a synthetic
+  knock-out gets quoted later as evidence of a production guard — the failure A46 item 1 and A47
+  item 7 exist to prevent. A verdict that omits its own provenance is the VACUOUS problem wearing a
+  different hat.
+
+**2. C1 — §8.2's hybrid dispatch did not exist, and it is the branch's only Critical.**
+`hierarchicalSaddle.ts`'s `prepare` called `prepareSchur` unconditionally with no test on `k`, so
+`nullspace.ts` (753 src + 1 336 test lines, ~7.4 % of the branch) had **zero `src/` and zero
+`bench/` consumers** and the `{barycenter, edgeLengths, pins}` set §8.2:2787 says "must actually
+work" threw `SchurRouteError` — whose own message told the caller to use a route no code took.
+Confirmed three ways: the reviewer's executable falsifier (k=30 throws, k=6 succeeds), an import
+census, and the call graph, which had no `CALLS` edge into the file from `src/`.
+> **§8.2 pins no numeric `k` threshold** (confirmed, not assumed). The implemented dispatch
+> therefore routes by **block presence** and takes its only numeric cap **from the same place
+> `prepareSchur`'s refusal takes it**, so the guard and the dispatch cannot disagree. A threshold
+> invented here would have been a spec decision made by an implementer.
+
+**3. Three gates on this branch have no reachable or correctly-axed RED side, and that is the
+pattern — not any one gate.** H4b′ **VACUOUS** (A46 item 1), H4c conjunct 1 **MIS-AXED** (A47 item
+7, #98), and now **H5 property 2**: `κ_excl < 40` cannot be tripped on the mass-weight axis inside
+the quantity's own validity band. Each was found by a different route, which is why it is a property
+of how the gates were written rather than a coincidence.
+- `precond.test.ts` stated the precondition (λ₁==1, λ₂>1.5) and warned *"Any future trip demo
+  outside the live mass band must assert this pair or declare the quantity invalid"* — and then
+  offered **m̂=100 (κ_excl 65.9672)** as its trip demo, **the exact case the same comment block
+  declares invalid twelve lines earlier** (λ₁=0.7486). A comment that anticipates a rule and then
+  breaks it inside twelve lines is the strongest available evidence that the rule needs mechanising.
+- **CORRECTION to the review's own figure:** the in-band shortfall at the **shipped θ=0.25** is
+  **1.06× (supremum 37.7469 against 40)**, tighter than the review's 1.10×, which was measured at
+  θ=0.5 while `precond.test.ts` runs 0.25. Caught by the fix wave before it wrote the test.
+- **The bar STAYS at 40**, and H1-b's floor keeps its form, and θ keeps 0.25 — all three verified
+  byte-identical to HEAD after the wave. Every item added **scope or a margin, never a bar value**.
+  Published as a `status`/scope field on H3's existing precedent, **not** as a newly minted verdict:
+  A47 item 7 created `MIS-AXED` and nothing else, and an implementer does not mint verdict labels.
+  Residual bar-design questions are #100 (H1-b's n-independent floor under an n^0.71 quantity) and
+  #101 (H5's unreachable bar and its O(n³) instrument).
+
+**4. The standard was already written down in this repo, and applied unevenly.** `lefthook.yml:7-11`
+justifies enabling the biome linter with *"A check that cannot fail is indistinguishable from one
+that passed"* (#70) — authored **on this branch**, for its own pre-commit hook, while three of the
+branch's own gates fail that same test. **The rule was not missing; it was not reaching the gates.**
+That is a cheaper defect than an absent principle, and it means the VACUOUS / MIS-AXED labels rest
+on the repo's own stated standard rather than only on these amendments.
+
+**5. Citation drift is self-inflicted and compounds — item 7 was 93 repairs, not 28.** The review
+found 28 citations broken by the branch's own +200 lines in `linsolve.ts`. The fix wave then broke
+more with its own edits (+270 `hCalibration.ts`, +162 `hierarchicalSaddle.ts`, +119
+`precond.test.ts`, +165 `hierarchicalSaddleReal.test.ts`, +23 `apply.test.ts`); `hCalibration.ts`
+alone carries 13 citations into `apply.test.ts`, all correct at HEAD and all broken by the wave. A
+second pass built the exact HEAD→worktree line map from `git diff -U0` hunks: **168 citations into
+the 17 touched files, 99 unmoved, 66 moved and repaired, 3 in-hunk resolved individually.**
+> **The metric I asked for was the wrong metric**, and the fix wave said so instead of satisfying
+> it. A "broken-citation count" of 51→44 flags **relocation, not incorrectness**, and cannot reach 0
+> on a complete fix. What was verified instead: **every repaired citation now resolves to the exact
+> text it resolved to at the merge base**, and **none of the review's 19 broken citation strings
+> survives anywhere in `src/`, `test/` or `bench/`** — all grep to 0. *A count that cannot reach 0
+> is a gate that cannot pass, which is the same defect as one that cannot fail.*
+
+**6. The harness is deterministic, measured not assumed.** The artefact was regenerated after the
+wave and structurally diffed: **not one measured value moved** — only citation strings, three new
+shard records, and host `loadAvg`. That is independent confirmation of the determinism row 11
+asserted, obtained for free from an unrelated edit.
+
+**7. Item 10's magnitude claim is WITHDRAWN, its instruction RETAINED.** The per-exponent-`pow`
+anchor claimed its f32 spread exceeded the H1-b band. Measured over 12 004 f32 samples the two forms
+differ by **4.1e-8 mean / 2.4e-7 max against a 5.768e-5 band — ~240× NARROWER, not wider.** The
+magnitude is withdrawn in place; the "do not change the form" instruction stands, re-anchored on
+`nearField.test.ts`'s **executed** cross-form f64 pin at 4e-15, which is the real reason. *Fourteen
+MEASURED values were spot-checked and thirteen reproduced at the quoted digits; this was the one
+that did not, and it failed in the safe direction.*
+
+**8. `bench/results/gpu-phase2a-cr.json`'s uncommitted delta is whitespace plus ONE field.** The
+reviewers' +1 263/−314 reads like an audit burden and is not: re-emitting the parsed value and
+re-formatting gives `JSON.stringify(a) === JSON.stringify(b)`, and a field-by-field diff against
+HEAD returns **exactly one** semantic delta, `gitShaShort: "ed73ed5" → "fe5bedd"`. Independently
+confirmed here. The landing decision is therefore one value to accept or revert, and **belongs to
+the human** — it predates this work and no commit on the branch owns it.
+
+**9. The fix wave's site inventory is renumbered into this amendment** rather than left unnumbered;
+an implementer correctly declined to mint an A-number. Two residuals it surfaced and did not fix,
+both out of its brief: `precond.test.ts:92` and `lowOrder.test.ts:57` still literalise
+`U_F32 = 5.96e-8` under a different provenance and a 1e-2 bar (**ruling: defensible, but each must
+cite why it is not A39's constant, else it reads as the oversight A39 fixed** — filed, not fixed
+here), and the repo-wide pass-count baseline did not reconcile (**867 → 906 against a static delta
+of +1**). **RESOLVED by the scoped re-review, and the defect was the instrument, not the tree:**
+`bun test <path>` is a path-*PREFIX* filter, not a directory filter, so `test/sobolev/hierarchical`
+loads the 14-file directory **plus** the two sibling files that share the prefix —
+`hierarchicalSaddleReal.test.ts` (26 tests) and `hierarchicalSeam.test.ts` (10) — i.e. 16 files, not
+14. The group census therefore **double-counted those 36 tests**, and the stray "+1 static delta" is
+the same bug seen from the other end. Settled by changing instruments rather than re-doing the
+arithmetic: one whole-repo `bun test` reports **870 pass / 0 fail / 199 731 expect() across 59 files
+(3392 s, exit 0)**, matching the predicted 867 + 3 exactly. Filed as **@issue utof/repulsive-test2#105**,
+which proposes making the trap *unreachable* (move or rename the two siblings) rather than asking
+every future reader to remember it. **0 fail remains the invariant; the totals ARE an instrument, but
+only when measured repo-wide — a per-group sum over prefix filters is not.**
