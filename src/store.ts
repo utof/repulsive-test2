@@ -23,6 +23,14 @@ import { pairListFits, type SobolevSolver } from './core/sobolevRoute';
 import { subdivideGraph } from './core/subdivide';
 import { calculateDisjointPairs } from './core/tangentPointEnergy';
 import { type GraphState, type TestConfig, testConfigs, type Vec3 } from './core/testConfigs';
+import {
+    createUntangleRun,
+    finishUntangle,
+    type UntangleRun,
+    type UntangleStop,
+    untangleDisplay,
+    untangleTick,
+} from './core/untanglePass';
 
 /**
  * Spec-mandated barrel surface: §D2 requires dispatchDescentStep's arg type to
@@ -56,6 +64,21 @@ export type { ProjectionMode } from './core/optimizer';
 // Penalty catalog config (5C) re-exported for the ControlPanel — same pattern
 // as ProjectionMode. @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md
 export type { PenaltyConfig } from './core/sobolev/penalties';
+
+/**
+ * What the stats line shows about the untangle pass.
+ * Why: a pass that was skipped or whose audit failed must say so on screen — a silent no-op
+ * reads exactly like "it ran and changed nothing". @see the `untangleFirst` field of SimStore.
+ */
+export type UntangleInfo =
+    | { phase: 'running'; steps: number; nodes: number }
+    | {
+          phase: 'done';
+          steps: number;
+          stopped: UntangleStop | 'abandoned';
+          audit: 'kept' | 'unverified' | 'failed';
+      }
+    | { phase: 'skipped'; reason: string };
 
 const STORAGE_KEY = 'repulsive-test-config';
 
@@ -289,6 +312,23 @@ export interface SimStore {
     prePassDone: boolean;
     prePassLength0: number;
     prePassAlpha: number | null;
+    // OPTIONAL untangle pass before the descent (default off), for ONE CLOSED CURVE: the
+    // medial-sphere flow untangles the loop in about a second (it is local and sparse where
+    // the tangent-point flow, on a tight tangle, is all-pairs), then the descent takes over
+    // from a curve with the same vertex count, total length and centre. It keeps the knot type
+    // (collision-limited steps, audited by a knot invariant; a failed audit restores the input).
+    // Lifecycle mirrors the force pre-pass: `untangle` is created at run start when the switch
+    // is on and the pass has not yet run on this graph (`untangleDone`); while it is non-null
+    // the frame loop ticks it INSTEAD of stepping and `live` shows the curve at constant size;
+    // when it ends the frozen targets x₀, L⁰, ℓ⁰ are re-anchored. Skipped (with the reason in
+    // `untangleInfo`) when the graph is not a single loop or pins are set — the flow has neither
+    // junctions nor pins. `untangleInput` is the geometry the pass started from.
+    // @see src/core/untanglePass.ts, docs/plans/2026-11-24-medial-sphere-method.md
+    untangleFirst: boolean;
+    untangle: UntangleRun | null;
+    untangleInput: Vec3[] | null;
+    untangleDone: boolean;
+    untangleInfo: UntangleInfo | null;
     // stats (React-subscribed, throttled by the writer)
     step: number;
     energy: number;
@@ -322,6 +362,10 @@ export interface SimStore {
     setEdgeSubdivision(pieces: number): void;
     setPreventCrossings(b: boolean): void;
     tickPrePass(maxTicks?: number, budgetMs?: number): void;
+    // Untangle pass (see the `untangleFirst` field). `tickUntangle` is called by the frame loop
+    // while `untangle` is non-null: at most `maxSteps` flow steps or `budgetMs` milliseconds.
+    setUntangleFirst(b: boolean): void;
+    tickUntangle(maxSteps?: number, budgetMs?: number): void;
     // Pin actions (briefing §5B). addPin snapshots the vertex's CURRENT live
     // position as the frozen target (idempotent by vertexIndex); setPinTarget is
     // the drag re-target; removePin/setPinEnabled edit the list.
@@ -386,6 +430,10 @@ export const useSimStore = create<SimStore>()((set, get) => {
             prePass: null,
             prePassDone: false,
             prePassAlpha: null,
+            untangle: null,
+            untangleInput: null,
+            untangleDone: false,
+            untangleInfo: null,
             // Preset/config change = a run (re)start boundary → re-anchor the
             // frozen targets x₀, L⁰, ℓ⁰ (see the frozen-targets lifecycle anchor above).
             sobolevX0: barycenterTarget(b.graph.vertices, b.graph.edges),
@@ -424,6 +472,39 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     live[p.vertexIndex][2],
                 ] as Vec3,
             }));
+    // End an untangle pass, finished or abandoned: put the audited result (or, if the audit
+    // failed, the input) into `live` and return the state patch that hands the geometry to the
+    // descent with freshly anchored targets — the same re-anchor a settled force pre-pass does.
+    // `live` is written BEFORE the patch is computed, so every target reads the new geometry.
+    // @see src/core/untanglePass.ts (finishUntangle)
+    const settleUntangle = (s: SimStore): Partial<SimStore> => {
+        const run = s.untangle;
+        if (!run) return {};
+        const finished = run.stopped !== null;
+        const res = finishUntangle(run, s.untangleInput ?? s.live);
+        for (let i = 0; i < s.live.length; i++) {
+            s.live[i][0] = res.vertices[i][0];
+            s.live[i][1] = res.vertices[i][1];
+            s.live[i][2] = res.vertices[i][2];
+        }
+        return {
+            untangle: null,
+            untangleInput: null,
+            // An abandoned pass may be resumed by the next play, from where it stopped.
+            untangleDone: finished,
+            untangleInfo: {
+                phase: 'done',
+                steps: res.steps,
+                stopped: finished ? res.stopped : 'abandoned',
+                audit: res.audit,
+            },
+            energy: graphEnergy(s.live, s.graph.edges, s.disjointPairs),
+            sobolevX0: barycenterTarget(s.live, s.graph.edges),
+            sobolevL0: totalLength(s.live, s.graph.edges),
+            sobolevEll0: edgeLengths(s.live, s.graph.edges),
+            pins: reanchorPins(s.pins, s.live),
+        };
+    };
 
     return {
         selectedTestId: test.id,
@@ -457,6 +538,11 @@ export const useSimStore = create<SimStore>()((set, get) => {
         prePassDone: false,
         prePassLength0: 0,
         prePassAlpha: null,
+        untangleFirst: false,
+        untangle: null,
+        untangleInput: null,
+        untangleDone: false,
+        untangleInfo: null,
         pins: [],
         // Penalties default ALL OFF (every weight 0 ⇒ penaltiesActive false ⇒
         // bit-identical threading, plan §2.4). field.X is a placeholder unit axis
@@ -590,6 +676,25 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 sobolevEll0: edgeLengths(s.live, s.graph.edges),
                 pins: reanchorPins(s.pins, s.live),
             });
+        },
+        // Toggling the switch re-arms the pass (as toggling the force pre-pass does). If a pass
+        // is running it is ended properly first: `live` must never be left holding the
+        // display-only curve, which is not audited.
+        setUntangleFirst: (b) => {
+            const s = get();
+            set({ ...settleUntangle(s), untangleFirst: b, untangleDone: false });
+        },
+        tickUntangle: (maxSteps = 8, budgetMs = 12) => {
+            const s = get();
+            const run = s.untangle;
+            if (!run) return;
+            untangleTick(run, maxSteps, budgetMs);
+            if (run.stopped === null) {
+                untangleDisplay(run, s.live);
+                set({ untangleInfo: { phase: 'running', steps: run.steps, nodes: run.curve.n } });
+                return;
+            }
+            set(settleUntangle(s));
         },
         // Pin actions (briefing §5B). A pin is a per-vertex point constraint; like
         // the other constraint toggles, mutating the pin set invalidates ONLY the
@@ -734,6 +839,29 @@ export const useSimStore = create<SimStore>()((set, get) => {
                               prePassAlpha: 1,
                           }
                         : {}),
+                    // Untangle pass: once per graph, at the start of a run (see the
+                    // `untangleFirst` field). For a single loop it takes precedence over the
+                    // force pre-pass, which would pass the curve through itself.
+                    ...((): Partial<SimStore> => {
+                        if (!s.untangleFirst || s.untangleDone) return {};
+                        if (s.pins.length > 0)
+                            return { untangleInfo: { phase: 'skipped', reason: 'pins are set' } };
+                        const run = createUntangleRun(s.live, s.graph.edges);
+                        if (!run)
+                            return {
+                                untangleInfo: {
+                                    phase: 'skipped',
+                                    reason: 'not a single closed curve',
+                                },
+                            };
+                        return {
+                            untangle: run,
+                            untangleInput: cloneVerts(s.live),
+                            untangleInfo: { phase: 'running', steps: 0, nodes: run.curve.n },
+                            prePass: null,
+                            prePassAlpha: null,
+                        };
+                    })(),
                 });
                 return;
             }
@@ -741,7 +869,11 @@ export const useSimStore = create<SimStore>()((set, get) => {
             // consumers (GradientArrows) read current positions, and recompute energy.
             // @see spec §4.1 (store.commit) / §6 (stale-arrow fix)
             const s = get();
+            // A pause during the untangle pass ends it properly first (audited result or the
+            // input back in `live`); everything below then reads that geometry.
+            const untanglePatch = settleUntangle(s);
             set({
+                ...untanglePatch,
                 running: false,
                 // A pause during the pre-pass abandons it; the next play starts a new one
                 // from wherever the nodes are now (`prePassDone` stays false).

@@ -377,7 +377,15 @@ function Simulation() {
     useFrame((state, delta) => {
         const st = useSimStore.getState();
 
-        if (st.running && st.prePass) {
+        if (st.running && st.untangle) {
+            // Untangle pass phase: advance the medial-sphere flow INSTEAD of stepping, on the
+            // main thread whatever the driver (the store budgets it per frame). Same rules as
+            // the force pre-pass below: not while an earlier step is in flight, and E₀ is
+            // nulled because the descent's first step starts from a geometry no step has seen.
+            // @see src/core/untanglePass.ts / the `untangleFirst` field in src/store.ts
+            if (!inFlight.current) st.tickUntangle();
+            lastEnergy.current = null;
+        } else if (st.running && st.prePass) {
             // Force-layout pre-pass phase: tick the layout INSTEAD of stepping. It runs on the
             // main thread whatever the driver (a tick is cheap; the store budgets it per
             // frame). Not while a step from before the pause is still in flight — that result

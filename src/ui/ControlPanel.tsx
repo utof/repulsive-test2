@@ -41,6 +41,8 @@ export function ControlPanel() {
     const setProjectionMode = useSimStore((s) => s.setProjectionMode);
     const sobolevSolver = useSimStore((s) => s.sobolevSolver);
     const forcePrePass = useSimStore((s) => s.forcePrePass);
+    const untangleFirst = useSimStore((s) => s.untangleFirst);
+    const setUntangleFirst = useSimStore((s) => s.setUntangleFirst);
     const edgeSubdivision = useSimStore((s) => s.edgeSubdivision);
     const setEdgeSubdivision = useSimStore((s) => s.setEdgeSubdivision);
     const preventCrossings = useSimStore((s) => s.preventCrossings);
@@ -336,6 +338,16 @@ export function ControlPanel() {
                         onChange={(e) => setForcePrePass(e.target.checked)}
                     />
                     <span>Force-layout pre-pass (graphs; may cross edges)</span>
+                </label>
+                {/* Untangle pass for one closed curve: the medial-sphere flow, then the descent.
+                    Keeps the knot type. @see src/core/untanglePass.ts */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                        type="checkbox"
+                        checked={untangleFirst}
+                        onChange={(e) => setUntangleFirst(e.target.checked)}
+                    />
+                    <span>Untangle first (one closed curve; keeps the knot)</span>
                 </label>
                 {/* Segments per edge (rebuilds the graph) and the crossing guard. The guard is
                     the paper's collision-limited step: it holds the drawing's crossings fixed,
