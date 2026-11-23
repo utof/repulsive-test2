@@ -14,10 +14,14 @@ const tmp = new THREE.Object3D();
 // @see spec §4.1 (scene/Curve) / §5 (transient-update pattern).
 export function Curve() {
     const edges = useSimStore((s) => s.graph.edges);
-    const count = useSimStore((s) => s.graph.vertices.length);
+    // Spheres mark the NODES of the graph only; interior points of subdivided edges (which
+    // follow the nodes in the vertex list) are drawn as bends of the line, not as nodes.
+    // @see src/core/subdivide.ts
+    const count = useSimStore((s) => s.nodeCount);
 
     // Task 10: LineSegmentsGeometry (fat lines) instead of plain BufferGeometry — positions are
     // written via setPositions() below rather than a raw 'position' BufferAttribute.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: `edges` is the REBUILD KEY — a new topology needs a new geometry (its instance count is fixed at first setPositions) — not a value read inside.
     const lineGeom = useMemo(() => new LineSegmentsGeometry(), [edges]);
 
     const meshRef = useRef<THREE.InstancedMesh>(null);

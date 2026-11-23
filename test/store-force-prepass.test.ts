@@ -100,3 +100,43 @@ describe('force-layout pre-pass (store)', () => {
         st().setRunning(false);
     });
 });
+
+describe('points per edge and the crossing switch (store)', () => {
+    beforeEach(() => {
+        st().setRunning(false);
+        st().setEdgeSubdivision(1);
+        st().setPreventCrossings(false);
+        st().setPreset('crossing');
+    });
+
+    test('subdividing rebuilds the graph and keeps the node count', () => {
+        const nodes = st().graph.vertices.length;
+        const edges = st().graph.edges.length;
+        expect(st().nodeCount).toBe(nodes);
+        const version = st().graphVersion;
+        st().setEdgeSubdivision(4);
+        expect(st().graphVersion).toBe(version + 1);
+        expect(st().nodeCount).toBe(nodes);
+        expect(st().graph.edges.length).toBe(4 * edges);
+        expect(st().graph.vertices.length).toBe(nodes + 3 * edges);
+        expect(st().live.length).toBe(st().graph.vertices.length);
+        expect(st().sobolevEll0.length).toBe(4 * edges);
+        // Out-of-range input is clamped, and "the same value" is not a rebuild.
+        st().setEdgeSubdivision(999);
+        expect(st().edgeSubdivision).toBe(16);
+        const v2 = st().graphVersion;
+        st().setEdgeSubdivision(16);
+        expect(st().graphVersion).toBe(v2);
+        st().setEdgeSubdivision(1);
+        expect(st().graph.edges.length).toBe(edges);
+    });
+
+    test('the crossing switch is off by default and is a plain flag', () => {
+        expect(st().preventCrossings).toBe(false);
+        st().setPreventCrossings(true);
+        expect(st().preventCrossings).toBe(true);
+        // The store is one module-level object shared by every test file in a run: leave it
+        // as found, or a later file (the GPU driver's) sees a config it does not serve.
+        st().setPreventCrossings(false);
+    });
+});

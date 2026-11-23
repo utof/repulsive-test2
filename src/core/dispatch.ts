@@ -13,6 +13,7 @@ import {
     sobolevStepSet,
     step,
 } from './optimizer';
+import { planarMotionCollides } from './planarCollision';
 import {
     assertValidConstraintSet,
     barycenterBlock,
@@ -233,6 +234,14 @@ export interface DispatchDescentStepArgs {
      * @see src/core/sobolev/hierarchical/directSolve.ts (directIsCheaper)
      */
     hierarchicalLinearSolver?: RingLinearSolver;
+    /**
+     * Refuse any line-search candidate on the way to which a vertex passes through an edge
+     * (Sobolev descent only). Plain data: the test itself is built here, on whichever thread
+     * runs the step. Today it acts on FLAT graphs only (every vertex at one z) and is a no-op
+     * on anything else. Absent or false ⇒ the step is unchanged, bit for bit.
+     * @see src/core/planarCollision.ts (why, and the paper's time-step rule it implements)
+     */
+    preventCrossings?: boolean;
 }
 
 /**
@@ -289,6 +298,19 @@ function refusedOutcome(args: DispatchDescentStepArgs, why: string): DescentStep
         timings: null,
         descentField: null,
     };
+}
+
+/**
+ * The line search's crossing guard for this step, as an options fragment: empty unless
+ * `preventCrossings` is set, so that every caller that does not ask for it passes exactly the
+ * options object it passed before.
+ */
+function crossingGuard(args: DispatchDescentStepArgs): {
+    guard?: (from: Vec3[], to: Vec3[]) => boolean;
+} {
+    if (!args.preventCrossings) return {};
+    const edges = args.edges;
+    return { guard: (from, to) => !planarMotionCollides(from, to, edges) };
 }
 
 /**
@@ -359,6 +381,7 @@ function hierarchicalSobolevStep(
                 dE,
                 saddle,
                 tpeEnergy: bh.energy,
+                ...crossingGuard(args),
             });
             msBuild += t1 - t0;
             msGradient += t2 - t1;
@@ -562,6 +585,7 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
             // penaltiesActive, bit-identical (plan §2.4).
             // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
             penalties: args.penalties,
+            ...crossingGuard(args),
             // Phase 1 GPU seam passthrough; undefined → core computes dE itself.
             // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "D5 — The seam"
             dE: args.dE,
@@ -645,6 +669,8 @@ export interface StepArgsSource {
     penalties: PenaltyConfig;
     /** Optional so sources that predate the option still type-check; absent ⇒ 'dense'. */
     sobolevSolver?: SobolevSolver;
+    /** Optional for the same reason; absent ⇒ no crossing guard. */
+    preventCrossings?: boolean;
 }
 
 /**
@@ -685,6 +711,7 @@ export function buildStepArgs(
         energyBefore,
         // Spread only when set: the args of a source without the field stay identical to before.
         ...(state.sobolevSolver !== undefined ? { sobolevSolver: state.sobolevSolver } : {}),
+        ...(state.preventCrossings ? { preventCrossings: true } : {}),
     };
 }
 
