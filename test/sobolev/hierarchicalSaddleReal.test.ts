@@ -72,6 +72,7 @@ import {
 } from '../../src/core/sobolev/linsolve';
 import { calculateDisjointPairs } from '../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
+import { lazy } from '../tier';
 
 setDefaultTimeout(900_000);
 
@@ -142,20 +143,6 @@ function makeIpA(Aflat: Float64Array, n: number) {
     };
 }
 
-/**
- * Memoise a zero-argument computation: computed on first call, shared afterwards. Why: the
- * describes below need a dense reference step that must NOT be computed in the describe body --
- * bun executes describe bodies at collection, even for a skipped describe and for a `-t` filtered
- * run, so body work was paid by every run of this file (44 s at n = 960). @see test/tier.ts
- */
-function lazy<T>(f: () => T): () => T {
-    let box: { v: T } | undefined;
-    return () => {
-        box ??= { v: f() };
-        return box.v;
-    };
-}
-
 const fixtureCache = new Map<number, ReturnType<typeof buildFixture>>();
 /**
  * The reusable n=960 / n=240 fixture, memoised per n. Why: two describes and the θ = 0 cell ask
@@ -220,7 +207,8 @@ const STEP = { mode: 'analytical' as const, projectionMode: 'frozen' as const, c
 // ---------------------------------------------------------------------------
 
 describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, trefoil', () => {
-    // Lazy, not describe-body work: see `lazy`.
+    // Lazy, not describe-body work (test/tier.ts `lazy`): bun runs describe bodies at
+    // collection, which cost every run of this file ~44 s at n = 960.
     const ref = lazy(() => {
         const f = fixture(960);
         const set: ConstraintSet = [barycenterBlock(offsetBaryTarget(f.vertices, f.edges))];
@@ -324,7 +312,8 @@ describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, 
 // ---------------------------------------------------------------------------
 
 describe('k = 0 (empty constraint set) against the dense reference, MOD TRANSLATION', () => {
-    // Lazy, not describe-body work: see `lazy`.
+    // Lazy, not describe-body work (test/tier.ts `lazy`): bun runs describe bodies at
+    // collection, which cost every run of this file ~44 s at n = 960.
     const arms = lazy(() => {
         const f = fixture(960);
         const dense = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, [], STEP);

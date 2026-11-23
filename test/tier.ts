@@ -25,3 +25,18 @@ export const fullTest = test.if(FULL);
 
 /** `describe` whose tests run only in the full tier. Why: see module doc (body still runs). */
 export const fullDescribe = describe.if(FULL);
+
+/**
+ * Memoise a zero-argument computation: computed on first call, shared afterwards.
+ * Why: bun executes describe bodies at collection, for skipped describes and `-t` filtered runs
+ * too, so a heavy reference built in a describe body is paid by every run of the file. Build it
+ * in a `lazy` getter the tests call instead. The value is SHARED between tests: treat it as
+ * read-only, and pass a copy to anything that mutates its input.
+ */
+export function lazy<T>(f: () => T): () => T {
+    let box: { v: T } | undefined;
+    return () => {
+        box ??= { v: f() };
+        return box.v;
+    };
+}

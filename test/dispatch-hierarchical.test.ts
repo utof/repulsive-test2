@@ -17,24 +17,13 @@ import { PAIR_LIST_MAX_N } from '../src/core/sobolevRoute';
 import { calculateDisjointPairs, calculateEnergy } from '../src/core/tangentPointEnergy';
 import { type Edge, testConfigs, type Vec3 } from '../src/core/testConfigs';
 import { buildGraphState } from '../src/store';
+import { lazy } from './tier';
 
 setDefaultTimeout(120_000);
 
 const { alpha: ALPHA, beta: BETA, epsilon: EPS } = DEFAULTS;
 const largeKnot = testConfigs.find((t) => t.id === 'knot-large');
 if (!largeKnot) throw new Error('the knot-large preset is missing');
-
-/**
- * Memoise a zero-argument computation: computed on first call, shared afterwards. Why: a dense
- * reference step that several tests compare against (see its use below).
- */
-function lazy<T>(f: () => T): () => T {
-    let box: { v: T } | undefined;
-    return () => {
-        box ??= { v: f() };
-        return box.v;
-    };
-}
 
 function argsFor(vertices: Vec3[], edges: Edge[], disjointPairs: number[][]) {
     return {
