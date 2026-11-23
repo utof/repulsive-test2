@@ -74,8 +74,10 @@ export interface BarnesHutOptions {
     /**
      * How the differential walks the tree. Default `'vertex'`; `'edge'` is the paper's literal
      * scheme, kept as a measured comparison. See {@link barnesHutGradient} for why they differ.
+     * `'auto'` is `'vertex'` unless a sampled count says the tree hardly engages, in which case
+     * the differential is summed EXACTLY, pair by pair (see `exactWalkIsCheaper`).
      */
-    traversal?: 'vertex' | 'edge';
+    traversal?: 'vertex' | 'edge' | 'auto';
     leafSize?: number;
     /**
      * Test-only defect switch, in the style of `SchurOptions.knockOut`.
@@ -116,7 +118,7 @@ export interface BarnesHutContext {
     incEdges: Int32Array;
     theta: number;
     thetaT: number;
-    traversal: 'vertex' | 'edge';
+    traversal: 'vertex' | 'edge' | 'auto';
     epsilon: number;
     checkAdjacency: boolean;
 }
@@ -233,6 +235,19 @@ function admissible(
 }
 
 /**
+ * Are the exponents the app's defaults, (α, β) = (3, 6)? Then `x³` and `x⁶` are formed by
+ * multiplication instead of `Math.pow`.
+ * Why it matters: on a tight tangle the far field hardly engages, so an evaluation is ~n² exact
+ * terms and `pow` was most of each one — measured on the 1 998-vertex dataset knot, the
+ * gradient's kernel time fell by about a sixth (3.9 s → 3.3 s) and an energy evaluation
+ * from 0.27 s to 0.18 s. Why it is allowed HERE and not in
+ * `tangentPointEnergy.ts`: that file is the bit-exact reference (its per-exponent `pow` is
+ * pinned by goldens); this module is an approximation whose results are compared with
+ * tolerances, and the two forms differ in the last bit or two only.
+ */
+const CUBE_OVER_SIXTH = (alpha: number, beta: number): boolean => alpha === 3 && beta === 6;
+
+/**
  * Barnes–Hut tangent-point energy. Same definition as `calculateEnergy` (ε after every norm, the
  * final `/2` for the doubly-counted ordered pairs); only the far field is approximated.
  * @see src/core/tangentPointEnergy.ts (calculateEnergy — the exact reference)
@@ -249,6 +264,7 @@ export function barnesHutEnergy(
     const stack = new Int32Array(2 * bvh.depth + 8);
     let farNodes = 0;
     let nearPairs = 0;
+    const cubeOverSixth = CUBE_OVER_SIXTH(alpha, beta);
 
     // f(d, e) = (‖e×d‖+ε)^α / (‖d‖+ε)^β — ε after the norm, as in calculateEnergy.
     const f = (ex: number, ey: number, ez: number, dx: number, dy: number, dz: number): number => {
@@ -257,6 +273,11 @@ export function barnesHutEnergy(
         const cz = ex * dy - ey * dx;
         const cNorm = Math.sqrt(cx * cx + cy * cy + cz * cz) + epsilon;
         const dNorm = Math.sqrt(dx * dx + dy * dy + dz * dz) + epsilon;
+        if (cubeOverSixth) {
+            // (α, β) = (3, 6) by multiplication — see CUBE_OVER_SIXTH.
+            const d2 = dNorm * dNorm;
+            return (cNorm * cNorm * cNorm) / (d2 * d2 * d2);
+        }
         return cNorm ** alpha / dNorm ** beta;
     };
 
@@ -367,6 +388,61 @@ function admissibleForVertex(ctx: BarnesHutContext, N: number, v: number, pad: n
 }
 
 /**
+ * Would the per-vertex walk do more kernel work than summing every pair exactly?
+ *
+ * Why the question arises: on a tight tangle almost no node is admissible, so the per-vertex
+ * walk degenerates to all pairs — and it visits every edge from both of its ends, i.e. TWICE
+ * the exact sum's work, for an answer that is the exact one anyway. Measured on the 1 998-vertex
+ * dataset knot (2026-11-23): 3.7 s per-vertex against 1.8 s exact at the start of its run
+ * (far nodes: 217), 2.0 s against 1.7 s after 20 steps, 0.49 s against 1.9 s after 40.
+ *
+ * The count is SAMPLED (every `stride`-th vertex, at most ~128 walks, no kernel evaluated) and
+ * scaled up: (edge at the vertex, source edge) leaf pairs plus (edge, far node) lumps, each
+ * costing about one kernel evaluation, against the `m²` evaluations of the exact sum.
+ */
+function exactWalkIsCheaper(ctx: BarnesHutContext): boolean {
+    const { bvh, m, n, incStart, incEdges } = ctx;
+    const { left, right, begin, end } = bvh;
+    if (ctx.theta === 0) return true;
+    const ell = (I: number): number => {
+        const a = ctx.E[2 * I];
+        const b = ctx.E[2 * I + 1];
+        return (
+            Math.hypot(
+                ctx.X[3 * b] - ctx.X[3 * a],
+                ctx.X[3 * b + 1] - ctx.X[3 * a + 1],
+                ctx.X[3 * b + 2] - ctx.X[3 * a + 2],
+            ) + ctx.epsilon
+        );
+    };
+    const stack = new Int32Array(2 * bvh.depth + 8);
+    const stride = Math.max(1, Math.floor(n / 128));
+    let work = 0;
+    let sampled = 0;
+    for (let v = 0; v < n; v += stride) {
+        const k0 = incStart[v];
+        const k1 = incStart[v + 1];
+        if (k0 === k1) continue;
+        sampled++;
+        let pad = 0;
+        for (let k = k0; k < k1; k++) pad = Math.max(pad, ell(incEdges[k]));
+        let sp = 0;
+        stack[sp++] = 0;
+        while (sp > 0) {
+            const N = stack[--sp];
+            if (left[N] < 0) work += (k1 - k0) * (end[N] - begin[N]);
+            else if (admissibleForVertex(ctx, N, v, pad)) work += k1 - k0;
+            else {
+                stack[sp++] = left[N];
+                stack[sp++] = right[N];
+            }
+        }
+    }
+    if (sampled === 0) return false;
+    return (work / sampled) * n > m * m;
+}
+
+/**
  * Barnes–Hut differential of the tangent-point energy, one `Vec3` per vertex.
  *
  * For each target edge `I` and each of its two vertices `a`, the exact differential is
@@ -434,6 +510,7 @@ export function barnesHutGradient(
         EDP[I] = (1 - alpha) * ELL[I] ** -alpha;
     }
 
+    const cubeOverSixth = CUBE_OVER_SIXTH(alpha, beta);
     // Outputs of `kd`, written to captured locals instead of a returned object: this runs
     // ~10⁷–10⁸ times per evaluation and must not allocate.
     let kF = 0;
@@ -453,11 +530,23 @@ export function barnesHutGradient(
         const cz = ex * dy - ey * dx;
         const rc = Math.sqrt(cx * cx + cy * cy + cz * cz);
         const cEps = rc + epsilon;
-        const cPowA = cEps ** alpha;
-        const dPowB = dEps ** beta;
+        let cPowA1: number; // cEps^(α−1)
+        let dPowB: number; // dEps^β
+        if (cubeOverSixth) {
+            // (α, β) = (3, 6) by multiplication — see CUBE_OVER_SIXTH.
+            const d2 = dEps * dEps;
+            cPowA1 = cEps * cEps;
+            dPowB = d2 * d2 * d2;
+        } else {
+            cPowA1 = cEps ** (alpha - 1);
+            dPowB = dEps ** beta;
+        }
+        // The neighbouring powers by one multiplication each, on both branches: two `pow`
+        // calls per term instead of four.
+        const cPowA = cPowA1 * cEps;
         kF = cPowA / dPowB;
-        const coeffC = (alpha * cEps ** (alpha - 1)) / dPowB;
-        const coeffD = rd < 1e-14 ? 0 : (-beta * cPowA) / (dEps ** (beta + 1) * rd);
+        const coeffC = (alpha * cPowA1) / dPowB;
+        const coeffD = rd < 1e-14 ? 0 : (-beta * cPowA) / (dPowB * dEps * rd);
         if (rc >= 1e-14) {
             const s = coeffC / rc;
             // ∂‖c‖/∂d = (c × e)/‖c‖,  ∂‖c‖/∂e = (d × c)/‖c‖
@@ -671,7 +760,10 @@ export function barnesHutGradient(
         cbz += w * (R * uz - ellI * dbz);
     };
 
-    if (ctx.traversal === 'edge') {
+    // `'auto'`: when the tree hardly engages, sum every pair exactly with the per-edge walk
+    // (no node is ever lumped, so the per-edge walk's far-field weakness does not apply).
+    const exactWalk = ctx.traversal === 'auto' && exactWalkIsCheaper(ctx);
+    if (ctx.traversal === 'edge' || exactWalk) {
         // The paper's walk: one traversal per target edge, both endpoints updated together.
         for (let I = 0; I < m; I++) {
             setTarget(I);
@@ -700,7 +792,7 @@ export function barnesHutGradient(
                         gbz += cbz;
                         nearPairs++;
                     }
-                } else if (admissible(ctx, N, mx, my, mz, halfEll, i1, i2, true)) {
+                } else if (!exactWalk && admissible(ctx, N, mx, my, mz, halfEll, i1, i2, true)) {
                     farNode(N);
                     gax += cax;
                     gay += cay;

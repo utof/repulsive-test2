@@ -21,7 +21,12 @@ import {
     pointBlock,
     totalLengthBlock,
 } from './sobolev/constraintSet';
-import { makeHierarchicalSaddle } from './sobolev/hierarchical/hierarchicalSaddle';
+import {
+    type DirectSaddle,
+    type HierarchicalSaddle,
+    makeRingSaddle,
+    type RingLinearSolver,
+} from './sobolev/hierarchical/hierarchicalSaddle';
 import type { PreparedSaddle } from './sobolev/linsolve';
 import type { PenaltyConfig } from './sobolev/penalties';
 import type { SobolevStepTimings } from './sobolev/phaseTimings';
@@ -220,6 +225,13 @@ export interface DispatchDescentStepArgs {
      * @see src/core/sobolevRoute.ts
      */
     sobolevSolver?: SobolevSolver;
+    /**
+     * Linear solver INSIDE the hierarchical route: `'auto'` (default) picks, per step, the
+     * tree + GMRES or the direct factorization, whichever the block lists say is cheaper.
+     * `'gmres'` / `'direct'` force one — for benchmarks that run both over the same fixtures.
+     * @see src/core/sobolev/hierarchical/directSolve.ts (directIsCheaper)
+     */
+    hierarchicalLinearSolver?: RingLinearSolver;
 }
 
 /**
@@ -245,7 +257,9 @@ export function graphEnergy(vertices: Vec3[], edges: Edge[], disjointPairs: numb
  */
 function barnesHutFor(input: Vec3[], edges: Edge[], theta?: number) {
     const { alpha, beta, epsilon } = DEFAULTS;
-    const opts = theta === undefined ? {} : { theta };
+    // 'auto': the differential is summed exactly where the tree would not save work
+    // (a tight tangle) — see `exactWalkIsCheaper` in barnesHut.ts.
+    const opts = { traversal: 'auto' as const, ...(theta === undefined ? {} : { theta }) };
     let inputCtx: BarnesHutContext | null = null;
     const ctxOf = (V: Vec3[]): BarnesHutContext => {
         if (V !== input) return prepareBarnesHut(V, edges, epsilon, opts);
@@ -308,13 +322,29 @@ function hierarchicalSobolevStep(
         let msBuild = 0;
         let msGradient = 0;
         let msStep = 0;
+        let msFactor = 0;
+        let direct: DirectSaddle | null = null;
+        let current: HierarchicalSaddle | DirectSaddle | null = null;
         const attempt = (acc: HierarchicalAccuracy, isCoarse: boolean) => {
             const bh = isCoarse ? bhCoarse : barnesHutFor(args.vertices, args.edges, acc.theta);
             const t0 = performance.now();
-            const saddle = makeHierarchicalSaddle(args.vertices, args.edges, null, {
-                schur: { tol: acc.tol, etaAccept: 1 },
-                normEstimate: 'trace',
-            });
+            // The linear solver is chosen for THIS geometry (tree + GMRES, or the direct
+            // factorization when the tree does not pay — `makeRingSaddle`). A direct saddle
+            // depends on the geometry only, not on `acc`, so the refined attempt reuses it.
+            if (!direct) {
+                const ring = makeRingSaddle(args.vertices, args.edges, {
+                    schur: { tol: acc.tol, etaAccept: 1 },
+                    normEstimate: 'trace',
+                    linearSolver: args.hierarchicalLinearSolver,
+                });
+                if (ring.solver === 'direct') {
+                    direct = ring.saddle as DirectSaddle;
+                    msFactor = direct.build.factorMs;
+                }
+                current = ring.saddle;
+            }
+            const saddle = direct ?? current;
+            if (!saddle) throw new Error('hierarchicalSobolevStep: no saddle was built');
             const t1 = performance.now();
             const dE = bh.gradient(args.vertices);
             const t2 = performance.now();
@@ -380,6 +410,9 @@ function hierarchicalSobolevStep(
                   ...r.timings,
                   dE: { ms: msGradient, calls: usedRefined ? 2 : 1 },
                   assembleA: { ms: msBuild, calls: usedRefined ? 2 : 1 },
+                  // Present only when the direct factorization ran — which is how a timing
+                  // ledger tells the two linear solvers of this route apart.
+                  ...(direct ? { factor: { ms: msFactor, calls: 1 } } : {}),
                   step: { ms: msStep, calls: 1 },
               }
             : null;
