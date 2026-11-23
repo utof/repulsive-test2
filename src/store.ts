@@ -1,11 +1,18 @@
 import { create } from 'zustand';
-import type { DescentMode, LengthMode, Mode, PinConstraint } from './core/dispatch';
-import { DEFAULTS, type ProjectionMode, type SobolevStepStats } from './core/optimizer';
+import {
+    type DescentMode,
+    graphEnergy,
+    type LengthMode,
+    type Mode,
+    type PinConstraint,
+} from './core/dispatch';
+import type { ProjectionMode, SobolevStepStats } from './core/optimizer';
 import { edgeLengths, totalLength } from './core/sobolev/constraintSet';
 import { barycenterTarget } from './core/sobolev/constraints';
 import type { PenaltyConfig } from './core/sobolev/penalties';
 import type { SobolevStepTimings } from './core/sobolev/phaseTimings';
-import { calculateDisjointPairs, calculateEnergy } from './core/tangentPointEnergy';
+import { pairListFits, type SobolevSolver } from './core/sobolevRoute';
+import { calculateDisjointPairs } from './core/tangentPointEnergy';
 import { type GraphState, type TestConfig, testConfigs, type Vec3 } from './core/testConfigs';
 
 /**
@@ -72,15 +79,14 @@ export interface GraphBuild {
 // Pure: build a graph from a preset + params, its disjoint pairs, and its energy.
 export function buildGraphState(test: TestConfig, params: Record<string, number>): GraphBuild {
     const graph = test.generate(params);
-    const disjointPairs = calculateDisjointPairs(graph.edges);
-    const energy = calculateEnergy(
-        graph.vertices,
-        graph.edges,
-        disjointPairs,
-        DEFAULTS.alpha,
-        DEFAULTS.beta,
-        DEFAULTS.epsilon,
-    );
+    // The pair list is n rows of ~n entries; above PAIR_LIST_MAX_N it is not built at all and
+    // stays `[]`. Every consumer either switches on the same `pairListFits` (the step, the energy,
+    // the arrows, the worker) or is unreachable at that size (the GPU driver).
+    // @see src/core/sobolevRoute.ts
+    const disjointPairs = pairListFits(graph.vertices.length)
+        ? calculateDisjointPairs(graph.edges)
+        : [];
+    const energy = graphEnergy(graph.vertices, graph.edges, disjointPairs);
     return { graph, disjointPairs, energy };
 }
 
@@ -172,6 +178,12 @@ export interface SimStore {
     // constraint set, so switching it never invalidates sobolevConverged.
     // @see docs/superpowers/plans/2026-07-03-sobolev-solver-perf.md (Task 6)
     projectionMode: ProjectionMode;
+    // Which Sobolev machinery the step uses: 'auto' (default) picks the hierarchical route —
+    // matrix-free solve, Barnes–Hut energy and differential — for closed loops from
+    // HIERARCHICAL_AUTO_MIN_N vertices up, and the dense exact route otherwise. Resolved per
+    // step by resolveSobolevRoute; a preference the graph cannot satisfy falls back.
+    // @see src/core/sobolevRoute.ts
+    sobolevSolver: SobolevSolver;
     // Interactive point pins (pin-drag milestone, briefing §5B). Each enabled pin
     // becomes a `pointBlock` in the sobolev ConstraintSet (dispatch, spec §5.3).
     // Default `[]`. FROZEN targets with the sobolevEll0 lifecycle (frozen-targets
@@ -254,6 +266,7 @@ export interface SimStore {
     setLengthMode(m: LengthMode): void;
     setLengthConstraint(b: boolean): void;
     setProjectionMode(m: ProjectionMode): void;
+    setSobolevSolver(s: SobolevSolver): void;
     // Pin actions (briefing §5B). addPin snapshots the vertex's CURRENT live
     // position as the frozen target (idempotent by vertexIndex); setPinTarget is
     // the drag re-target; removePin/setPinEnabled edit the list.
@@ -375,6 +388,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         barycenterConstraint: true,
         lengthConstraint: true,
         projectionMode: 'frozen',
+        sobolevSolver: 'auto',
         pins: [],
         // Penalties default ALL OFF (every weight 0 ⇒ penaltiesActive false ⇒
         // bit-identical threading, plan §2.4). field.X is a placeholder unit axis
@@ -438,6 +452,17 @@ export const useSimStore = create<SimStore>()((set, get) => {
         // Solver strategy, not a constraint toggle: leaves targets, stats, and
         // the converged verdict alone (see the projectionMode field anchor).
         setProjectionMode: (m) => set({ projectionMode: m }),
+        // Bumps penaltyEpoch on purpose. The two routes report DIFFERENT energies for the same
+        // vertices (exact vs Barnes–Hut, ~0.4 % apart), and the frame loop reuses the previous
+        // step's energy as the next Armijo baseline. That cache is invalidated by exactly one
+        // signal — "the objective's value changed under the same vertices" — which is what
+        // penaltyEpoch already means to the Viewer.
+        setSobolevSolver: (v) =>
+            set((s) => ({
+                sobolevSolver: v,
+                penaltyEpoch: s.penaltyEpoch + 1,
+                sobolevConverged: false,
+            })),
         // Pin actions (briefing §5B). A pin is a per-vertex point constraint; like
         // the other constraint toggles, mutating the pin set invalidates ONLY the
         // converged verdict (sobolevStats describe the last step taken and remain).
@@ -578,14 +603,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
             set({
                 running: false,
                 graph: { ...s.graph, vertices: cloneVerts(s.live) },
-                energy: calculateEnergy(
-                    s.live,
-                    s.graph.edges,
-                    s.disjointPairs,
-                    DEFAULTS.alpha,
-                    DEFAULTS.beta,
-                    DEFAULTS.epsilon,
-                ),
+                energy: graphEnergy(s.live, s.graph.edges, s.disjointPairs),
                 // Vertex commit = the next run will start from these positions →
                 // re-anchor x₀, L⁰, ℓ⁰ now (frozen-targets lifecycle anchor). Diagnostics
                 // are deliberately KEPT: on auto-pause they tell the user why it stopped.

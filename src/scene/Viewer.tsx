@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
 import * as THREE from 'three/webgpu';
+import { resolveSobolevRoute } from '../core/sobolevRoute';
 import { GpuDriver, gpuStepSupported, gpuTopologySupported } from '../gpu/driver';
 import { runGpuSelfTest } from '../gpu/selfTest';
 import {
@@ -125,7 +126,11 @@ function Simulation() {
     // driver's last-line-of-defense are computed from the SAME topology snapshot.
     // @see src/gpu/driver.ts — gpuTopologySupported
     // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
-    const pairCountRef = useRef({ gv: -1, pairCount: 0 });
+    // `hierarchical`: does this graph's Sobolev step take the hierarchical route? Cached with the
+    // pair count for the same reason (the ring check is O(n)); keyed additionally on the two
+    // settings the route depends on.
+    // @see src/core/sobolevRoute.ts
+    const pairCountRef = useRef({ gv: -1, pairCount: 0, key: '', hierarchical: false });
 
     // §D8: the SINGLE result-application path shared by both drivers — in-place
     // `live` mutation, E₀ caching, target-length schedule advance on accepted
@@ -393,15 +398,31 @@ function Simulation() {
             // backend's own epoch/gv rule.
             // @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md — "1. Scope"
             // @see docs/superpowers/plans/2026-08-29-webgpu-solver-phase1.md — "Task 7: Viewer + ControlPanel integration"
-            if (pairCountRef.current.gv !== st.graphVersion)
+            const routeKey = `${st.sobolevSolver}/${st.mode}`;
+            if (
+                pairCountRef.current.gv !== st.graphVersion ||
+                pairCountRef.current.key !== routeKey
+            )
                 pairCountRef.current = {
                     gv: st.graphVersion,
                     pairCount: st.disjointPairs.reduce((n, p) => n + p.length, 0),
+                    key: routeKey,
+                    hierarchical:
+                        resolveSobolevRoute(
+                            st.sobolevSolver,
+                            st.live.length,
+                            st.graph.edges,
+                            st.mode === 'analytical',
+                        ) !== 'dense',
                 };
+            // The 'gpu' driver computes dE on the GPU from the pair list and then runs the DENSE
+            // solve. A step that resolves to the hierarchical route (or to no route) has neither,
+            // so it goes to the worker, like every other config 'gpu' does not serve.
             const useWorker =
                 st.solverDriver === 'worker' ||
                 (st.solverDriver === 'gpu' &&
                     (!gpuStepSupported(st) ||
+                        pairCountRef.current.hierarchical ||
                         !gpuTopologySupported(
                             st.graph.edges.length,
                             pairCountRef.current.pairCount,

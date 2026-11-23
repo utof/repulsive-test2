@@ -1,5 +1,13 @@
 import {
+    type BarnesHutContext,
+    barnesHutEnergy,
+    barnesHutGradient,
+    prepareBarnesHut,
+} from './barnesHut';
+import {
+    DEFAULTS,
     type ProjectionMode,
+    SOBOLEV_CONVERGENCE_TOL,
     type SobolevStepStats,
     sobolevStep,
     sobolevStepSet,
@@ -13,9 +21,19 @@ import {
     pointBlock,
     totalLengthBlock,
 } from './sobolev/constraintSet';
+import { makeHierarchicalSaddle } from './sobolev/hierarchical/hierarchicalSaddle';
 import type { PreparedSaddle } from './sobolev/linsolve';
 import type { PenaltyConfig } from './sobolev/penalties';
 import type { SobolevStepTimings } from './sobolev/phaseTimings';
+import {
+    HIERARCHICAL_ACCURACY,
+    type HierarchicalAccuracy,
+    needsRefinement,
+    pairListFits,
+    resolveSobolevRoute,
+    type SobolevSolver,
+} from './sobolevRoute';
+import { calculateEnergy } from './tangentPointEnergy';
 import type { Edge, Vec3 } from './testConfigs';
 
 // Worker-prep extraction (§D2): dispatchDescentStep + its arg/result types +
@@ -195,6 +213,192 @@ export interface DispatchDescentStepArgs {
      * @issue utof/repulsive-test2#62
      */
     saddle?: PreparedSaddle;
+    /**
+     * Which Sobolev machinery to use; resolved against the graph by `resolveSobolevRoute`.
+     * Plain data (unlike `saddle`), so it crosses the worker boundary: the worker builds the
+     * hierarchical solver itself, inside `dispatchDescentStep`. Absent ⇒ 'dense'.
+     * @see src/core/sobolevRoute.ts
+     */
+    sobolevSolver?: SobolevSolver;
+}
+
+/**
+ * The tangent-point energy of a graph, by whichever evaluation its size allows: the exact
+ * all-pairs sum while the pair list exists ({@link pairListFits}), Barnes–Hut above that.
+ * Why one helper: the store shows this number on load and on commit, and the step returns it;
+ * all three must switch at the same size or the display jumps by the Barnes–Hut offset (~0.4 %).
+ * @see src/core/barnesHut.ts
+ */
+export function graphEnergy(vertices: Vec3[], edges: Edge[], disjointPairs: number[][]): number {
+    const { alpha, beta, epsilon } = DEFAULTS;
+    if (pairListFits(vertices.length))
+        return calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon);
+    return barnesHutEnergy(prepareBarnesHut(vertices, edges, epsilon), alpha, beta);
+}
+
+/**
+ * Barnes–Hut energy and differential for one step at opening parameter `theta`: the tree at the
+ * step's INPUT vertices is built once and shared by E₀ and dE; every other geometry (a
+ * line-search trial) gets its own tree.
+ * Why keyed on array identity: the step passes its input array through unchanged, and every
+ * trial is a fresh array.
+ */
+function barnesHutFor(input: Vec3[], edges: Edge[], theta?: number) {
+    const { alpha, beta, epsilon } = DEFAULTS;
+    const opts = theta === undefined ? {} : { theta };
+    let inputCtx: BarnesHutContext | null = null;
+    const ctxOf = (V: Vec3[]): BarnesHutContext => {
+        if (V !== input) return prepareBarnesHut(V, edges, epsilon, opts);
+        inputCtx ??= prepareBarnesHut(V, edges, epsilon, opts);
+        return inputCtx;
+    };
+    return {
+        energy: (V: Vec3[]): number => barnesHutEnergy(ctxOf(V), alpha, beta),
+        gradient: (V: Vec3[]): Vec3[] => barnesHutGradient(ctxOf(V), alpha, beta),
+    };
+}
+
+/**
+ * "Nothing can step this graph": echo the input and report a rejected step, so the frame loop
+ * auto-pauses instead of crashing. Why not throw: a thrown step sends the worker down the
+ * worker→main fallback chain, and the main path then throws again inside the frame loop.
+ */
+function refusedOutcome(args: DispatchDescentStepArgs, why: string): DescentStepOutcome {
+    console.warn(`dispatchDescentStep: ${why}`);
+    return {
+        vertices: args.vertices,
+        energy: args.energyBefore ?? graphEnergy(args.vertices, args.edges, args.disjointPairs),
+        accepted: false,
+        converged: false,
+        stats: null,
+        timings: null,
+        descentField: null,
+    };
+}
+
+/**
+ * One Sobolev step on the hierarchical route: matrix-free BCT solve, Barnes–Hut energy and
+ * differential, frozen projection. Never reads `disjointPairs`. Returns `null` when the
+ * hierarchical solver refuses this constraint set or fails, so the caller can fall back.
+ *
+ * TWO ATTEMPTS AT MOST (`HIERARCHICAL_ACCURACY`, which records the measurements): the coarse
+ * setting first, and the refined one only if `needsRefinement` rejects the coarse result. The
+ * coarse attempt is then discarded, not built upon.
+ *
+ * THE RETURNED `energy` IS ALWAYS THE COARSE-θ ENERGY of the returned vertices, whichever attempt
+ * produced them. The frame loop feeds that number back as the next step's `energyBefore`, and the
+ * next step starts coarse; a refined-θ energy there would be off by the difference between the
+ * two approximations (measured 6e-2 against per-step decreases of 1e-5) and would corrupt the
+ * Armijo test. For the same reason the refined attempt ignores `energyBefore` and evaluates its
+ * own E₀.
+ *
+ * Solver configuration: the backward-error certificate is off (`etaAccept: 1`), because the line
+ * search is what guards a descent step, and `‖A_σ‖₂` is the O(1) trace bound, which only that
+ * certificate would have used. `projectionMode` is forced to `'frozen'`: the other mode
+ * reassembles a dense Ā per projection iterate, and `sobolevStepSet` throws on that combination.
+ * @see src/core/sobolevRoute.ts (HIERARCHICAL_ACCURACY, needsRefinement)
+ */
+function hierarchicalSobolevStep(
+    args: DispatchDescentStepArgs,
+    set: ConstraintSet,
+): DescentStepOutcome | null {
+    try {
+        const [coarse, refined] = HIERARCHICAL_ACCURACY;
+        const bhCoarse = barnesHutFor(args.vertices, args.edges, coarse.theta);
+        let msBuild = 0;
+        let msGradient = 0;
+        let msStep = 0;
+        const attempt = (acc: HierarchicalAccuracy, isCoarse: boolean) => {
+            const bh = isCoarse ? bhCoarse : barnesHutFor(args.vertices, args.edges, acc.theta);
+            const t0 = performance.now();
+            const saddle = makeHierarchicalSaddle(args.vertices, args.edges, null, {
+                schur: { tol: acc.tol, etaAccept: 1 },
+                normEstimate: 'trace',
+            });
+            const t1 = performance.now();
+            const dE = bh.gradient(args.vertices);
+            const t2 = performance.now();
+            const r = sobolevStepSet(args.vertices, args.edges, [], set, {
+                mode: 'analytical',
+                collectTimings: args.collectTimings,
+                collectField: args.collectField,
+                energyBefore: isCoarse ? args.energyBefore : undefined,
+                projectionMode: 'frozen',
+                penalties: args.penalties,
+                dE,
+                saddle,
+                tpeEnergy: bh.energy,
+            });
+            msBuild += t1 - t0;
+            msGradient += t2 - t1;
+            msStep += (r.timings?.step?.ms ?? 0) + (t2 - t0);
+            return r;
+        };
+
+        let r = attempt(coarse, true);
+        let usedRefined = false;
+        if (
+            needsRefinement(
+                {
+                    accepted: r.accepted,
+                    converged: r.converged,
+                    gradientL2Norm: r.stats.gradientL2Norm,
+                    tau: r.stats.tau,
+                },
+                SOBOLEV_CONVERGENCE_TOL,
+            )
+        ) {
+            r = attempt(refined, false);
+            usedRefined = true;
+        }
+
+        // A refined attempt that found no step, this close to the tolerance, is the route's
+        // accuracy limit and is reported as such (see SobolevStepFailureReason).
+        const stats =
+            usedRefined &&
+            !r.accepted &&
+            !r.converged &&
+            r.stats.gradientL2Norm < 10 * SOBOLEV_CONVERGENCE_TOL
+                ? { ...r.stats, reason: 'accuracy_floor' as const }
+                : r.stats;
+
+        // Coarse-θ energy of whatever is returned — see the TSDoc. A coarse result already
+        // carries it; a refined one is re-measured (accepted: the new vertices; otherwise the
+        // input, whose coarse energy is `energyBefore` when the caller supplied it).
+        const energy = !usedRefined
+            ? r.energy
+            : r.accepted
+              ? bhCoarse.energy(r.vertices)
+              : (args.energyBefore ?? bhCoarse.energy(args.vertices));
+
+        // The step's own collector only times what runs inside it; the tree-based differential
+        // and the operator build ran out here, so they are added under the keys the dense route
+        // uses for the same two jobs (`dE`, `assembleA`). With a refined attempt the three
+        // totals cover BOTH attempts; the per-phase entries are the last attempt's.
+        const timings = r.timings
+            ? {
+                  ...r.timings,
+                  dE: { ms: msGradient, calls: usedRefined ? 2 : 1 },
+                  assembleA: { ms: msBuild, calls: usedRefined ? 2 : 1 },
+                  step: { ms: msStep, calls: 1 },
+              }
+            : null;
+        return {
+            vertices: r.vertices,
+            energy,
+            accepted: r.accepted,
+            converged: r.converged,
+            stats,
+            timings,
+            descentField: r.descentField ?? null,
+        };
+    } catch (err) {
+        console.warn(
+            'dispatchDescentStep: hierarchical route failed for this step:',
+            err instanceof Error ? err.message : err,
+        );
+        return null;
+    }
 }
 
 /**
@@ -283,6 +487,27 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
         // Construction-time rank-rule check (spec §3.4) — validate the set once
         // here, not per-iterate inside sobolevStepSet.
         assertValidConstraintSet(set);
+        // Route (sobolevRoute.ts). `sobolevSolver` absent means 'dense', so every caller that
+        // predates the option — and every graph small enough to have a pair list — runs exactly
+        // the code below, unchanged.
+        const route = resolveSobolevRoute(
+            args.sobolevSolver ?? 'dense',
+            args.vertices.length,
+            args.edges,
+            args.mode === 'analytical',
+        );
+        if (route === 'hierarchical') {
+            const h = hierarchicalSobolevStep(args, set);
+            if (h) return h;
+        }
+        if (route === null || !pairListFits(args.vertices.length)) {
+            return refusedOutcome(
+                args,
+                route === null
+                    ? `no Sobolev route for ${args.vertices.length} vertices that are not one closed loop: the dense route needs the pair list, which stops at PAIR_LIST_MAX_N`
+                    : 'the hierarchical route failed and the graph is too large for the dense one',
+            );
+        }
         const r = sobolevStepSet(args.vertices, args.edges, args.disjointPairs, set, {
             mode: args.mode,
             collectTimings: args.collectTimings,
@@ -316,6 +541,27 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
             // §D14: the full-set g̃ (null when not collected or singular saddle).
             // @see plan §D14 / issue #9.
             descentField: r.descentField ?? null,
+        };
+    }
+    if (!pairListFits(args.vertices.length)) {
+        // Raw descent above the pair-list limit: the same update, v − stepSize·dE, with the
+        // Barnes–Hut differential and energy. 'finiteDiff' has no large-n form (it would need
+        // one energy evaluation per coordinate), so both modes use the analytical differential.
+        const bh = barnesHutFor(args.vertices, args.edges);
+        const grad = bh.gradient(args.vertices);
+        const next: Vec3[] = args.vertices.map((v, i) => [
+            v[0] - args.stepSize * grad[i][0],
+            v[1] - args.stepSize * grad[i][1],
+            v[2] - args.stepSize * grad[i][2],
+        ]);
+        return {
+            vertices: next,
+            energy: bh.energy(next),
+            accepted: true,
+            converged: false,
+            stats: null,
+            timings: null,
+            descentField: args.collectField ? grad : null,
         };
     }
     const r = step(args.vertices, args.edges, args.disjointPairs, {
@@ -358,6 +604,8 @@ export interface StepArgsSource {
     pins: PinConstraint[];
     projectionMode: ProjectionMode;
     penalties: PenaltyConfig;
+    /** Optional so sources that predate the option still type-check; absent ⇒ 'dense'. */
+    sobolevSolver?: SobolevSolver;
 }
 
 /**
@@ -396,6 +644,8 @@ export function buildStepArgs(
         // Reuse the previous accepted step's E₀ (undefined on a run's first step
         // → fresh recompute). @see plan §2 / solver-perf Task 4.
         energyBefore,
+        // Spread only when set: the args of a source without the field stay identical to before.
+        ...(state.sobolevSolver !== undefined ? { sobolevSolver: state.sobolevSolver } : {}),
     };
 }
 
