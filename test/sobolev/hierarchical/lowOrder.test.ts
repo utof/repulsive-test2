@@ -45,6 +45,7 @@ import {
     prepareLowOrder,
 } from '../../../src/core/sobolev/hierarchical/lowOrder';
 import type { Edge, Vec3 } from '../../../src/core/testConfigs';
+import { fullTest } from '../../tier';
 import { eigAt, RANK_TOL_REL, spectrum, type Tridiag } from './denseSpectrum';
 
 setDefaultTimeout(900_000);
@@ -946,7 +947,10 @@ describe('H5 property 1: dim null(L^{2−s}) == 1 (vertex) / 2 (rs-identity)', (
 });
 
 describe('lowOrder: cost, against spec §3’s DERIVED +25 %', () => {
-    test('one 3-column L^{2−s} apply vs one 12-column A matvec at n=960', () => {
+    // FULL TIER ONLY (test/tier.ts). Why: a wall-clock instrument that only LOGS (it asserts > 0),
+    // and its own comment records a 2.2x isolated-vs-in-suite swing; it checks nothing a default
+    // run needs (README.md "Tests").
+    fullTest('one 3-column L^{2−s} apply vs one 12-column A matvec at n=960', () => {
         const n = 960;
         const { bvh, Lo } = prep(n, THETA, 'vertex');
         const bct = buildBct(bvh, { theta: THETA });

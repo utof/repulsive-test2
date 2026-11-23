@@ -18,6 +18,7 @@ import {
     triResidual,
 } from '../../../src/core/sobolev/hierarchical/laplacian';
 import type { Edge, Vec3 } from '../../../src/core/testConfigs';
+import { fullTest } from '../../tier';
 
 function chainEdges(n: number, closed: boolean): Edge[] {
     const e: Edge[] = [];
@@ -265,24 +266,31 @@ describe('topology and singularity are named errors', () => {
 });
 
 describe('O(N) scaling', () => {
-    test('ns/vertex at n=100000 within 4x of n=1000 (measured mass=1 range 25.07-73.01 ns/vtx incl. the n=960 row; 4x is slack)', () => {
-        const per = (n: number): number => {
-            const sys = assembleCurveLaplacian(torusKnot(n), chainEdges(n, true));
-            const ws = makeLaplacianWorkspace(n);
-            const r = rhs(n, 5);
-            const x = new Float64Array(n);
-            const reps = n < 10000 ? 400 : 15;
-            for (let k = 0; k < 5; k++) solveLaplacian(sys, r, x, ws);
-            let best = Infinity;
-            for (let k = 0; k < reps; k++) {
-                const t0 = performance.now();
-                solveLaplacian(sys, r, x, ws);
-                best = Math.min(best, performance.now() - t0);
-            }
-            return (best * 1e6) / n;
-        };
-        const small = per(1000);
-        const big = per(100000);
-        expect(big).toBeLessThan(4 * small);
-    });
+    // FULL TIER ONLY (test/tier.ts). Why: a wall-clock ratio, i.e. a load-dependent instrument
+    // (the default runner puts four test files on the CPU at once); best-of-N protects it and it
+    // passed under 4-way load, but a per-merge run should not hinge on load. An O(N) -> O(N log N)
+    // regression in `solveLaplacian` is now seen at the next full run (README.md "Tests").
+    fullTest(
+        'ns/vertex at n=100000 within 4x of n=1000 (measured mass=1 range 25.07-73.01 ns/vtx incl. the n=960 row; 4x is slack)',
+        () => {
+            const per = (n: number): number => {
+                const sys = assembleCurveLaplacian(torusKnot(n), chainEdges(n, true));
+                const ws = makeLaplacianWorkspace(n);
+                const r = rhs(n, 5);
+                const x = new Float64Array(n);
+                const reps = n < 10000 ? 400 : 15;
+                for (let k = 0; k < 5; k++) solveLaplacian(sys, r, x, ws);
+                let best = Infinity;
+                for (let k = 0; k < reps; k++) {
+                    const t0 = performance.now();
+                    solveLaplacian(sys, r, x, ws);
+                    best = Math.min(best, performance.now() - t0);
+                }
+                return (best * 1e6) / n;
+            };
+            const small = per(1000);
+            const big = per(100000);
+            expect(big).toBeLessThan(4 * small);
+        },
+    );
 });

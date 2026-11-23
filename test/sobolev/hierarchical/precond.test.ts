@@ -1290,7 +1290,10 @@ describe('precond: the default mass weight is 30/ext² (issue #72, amendment A20
 });
 
 describe('precond: cost per application (spec §5.2 trap 1, the half that is measurable here)', () => {
-    test('Ã⁻¹ vs A_σ wall-clock, n=64 and n=960', () => {
+    // FULL TIER ONLY (test/tier.ts). Why: a wall-clock instrument that only LOGS (it asserts > 0),
+    // and its own comment records a 2.2x isolated-vs-in-suite swing; it checks nothing a default
+    // run needs (README.md "Tests").
+    fullTest('Ã⁻¹ vs A_σ wall-clock, n=64 and n=960', () => {
         // Spec §5.2 trap 1, VERBATIM: "The RS preconditioner is **worse than no
         // preconditioner below n ≈ 223.** Unpreconditioned GMRES needs 45 iterations at n=64 where
         // RS needs 29, but the crossover is real and the dense path stays the right answer at
