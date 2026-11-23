@@ -24,6 +24,18 @@ const { alpha: ALPHA, beta: BETA, epsilon: EPS } = DEFAULTS;
 const largeKnot = testConfigs.find((t) => t.id === 'knot-large');
 if (!largeKnot) throw new Error('the knot-large preset is missing');
 
+/**
+ * Memoise a zero-argument computation: computed on first call, shared afterwards. Why: a dense
+ * reference step that several tests compare against (see its use below).
+ */
+function lazy<T>(f: () => T): () => T {
+    let box: { v: T } | undefined;
+    return () => {
+        box ??= { v: f() };
+        return box.v;
+    };
+}
+
 function argsFor(vertices: Vec3[], edges: Edge[], disjointPairs: number[][]) {
     return {
         descentMode: 'sobolev',
@@ -59,6 +71,19 @@ describe('n = 480 trefoil: the two routes take the same step', () => {
         { solver: 'gmres', total: 5e-3, pin: 5e-2, perEdge: 1e-2, pinHeld: 1e-4 },
         { solver: 'direct', total: 1e-9, pin: 1e-9, perEdge: 1e-9, pinHeld: 1e-12 },
     ] as const;
+    // The dense reference steps of the pinned and per-edge tests depend on neither solver, so
+    // they are computed once, on first use, instead of once per solver. Why: the per-edge one is
+    // a 1923-dim dense saddle, and the repeat cost ~3.5 s (test-suite review 2026-11-24,
+    // README.md "Tests"). Each call gets its own fresh `pins` array, as before.
+    const pinsAt10 = () => [
+        { vertexIndex: 10, target: [...g.vertices[10]] as Vec3, enabled: true },
+    ];
+    const densePinned = lazy(() =>
+        dispatchDescentStep({ ...base, pins: pinsAt10(), sobolevSolver: 'dense' }),
+    );
+    const densePerEdge = lazy(() =>
+        dispatchDescentStep({ ...base, lengthMode: 'perEdge', sobolevSolver: 'dense' }),
+    );
     for (const bar of SOLVERS) {
         const hierarchical = (extra: Partial<DispatchDescentStepArgs> = {}) =>
             dispatchDescentStep({
@@ -84,8 +109,8 @@ describe('n = 480 trefoil: the two routes take the same step', () => {
         });
 
         test(`${bar.solver}: with a pinned vertex`, () => {
-            const pins = [{ vertexIndex: 10, target: [...g.vertices[10]] as Vec3, enabled: true }];
-            const d = dispatchDescentStep({ ...base, pins, sobolevSolver: 'dense' });
+            const pins = pinsAt10();
+            const d = densePinned();
             const h = hierarchical({ pins });
             expect(h.accepted).toBe(true);
             const dD = e0 - exact(d.vertices);
@@ -98,11 +123,7 @@ describe('n = 480 trefoil: the two routes take the same step', () => {
         });
 
         test(`${bar.solver}: with every edge length fixed`, () => {
-            const d = dispatchDescentStep({
-                ...base,
-                lengthMode: 'perEdge',
-                sobolevSolver: 'dense',
-            });
+            const d = densePerEdge();
             const h = hierarchical({ lengthMode: 'perEdge' });
             expect(h.accepted).toBe(true);
             const dD = e0 - exact(d.vertices);
