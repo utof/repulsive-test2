@@ -4,6 +4,9 @@
   "scripts": {
     "dev": "bun --hot ./server.ts",
     "bench": "bun bench/sobolev.bench.ts",
+    "test": "bun scripts/test.ts",
+    "test:full": "bun scripts/test.ts --full",
+    "test:serial": "bun test",
     "format": "biome format --write",
     "lint": "biome lint",
     "check": "biome check --write",
