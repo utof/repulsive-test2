@@ -24,7 +24,7 @@ import {
 import {
     type DirectSaddle,
     type HierarchicalSaddle,
-    makeRingSaddle,
+    makeAutoSaddle,
     type RingLinearSolver,
 } from './sobolev/hierarchical/hierarchicalSaddle';
 import type { PreparedSaddle } from './sobolev/linsolve';
@@ -33,6 +33,7 @@ import type { SobolevStepTimings } from './sobolev/phaseTimings';
 import {
     HIERARCHICAL_ACCURACY,
     type HierarchicalAccuracy,
+    isClosedNaturalRing,
     needsRefinement,
     pairListFits,
     resolveSobolevRoute,
@@ -329,10 +330,10 @@ function hierarchicalSobolevStep(
             const bh = isCoarse ? bhCoarse : barnesHutFor(args.vertices, args.edges, acc.theta);
             const t0 = performance.now();
             // The linear solver is chosen for THIS geometry (tree + GMRES, or the direct
-            // factorization when the tree does not pay — `makeRingSaddle`). A direct saddle
+            // factorization when the tree does not pay — `makeAutoSaddle`). A direct saddle
             // depends on the geometry only, not on `acc`, so the refined attempt reuses it.
             if (!direct) {
-                const ring = makeRingSaddle(args.vertices, args.edges, {
+                const ring = makeAutoSaddle(args.vertices, args.edges, {
                     schur: { tol: acc.tol, etaAccept: 1 },
                     normEstimate: 'trace',
                     linearSolver: args.hierarchicalLinearSolver,
@@ -529,7 +530,12 @@ export function dispatchDescentStep(args: DispatchDescentStepArgs): DescentStepO
             args.edges,
             args.mode === 'analytical',
         );
-        if (route === 'hierarchical') {
+        // A graph that is not one closed loop has no solver for per-edge length rows on this
+        // route (`makeDirectSaddle`), so that combination goes straight to the dense route
+        // instead of failing there first on every step.
+        const perEdgeOnGraph =
+            args.lengthMode === 'perEdge' && !isClosedNaturalRing(args.vertices.length, args.edges);
+        if (route === 'hierarchical' && !perEdgeOnGraph) {
             const h = hierarchicalSobolevStep(args, set);
             if (h) return h;
         }

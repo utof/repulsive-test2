@@ -172,7 +172,7 @@ export interface HierarchicalSaddleOptions {
     normEstimate?: 'power' | 'trace';
     /**
      * A tree and block lists already built for THESE vertices and edges with the same `leafSize`,
-     * `epsilon` and `bct` parameters. Why: `makeRingSaddle` builds them first to decide between
+     * `epsilon` and `bct` parameters. Why: `makeAutoSaddle` builds them first to decide between
      * this route and the direct one, and must not pay for them twice.
      */
     prebuilt?: { bvh: Bvh; bct: Bct };
@@ -406,6 +406,7 @@ function prepareForConstraints(
     C: number[][],
     schur: SchurOptions | undefined,
     normA2: number,
+    ring = true,
 ): SchurSolver | NullspaceSolver {
     // §8.2's FORK. It routes PER BLOCK — `barycenter`/`point`/`totalLength` (`O(1)` rows)
     // to the Schur complement, `edgeLengthsBlock`'s `|E|` rows to the nullspace route — so
@@ -428,6 +429,14 @@ function prepareForConstraints(
     // direction (`NullspaceOptions.normA2`). It estimates its own, once, on the projected
     // operator.
     const rowStart = findEdgeLengthsRows(C, vertices, edges);
+    if (rowStart !== null && !ring) {
+        // The nullspace route's projector is built on the cyclic structure of ONE closed loop
+        // (`nullspace.ts`); a graph's |E| length rows have no solver here yet.
+        throw new HierarchicalSaddleUnsupportedError(
+            'topology',
+            'per-edge length constraints are supported on one closed loop only',
+        );
+    }
     if (rowStart !== null) {
         return prepareNullspace(
             op,
@@ -604,13 +613,28 @@ export interface DirectSaddle extends HierarchicalPreparedSaddle {
 const DIRECT_GMRES_TOL = 1e-10;
 
 /**
- * Build the direct route for a closed ring. Returns `null` when it does not apply — more than
- * {@link DIRECT_MAX_N} vertices, or a factorization that met a non-positive pivot — and throws
- * {@link HierarchicalSaddleUnsupportedError} for a topology the constraint machinery cannot
- * serve, exactly as {@link makeHierarchicalSaddle} does.
+ * Constraint rows the direct route's Schur complement accepts by default: barycentre (3) +
+ * total length (1) + 20 pins (60). Why more than `SCHUR_MAX_K`'s 16: that cap prices a column
+ * at one GMRES run; here a column is one triangular solve pair and one matvec (60 ms at
+ * n = 2 000), so the route stays cheap well past a handful of pins.
+ */
+const DIRECT_MAX_K = 64;
+
+/**
+ * Build the direct route. Returns `null` when it does not apply — more than
+ * {@link DIRECT_MAX_N} vertices, or a factorization that failed (see `makeDirectSolve`).
+ *
+ * ANY GRAPH, not only a closed ring: the exact assembly sums over every pair of edges that
+ * share no vertex, and the Schur complement asks nothing of the topology. That makes this the
+ * fast route for graphs with junctions, open chains and several components — which the tree
+ * route does not serve (@issue utof/repulsive-test2#93). The one exception is a per-edge
+ * length constraint: its |E| rows need the nullspace route, which is ring-only, so `prepare`
+ * throws {@link HierarchicalSaddleUnsupportedError} for that set on a non-ring.
  *
  * Only `alpha`, `beta`, `epsilon` and `schur` of the options are read. `schur.tol` is replaced
- * by {@link DIRECT_GMRES_TOL}; `schur.etaAccept` is kept, and is trivially met.
+ * by {@link DIRECT_GMRES_TOL} (used by the nullspace route only; the Schur route applies the
+ * exact inverse directly, `SchurOptions.exactInverse`); `schur.maxK` defaults to
+ * {@link DIRECT_MAX_K}; `schur.etaAccept` is kept, and is trivially met.
  */
 export function makeDirectSaddle(
     vertices: Vec3[],
@@ -618,8 +642,13 @@ export function makeDirectSaddle(
     opts: HierarchicalSaddleOptions = {},
 ): DirectSaddle | null {
     const n = vertices.length;
-    assertClosedNaturalRing(vertices, edges);
-    if (n > DIRECT_MAX_N) return null;
+    if (n > DIRECT_MAX_N || n < 2 || edges.length === 0) return null;
+    let ring = true;
+    try {
+        assertClosedNaturalRing(vertices, edges);
+    } catch {
+        ring = false;
+    }
     const alpha = opts.alpha ?? DEFAULTS.alpha;
     const beta = opts.beta ?? DEFAULTS.beta;
     const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
@@ -628,7 +657,12 @@ export function makeDirectSaddle(
     const { op, precond } = direct;
     // A is positive semidefinite with trace n·σ, and the shift adds at most σ.
     const normA2 = opts.schur?.normA2 ?? (n + 1) * op.sigma;
-    const schur: SchurOptions = { ...opts.schur, tol: DIRECT_GMRES_TOL };
+    const schur: SchurOptions = {
+        ...opts.schur,
+        tol: DIRECT_GMRES_TOL,
+        maxK: opts.schur?.maxK ?? DIRECT_MAX_K,
+        exactInverse: true,
+    };
     return {
         kind: 'hierarchical',
         op,
@@ -643,7 +677,7 @@ export function makeDirectSaddle(
             factorMs: direct.factorMs,
         },
         prepare: (C: number[][]): SchurSolver | NullspaceSolver =>
-            prepareForConstraints(op, precond, vertices, edges, C, schur, normA2),
+            prepareForConstraints(op, precond, vertices, edges, C, schur, normA2, ring),
     };
 }
 
@@ -651,7 +685,9 @@ export function makeDirectSaddle(
 export type RingLinearSolver = 'auto' | 'gmres' | 'direct';
 
 /**
- * The saddle for one step on a closed ring, with the linear solver chosen for THIS geometry:
+ * The saddle for one step, with the linear solver chosen for THIS geometry. A graph that is not
+ * one closed loop always gets the direct route (or `HierarchicalSaddleUnsupportedError` when
+ * that does not apply). For a closed ring:
  * build the tree and the block lists (cheap), count the near-field pairs, and take the direct
  * route when `directIsCheaper` says the tree does not pay; otherwise finish the tree route on
  * the lists already built.
@@ -660,7 +696,7 @@ export type RingLinearSolver = 'auto' | 'gmres' | 'direct';
  * `'direct'` that does not apply falls back to the tree route, and `solver` reports what ran.
  * @see src/core/sobolev/hierarchical/directSolve.ts (directIsCheaper: the rule and its numbers)
  */
-export function makeRingSaddle(
+export function makeAutoSaddle(
     vertices: Vec3[],
     edges: Edge[],
     opts: HierarchicalSaddleOptions & { linearSolver?: RingLinearSolver } = {},
@@ -672,10 +708,18 @@ export function makeRingSaddle(
 } {
     const want = opts.linearSolver ?? 'auto';
     const n = vertices.length;
-    if (want === 'direct') {
+    let ring = true;
+    try {
+        assertClosedNaturalRing(vertices, edges);
+    } catch {
+        ring = false;
+    }
+    // Anything that is not one closed loop has exactly one route here: the direct one.
+    if (want === 'direct' || (!ring && want === 'auto')) {
         const d = makeDirectSaddle(vertices, edges, opts);
         if (d) return { saddle: d, solver: 'direct', nearPairs: null };
     }
+    // Throws HierarchicalSaddleUnsupportedError for a non-ring: no tree route for it (#93).
     assertClosedNaturalRing(vertices, edges);
     const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
     const bvh = buildBvh(vertices, edges, opts.leafSize ?? DEFAULT_LEAF_SIZE, epsilon);

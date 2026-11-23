@@ -255,7 +255,7 @@ export function ControlPanel() {
                     >
                         <option value="auto">Auto</option>
                         <option value="dense">Dense (exact)</option>
-                        <option value="hierarchical">Hierarchical (large N)</option>
+                        <option value="hierarchical">Hierarchical (tree or direct)</option>
                     </select>
                     <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
                         →{' '}
