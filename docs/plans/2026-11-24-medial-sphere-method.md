@@ -75,3 +75,54 @@ for 120 tangent-point steps.
 4. Independent of the above, smaller ideas from the same papers, each measured on its own:
    near-contact links in OUR preconditioner (for tight tangles above 4 000 points); a
    collision-bounded first trial step instead of restarting at 1.
+
+## Results (2026-11-24)
+
+### Spike A — closed curves in 3-D: PASSED
+
+`src/core/medialSphere.ts`, benchmark `bench/app/medialSphereKnots.ts`, every dataset knot
+(`bench/results/2026-11-24-medial-sphere-knots.jsonl`; JS, one thread, this laptop).
+
+| Dataset | Curves | Knot type kept | Crossings: start → end (tidy prototype) | Time, mean (max) | Steps, mean |
+|---|---|---|---|---|---|
+| Trefoil100 | 100 | 100 | 366 → 3.0 (3) | 1.10 s (2.38 s) | 207 |
+| Knot128 (perturbed) | 128 | 128 | 276 → 11.1 (8.9) | 1.31 s (2.53 s) | 229 |
+
+- "Knot type kept" is the knot determinant modulo two primes, audited every 25 steps
+  (`src/core/knotDeterminant.ts`) — an invariant computed from a projection, sharing no code
+  with the collision test. It is live: with the collision bound loosened 6× it trips within
+  4 steps (3 → 1, 21 → 1). It cannot tell apart two knots with the same determinant.
+- "Crossings" is the fewest seen in 12 fixed projections, an upper bound on the crossing number.
+- The paper reports 8.7 s and 9.1 s per knot on an M1 MacBook; the two are not comparable
+  (different stopping rule — see below). Against OUR tangent-point flow the bar was 5×: that
+  flow needed 223 s for 120 steps on one Knot128 curve and was not done.
+
+Deviations from the paper that the numbers depend on:
+1. **Stopping rule.** The paper stops at a gradient per node below `5e-3·r`. Ours never gets
+   there: once the knot is tight the gradient chatters at 0.1–0.4 (the pull switches between
+   "circle capped" and "circle hit" from step to step). The benchmark stops on a plateau of
+   the curve length (1% over 100 steps). Open: find what damps this in the reference.
+2. **Collision test.** A conservative bound (`maxSafeStep`), not swept-surface CCD. It cut the
+   trial step short in 91–95% of steps, so it costs step length; the totals above include that.
+3. **Re-sampling** drops a node only when no other edge pierces its corner triangle. The first
+   version used a distance heuristic.
+4. **Solve.** CG preconditioned by the cyclic tridiagonal part: at most 8 iterations.
+
+What it is not: the result is a TIGHT knot (the curve shrinks to rope-length scale and is
+re-sampled to ~60–180 points), not the smooth, evenly spread embedding the tangent-point
+energy gives. As an untangler it is two orders of magnitude faster; as a "make this curve
+beautiful at fixed length" flow it is a different thing.
+
+### Spike B — flat graphs with junctions
+
+`src/core/medialSphereGraph.ts` (an experiment — the paper has no junctions), benchmark
+`bench/app/medialGraphLayout.ts`. What had to change from the closed-curve method, each found
+by a failure:
+
+| Failure seen | Cause | Change |
+|---|---|---|
+| Junctions and leaves drift across empty space | sector-bisector probes do not sum to zero when all are capped | the pull is written as a deficit `Σ (R − rMax)·x` (identical to the paper for ±normal) |
+| The whole graph freezes (step 0.4 → 1e-14 in 50 steps) | one global safe step is throttled by the single tightest pair | per-node motion limits (`nodeMotionCaps`) |
+| Every edge wiggles, the drawing swells to 1.5–2.4× its size | edges meeting at a junction are always within range, so they repel forever (the space-filling behaviour) | edges that share a junction do not interact |
+| A squeezed-then-released edge stays a zigzag | springs do not resist bending | a small constant tension (the paper's length term at 0.5) |
+| The drawing opens very slowly | mass weight 1 turns whole-drawing modes into plain gradient descent | mass weight 0.1 |
