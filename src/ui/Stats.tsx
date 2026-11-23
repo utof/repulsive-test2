@@ -37,6 +37,7 @@ export function Stats() {
     const sobolevTimings = useSimStore((s) => s.sobolevTimings);
     const sobolevL0 = useSimStore((s) => s.sobolevL0);
     const prePassAlpha = useSimStore((s) => s.prePassAlpha);
+    const untangleInfo = useSimStore((s) => s.untangleInfo);
     const vertices = useSimStore((s) => s.graph.vertices.length);
     const edges = useSimStore((s) => s.graph.edges.length);
     // Current total length from the LIVE buffer. `live` is mutated in place and
@@ -66,6 +67,34 @@ export function Stats() {
             {prePassAlpha !== null && (
                 <span style={{ marginRight: 20, color: '#66ccff' }}>
                     pre-pass: force layout, cooling {prePassAlpha.toFixed(3)}
+                </span>
+            )}
+            {/* Untangle pass: progress while it runs (the flow's own point count falls as the
+                knot tightens), then how it ended. A skipped pass and a failed knot-type audit
+                are shown as limits, not hidden. @see src/core/untanglePass.ts */}
+            {untangleInfo?.phase === 'running' && (
+                <span style={{ marginRight: 20, color: '#66ccff' }}>
+                    untangle pass: step {untangleInfo.steps}, {untangleInfo.nodes} points
+                </span>
+            )}
+            {untangleInfo?.phase === 'done' && (
+                <span
+                    style={{
+                        marginRight: 20,
+                        color: untangleInfo.audit === 'failed' ? '#ff6666' : '#66ccff',
+                    }}
+                >
+                    untangled in {untangleInfo.steps} steps ({untangleInfo.stopped}); knot type{' '}
+                    {untangleInfo.audit === 'kept'
+                        ? 'kept'
+                        : untangleInfo.audit === 'unverified'
+                          ? 'not verified'
+                          : 'CHANGED — input restored'}
+                </span>
+            )}
+            {untangleInfo?.phase === 'skipped' && (
+                <span style={{ marginRight: 20, color: '#ffaa00' }}>
+                    untangle pass skipped: {untangleInfo.reason}
                 </span>
             )}
             {/* Sobolev-only diagnostics of the last step: τ, saddle residual, ‖g̃‖_L²ₕ,
