@@ -40,6 +40,8 @@ export function ControlPanel() {
     const projectionMode = useSimStore((s) => s.projectionMode);
     const setProjectionMode = useSimStore((s) => s.setProjectionMode);
     const sobolevSolver = useSimStore((s) => s.sobolevSolver);
+    const forcePrePass = useSimStore((s) => s.forcePrePass);
+    const setForcePrePass = useSimStore((s) => s.setForcePrePass);
     const setSobolevSolver = useSimStore((s) => s.setSobolevSolver);
     const graph = useSimStore((s) => s.graph);
     const solverDriver = useSimStore((s) => s.solverDriver);
@@ -314,6 +316,22 @@ export function ControlPanel() {
                     <span style={{ fontFamily: 'monospace', width: 60 }}>
                         {stepSize.toExponential(0)}
                     </span>
+                </label>
+                {/* Optional force-directed pre-pass (d3-force style) before the descent, for
+                    GRAPHS: it untangles a scrambled graph in a fraction of a second, but it
+                    moves nodes through edges, so it changes the knot type of a curve — hence
+                    the wording of the label, and off by default. Applies to both descent
+                    modes: it runs before either. @see src/core/forceLayout.ts */}
+                <label
+                    style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                    title="Runs a conventional node-repulsion layout until it settles, then starts the descent. Edges may pass through each other: fine for graphs, not for knots."
+                >
+                    <input
+                        type="checkbox"
+                        checked={forcePrePass}
+                        onChange={(e) => setForcePrePass(e.target.checked)}
+                    />
+                    <span>Force-layout pre-pass (graphs; may cross edges)</span>
                 </label>
                 {/* Descent-direction arrows toggle — visible in BOTH paused and running
                     states (see GradientArrows), not just on pause. */}

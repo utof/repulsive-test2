@@ -1,5 +1,11 @@
 """bench/app/renderFlow.py — python3 -I bench/app/renderFlow.py <flow.json> <out-stem> [title]
 
+Draws a closed curve (recordFlow.ts) or, when the file carries an `edges` list, a graph
+(forcePrePass.ts with a record directory); a frame may carry a `phase` label, shown in place of
+the route. Graph clips are ZOOMED PER FRAME to fill the picture (a force layout balloons to
+many times its final size mid-pass, which at one fixed zoom leaves everything else a dot), so
+for them size on screen means nothing; closed-curve clips keep one zoom for the whole clip.
+
 Turns a trajectory written by recordFlow.ts into <out-stem>.mp4 and <out-stem>.gif.
 
 One recorded iterate per descent step. Between two iterates the picture is LINEARLY
@@ -17,6 +23,8 @@ title = sys.argv[3] if len(sys.argv) > 3 else ''
 flow = json.load(open(flow_path))
 frames = flow['frames']
 n = flow['n']
+EDGES = flow.get('edges') or [(i, (i + 1) % n) for i in range(n)]
+AUTOZOOM = 'edges' in flow
 W = H = 720
 SUB = 5          # sub-frames per step
 HOLD = 20        # extra frames on the first and last iterate
@@ -36,10 +44,11 @@ for fr in frames:
     xyz = fr['xyz']
     mx = sum(xyz[0::3]) / n; my = sum(xyz[1::3]) / n; mz = sum(xyz[2::3]) / n
     fr['c'] = (mx, my, mz)
-    r = max(r, max(math.sqrt((xyz[3*i]-mx)**2 + (xyz[3*i+1]-my)**2 + (xyz[3*i+2]-mz)**2) for i in range(n)))
+    fr['r'] = max(math.sqrt((xyz[3*i]-mx)**2 + (xyz[3*i+1]-my)**2 + (xyz[3*i+2]-mz)**2) for i in range(n))
+    r = max(r, fr['r'])
 scale = 0.44 * W / r
 
-def draw(xyz, c, angle, label):
+def draw(xyz, c, angle, label, r, scale):
     img = Image.new('RGB', (W, H), (16, 18, 30))
     d = ImageDraw.Draw(img)
     ca, sa = math.cos(angle), math.sin(angle)
@@ -51,8 +60,8 @@ def draw(xyz, c, angle, label):
         y, z = ct*y - st*z, st*y + ct*z           # tilt
         P.append((W/2 + scale*x, H/2 - scale*y, z))
     segs = []
-    for i in range(n):
-        a, b = P[i], P[(i+1) % n]
+    for i, j in EDGES:
+        a, b = P[i], P[j]
         segs.append(((a[2]+b[2]) / 2, a, b))
     segs.sort(key=lambda s: s[0])                 # far first
     for depth, a, b in segs:
@@ -68,12 +77,13 @@ def draw(xyz, c, angle, label):
 tmp = tempfile.mkdtemp(prefix='renderflow-')
 k = 0
 total = (len(frames) - 1) * SUB + 2 * HOLD
-def emit(xyz, c, fr):
+def emit(xyz, c, fr, rad=None):
     global k
+    rr = (rad if rad is not None else fr['r']) if AUTOZOOM else r
     angle = 0.6 + 2 * math.pi * 0.35 * k / total
     label = (f"step {fr['step']:>3}   energy {fr['energy']:.3f}",
-             f"{n} vertices   solver time {fr['ms']/1000:.1f} s   route: {flow['route']}")
-    draw(xyz, c, angle, label).save(os.path.join(tmp, f'{k:05d}.png'))
+             f"{n} vertices   time {fr['ms']/1000:.1f} s   {fr.get('phase') or 'route: ' + flow['route']}")
+    draw(xyz, c, angle, label, rr, 0.44 * W / rr).save(os.path.join(tmp, f'{k:05d}.png'))
     k += 1
 
 for _ in range(HOLD):
@@ -83,7 +93,7 @@ for a, b in zip(frames, frames[1:]):
         u = (s + 1) / SUB
         xyz = [p + (q - p) * u for p, q in zip(a['xyz'], b['xyz'])]
         c = tuple(p + (q - p) * u for p, q in zip(a['c'], b['c']))
-        emit(xyz, c, b if s == SUB - 1 else a)
+        emit(xyz, c, b if s == SUB - 1 else a, a['r'] + (b['r'] - a['r']) * u)
 for _ in range(HOLD):
     emit(frames[-1]['xyz'], frames[-1]['c'], frames[-1])
 

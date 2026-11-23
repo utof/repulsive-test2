@@ -6,6 +6,14 @@ import {
     type Mode,
     type PinConstraint,
 } from './core/dispatch';
+import {
+    createForceLayout,
+    type ForceLayout,
+    forceLayoutSettled,
+    forceLayoutTick,
+    rescaleForceLayout,
+    writeForceLayout,
+} from './core/forceLayout';
 import type { ProjectionMode, SobolevStepStats } from './core/optimizer';
 import { edgeLengths, totalLength } from './core/sobolev/constraintSet';
 import { barycenterTarget } from './core/sobolev/constraints';
@@ -241,6 +249,24 @@ export interface SimStore {
     disjointPairs: number[][];
     // live positions — mutated in place in useFrame; NEVER selected by a component.
     live: Vec3[];
+    // OPTIONAL force-directed pre-pass before the descent (default off): conventional node
+    // repulsion + edge springs (d3-force's), run until it settles, then the descent takes
+    // over. For GRAPH untangling only — it moves nodes through edges, so it changes the knot
+    // type of a curve; the tangent-point flow alone never does.
+    // Lifecycle: `prePass` is created at run start (setRunning(true)) when the switch is on
+    // and the pre-pass has not yet run on this graph (`prePassDone`, cleared by a rebuild or
+    // by toggling the switch); while it is non-null the frame loop ticks it INSTEAD of
+    // stepping. When it settles the layout is rescaled to the total length the run started
+    // with, and the frozen targets x₀, L⁰, ℓ⁰ and the pins are re-anchored to the new
+    // geometry — the same re-anchor a run start does, because for the descent this IS the
+    // run's starting geometry. Pinned vertices do not move during the pre-pass.
+    // `prePassAlpha` is the layout's temperature (1 → 0.001), published for the stats line.
+    // @see src/core/forceLayout.ts
+    forcePrePass: boolean;
+    prePass: ForceLayout | null;
+    prePassDone: boolean;
+    prePassLength0: number;
+    prePassAlpha: number | null;
     // stats (React-subscribed, throttled by the writer)
     step: number;
     energy: number;
@@ -267,6 +293,11 @@ export interface SimStore {
     setLengthConstraint(b: boolean): void;
     setProjectionMode(m: ProjectionMode): void;
     setSobolevSolver(s: SobolevSolver): void;
+    // Force-layout pre-pass (see the `forcePrePass` field). `tickPrePass` is called by the
+    // frame loop while `prePass` is non-null; it advances the layout by at most `maxTicks`
+    // ticks or `budgetMs` milliseconds, and ends the phase when the layout has settled.
+    setForcePrePass(b: boolean): void;
+    tickPrePass(maxTicks?: number, budgetMs?: number): void;
     // Pin actions (briefing §5B). addPin snapshots the vertex's CURRENT live
     // position as the frozen target (idempotent by vertexIndex); setPinTarget is
     // the drag re-target; removePin/setPinEnabled edit the list.
@@ -326,6 +357,10 @@ export const useSimStore = create<SimStore>()((set, get) => {
             energy: b.energy,
             running: false,
             graphVersion: s.graphVersion + 1,
+            // A new graph has had no pre-pass; any running one belonged to the old graph.
+            prePass: null,
+            prePassDone: false,
+            prePassAlpha: null,
             // Preset/config change = a run (re)start boundary → re-anchor the
             // frozen targets x₀, L⁰, ℓ⁰ (see the frozen-targets lifecycle anchor above).
             sobolevX0: barycenterTarget(b.graph.vertices, b.graph.edges),
@@ -389,6 +424,11 @@ export const useSimStore = create<SimStore>()((set, get) => {
         lengthConstraint: true,
         projectionMode: 'frozen',
         sobolevSolver: 'auto',
+        forcePrePass: false,
+        prePass: null,
+        prePassDone: false,
+        prePassLength0: 0,
+        prePassAlpha: null,
         pins: [],
         // Penalties default ALL OFF (every weight 0 ⇒ penaltiesActive false ⇒
         // bit-identical threading, plan §2.4). field.X is a placeholder unit axis
@@ -463,6 +503,57 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 penaltyEpoch: s.penaltyEpoch + 1,
                 sobolevConverged: false,
             })),
+        // Toggling the switch re-arms the pre-pass for this graph (so turning it on after a
+        // run still does something on the next play). Turning it off mid-pre-pass abandons
+        // the layout where it is and re-anchors the targets there, exactly as a settled
+        // pre-pass would — the descent must never run against targets from the old geometry.
+        setForcePrePass: (b) => {
+            const s = get();
+            set({
+                forcePrePass: b,
+                prePassDone: false,
+                prePass: null,
+                prePassAlpha: null,
+                ...(s.prePass
+                    ? {
+                          sobolevX0: barycenterTarget(s.live, s.graph.edges),
+                          sobolevL0: totalLength(s.live, s.graph.edges),
+                          sobolevEll0: edgeLengths(s.live, s.graph.edges),
+                          pins: reanchorPins(s.pins, s.live),
+                          energy: graphEnergy(s.live, s.graph.edges, s.disjointPairs),
+                      }
+                    : {}),
+            });
+        },
+        tickPrePass: (maxTicks = 4, budgetMs = 8) => {
+            const s = get();
+            const layout = s.prePass;
+            if (!layout) return;
+            const t0 = performance.now();
+            for (let k = 0; k < maxTicks && !forceLayoutSettled(layout); k++) {
+                forceLayoutTick(layout);
+                if (performance.now() - t0 > budgetMs) break;
+            }
+            if (!forceLayoutSettled(layout)) {
+                writeForceLayout(layout, s.live);
+                set({ prePassAlpha: layout.alpha });
+                return;
+            }
+            // Settled: same size as the run started with (see rescaleForceLayout), then hand
+            // the geometry to the descent with freshly anchored targets.
+            rescaleForceLayout(layout, s.prePassLength0);
+            writeForceLayout(layout, s.live);
+            set({
+                prePass: null,
+                prePassDone: true,
+                prePassAlpha: null,
+                energy: graphEnergy(s.live, s.graph.edges, s.disjointPairs),
+                sobolevX0: barycenterTarget(s.live, s.graph.edges),
+                sobolevL0: totalLength(s.live, s.graph.edges),
+                sobolevEll0: edgeLengths(s.live, s.graph.edges),
+                pins: reanchorPins(s.pins, s.live),
+            });
+        },
         // Pin actions (briefing §5B). A pin is a per-vertex point constraint; like
         // the other constraint toggles, mutating the pin set invalidates ONLY the
         // converged verdict (sobolevStats describe the last step taken and remain).
@@ -593,6 +684,19 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     sobolevStats: null,
                     sobolevConverged: false,
                     sobolevTimings: null,
+                    // Force-layout pre-pass: once per graph, at the start of a run (see the
+                    // `forcePrePass` field). Enabled pins are held fixed.
+                    ...(s.forcePrePass && !s.prePassDone && s.graph.edges.length > 0
+                        ? {
+                              prePass: createForceLayout(s.live, s.graph.edges, {
+                                  fixed: new Set(
+                                      s.pins.filter((p) => p.enabled).map((p) => p.vertexIndex),
+                                  ),
+                              }),
+                              prePassLength0: totalLength(s.live, s.graph.edges),
+                              prePassAlpha: 1,
+                          }
+                        : {}),
                 });
                 return;
             }
@@ -602,6 +706,10 @@ export const useSimStore = create<SimStore>()((set, get) => {
             const s = get();
             set({
                 running: false,
+                // A pause during the pre-pass abandons it; the next play starts a new one
+                // from wherever the nodes are now (`prePassDone` stays false).
+                prePass: null,
+                prePassAlpha: null,
                 graph: { ...s.graph, vertices: cloneVerts(s.live) },
                 energy: graphEnergy(s.live, s.graph.edges, s.disjointPairs),
                 // Vertex commit = the next run will start from these positions →

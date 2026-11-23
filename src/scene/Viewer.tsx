@@ -377,7 +377,17 @@ function Simulation() {
     useFrame((state, delta) => {
         const st = useSimStore.getState();
 
-        if (st.running) {
+        if (st.running && st.prePass) {
+            // Force-layout pre-pass phase: tick the layout INSTEAD of stepping. It runs on the
+            // main thread whatever the driver (a tick is cheap; the store budgets it per
+            // frame). Not while a step from before the pause is still in flight — that result
+            // must land or be dropped first, or it would overwrite the layout's positions.
+            // E₀ is nulled every frame of the phase: whatever energy was cached, the descent's
+            // first step starts from a geometry no step has seen.
+            // @see src/core/forceLayout.ts / the `forcePrePass` field in src/store.ts
+            if (!inFlight.current) st.tickPrePass();
+            lastEnergy.current = null;
+        } else if (st.running) {
             // Penalty-config change since last frame ⇒ invalidate the reused E₀
             // (see the lastPenaltyEpoch anchor). Checked before each SEND on BOTH
             // drivers (§2). Constraint-target animation does NOT bump the epoch
