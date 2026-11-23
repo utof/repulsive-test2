@@ -510,10 +510,19 @@ describe('Schur vs dense: independent operator path (θ = 0 streaming vs assembl
     // the task report: Schur is 1.7e-10 / 2.1e-10 from the Ā-truth there (the stream apply and
     // `assembleAFlat` differ by relFro 1.4e-15 at n = 480, ~12 ulp, and x moves 6-9e-12 per ulp-sized
     // random perturbation at n = 960).
+    // DEFAULT TIER runs `pin` (pinned) and `len` (unpinned); the other four sets are full-tier
+    // (test/tier.ts), registered so they count as skipped. Why: an O(N²) streaming apply per matvec
+    // (~29 s for the four). The lists operator checks every set at n = 240 in the default tier
+    // anyway; what waits for a full run is only this cross-check against an operator path that
+    // shares no code, on `k0`, `bary`, `barylen`, `barypin` (README.md "Tests").
+    const STREAMING_DEFAULT: ReadonlySet<SetName> = new Set(['pin', 'len']);
     for (const name of SET_NAMES) {
-        test(`n=240 ${name}: streaming operator vs assembleAFlat`, () => {
-            checkCells(240, 0, 'A', name, { literalBar: true, truthBar: true });
-        });
+        (STREAMING_DEFAULT.has(name) ? test : fullTest)(
+            `n=240 ${name}: streaming operator vs assembleAFlat`,
+            () => {
+                checkCells(240, 0, 'A', name, { literalBar: true, truthBar: true });
+            },
+        );
     }
 });
 
