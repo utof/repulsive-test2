@@ -1,0 +1,164 @@
+{
+  "gate": "phase1Reduce",
+  "status": "INVALID",
+  "host": {
+    "id": "firefox",
+    "version": "Mozilla Firefox 155.0.1",
+    "shaderBackend": "naga"
+  },
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "limits": {
+      "maxComputeWorkgroupSizeX": 256
+    }
+  },
+  "certification": {
+    "classification": "software",
+    "method": "undetermined",
+    "rationale": "GPUAdapterInfo was blank; isFallbackAdapter=true (a fallback adapter); the pin resolves to 'llvmpipe (LLVM 20.1.2, 256 bits)' (PHYSICAL_DEVICE_TYPE_CPU), a CPU rasterizer — the adapter could not be certified as hardware.",
+    "evidence": {
+      "adapterInfo": {
+        "vendor": "",
+        "architecture": "",
+        "device": "",
+        "description": "",
+        "limits": {
+          "maxComputeWorkgroupSizeX": 256
+        }
+      },
+      "adapterInfoVerdict": "software",
+      "isFallbackAdapter": true,
+      "devicePin": {
+        "icdPath": "/usr/share/vulkan/icd.d/lvp_icd.json",
+        "deviceName": "llvmpipe (LLVM 20.1.2, 256 bits)",
+        "deviceType": "PHYSICAL_DEVICE_TYPE_CPU"
+      }
+    }
+  },
+  "launch": {
+    "label": "headless-vk-nvidia+forced-vk-lvp",
+    "argv": ["--headless"],
+    "prefs": {
+      "dom.webgpu.enabled": true,
+      "browser.shell.checkDefaultBrowser": false,
+      "datareporting.policy.dataSubmissionEnabled": false,
+      "toolkit.telemetry.enabled": false,
+      "browser.aboutwelcome.enabled": false
+    },
+    "env": {
+      "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/lvp_icd.json",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.json"
+    }
+  },
+  "flags": ["--headless"],
+  "attempts": [
+    {
+      "launch": {
+        "label": "headless-vk-nvidia+forced-vk-lvp",
+        "argv": ["--headless"],
+        "prefs": {
+          "dom.webgpu.enabled": true,
+          "browser.shell.checkDefaultBrowser": false,
+          "datareporting.policy.dataSubmissionEnabled": false,
+          "toolkit.telemetry.enabled": false,
+          "browser.aboutwelcome.enabled": false
+        },
+        "env": {
+          "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/lvp_icd.json",
+          "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.json"
+        }
+      },
+      "certification": {
+        "classification": "software",
+        "method": "undetermined",
+        "rationale": "GPUAdapterInfo was blank; isFallbackAdapter=true (a fallback adapter); the pin resolves to 'llvmpipe (LLVM 20.1.2, 256 bits)' (PHYSICAL_DEVICE_TYPE_CPU), a CPU rasterizer — the adapter could not be certified as hardware.",
+        "evidence": {
+          "adapterInfo": {
+            "vendor": "",
+            "architecture": "",
+            "device": "",
+            "description": "",
+            "limits": {
+              "maxComputeWorkgroupSizeX": 256
+            }
+          },
+          "adapterInfoVerdict": "software",
+          "isFallbackAdapter": true,
+          "devicePin": {
+            "icdPath": "/usr/share/vulkan/icd.d/lvp_icd.json",
+            "deviceName": "llvmpipe (LLVM 20.1.2, 256 bits)",
+            "deviceType": "PHYSICAL_DEVICE_TYPE_CPU"
+          }
+        }
+      }
+    }
+  ],
+  "gitShaShort": "538c398",
+  "date": "2026-09-11",
+  "data": {
+    "gate": "phase1Reduce",
+    "rows": [
+      {
+        "n": 1,
+        "expected": 1,
+        "got": 1,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 63,
+        "expected": 2016,
+        "got": 2016,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 64,
+        "expected": 2080,
+        "got": 2080,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 65,
+        "expected": 2145,
+        "got": 2145,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 128,
+        "expected": 8256,
+        "got": 8256,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 129,
+        "expected": 8385,
+        "got": 8385,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 960,
+        "expected": 461280,
+        "got": 461280,
+        "exact": true,
+        "exactInF32": true
+      },
+      {
+        "n": 16384,
+        "expected": 134225920,
+        "got": 134225920,
+        "exact": true,
+        "exactInF32": true
+      }
+    ],
+    "pass": true
+  },
+  "consoleLines": []
+}

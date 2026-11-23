@@ -62,6 +62,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
+import { upperMedian } from '../stats';
 
 /** Fixture sizes: the P2a gate fixtures, plus N=1000 (the parent's G7 size). */
 const FIXTURE_N = [480, 960, 1000];
@@ -101,7 +102,12 @@ interface Session {
     asigmaMs: number;
 }
 
-const median = (a: number[]): number => a.slice().sort((p, q) => p - q)[a.length >> 1] as number;
+// This harness reports `upperMedian` (bench/stats.ts), NOT the true median:
+// upper-middle for an even count. It is the variant every committed results
+// JSON was produced with; "fixing" it to `median` would shift even-count
+// values out of comparability — @issue utof/repulsive-test2#65 owns that call.
+// REPS is odd (15), so the per-session medians at :201 are unaffected either
+// way; the cross-session rollups at :242/:245 are where the variant bites.
 
 /**
  * Dense lower-triangular factor with an O(1) diagonal, deterministic (no
@@ -196,7 +202,13 @@ function session(n: number, buf: ReturnType<typeof alloc>, mode: Mode): Session 
         for (let i = 0; i < n * n; i++) f32[i] = (L[i] as number) + 1e-3;
         sh.push(performance.now() - t);
     }
-    return { n, mode, backsolveMs: median(bs), matvecMs: median(mv), asigmaMs: median(sh) };
+    return {
+        n,
+        mode,
+        backsolveMs: upperMedian(bs),
+        matvecMs: upperMedian(mv),
+        asigmaMs: upperMedian(sh),
+    };
 }
 
 const argv = Bun.argv.slice(2);
@@ -237,10 +249,16 @@ if (argv.includes('--child')) {
             const byMode = Object.fromEntries(
                 (['reuse', 'churn'] as Mode[]).map((m) => [
                     m,
-                    median(mine.filter((s) => s.mode === m).map(pick)),
+                    upperMedian(mine.filter((s) => s.mode === m).map(pick)),
                 ]),
             );
-            return { min: lo, median: median(v), max: hi, spread: hi / lo, medianByMode: byMode };
+            return {
+                min: lo,
+                median: upperMedian(v),
+                max: hi,
+                spread: hi / lo,
+                medianByMode: byMode,
+            };
         };
         return {
             n,

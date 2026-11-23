@@ -1,0 +1,59 @@
+{
+  "gate": "G0a",
+  "status": "FAIL",
+  "host": {
+    "id": "firefox",
+    "version": "Mozilla Firefox 155.0.1",
+    "shaderBackend": "naga"
+  },
+  "adapter": null,
+  "certification": null,
+  "launch": null,
+  "flags": null,
+  "attempts": [
+    {
+      "launch": {
+        "label": "headless-vk-lvp+forced-vk-lvp",
+        "argv": ["--headless"],
+        "prefs": {
+          "dom.webgpu.enabled": true,
+          "browser.shell.checkDefaultBrowser": false,
+          "datareporting.policy.dataSubmissionEnabled": false,
+          "toolkit.telemetry.enabled": false,
+          "browser.aboutwelcome.enabled": false
+        },
+        "env": {
+          "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/lvp_icd.json",
+          "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.json"
+        }
+      },
+      "certification": {
+        "classification": "software",
+        "method": "undetermined",
+        "rationale": "GPUAdapterInfo was blank; isFallbackAdapter=true (a fallback adapter); the pin resolves to 'llvmpipe (LLVM 20.1.2, 256 bits)' (PHYSICAL_DEVICE_TYPE_CPU), a CPU rasterizer — the adapter could not be certified as hardware.",
+        "evidence": {
+          "adapterInfo": {
+            "vendor": "",
+            "architecture": "",
+            "device": "",
+            "description": "",
+            "limits": {
+              "maxComputeWorkgroupSizeX": 256
+            }
+          },
+          "adapterInfoVerdict": "software",
+          "isFallbackAdapter": true,
+          "devicePin": {
+            "icdPath": "/usr/share/vulkan/icd.d/lvp_icd.json",
+            "deviceName": "llvmpipe (LLVM 20.1.2, 256 bits)",
+            "deviceType": "PHYSICAL_DEVICE_TYPE_CPU"
+          }
+        }
+      }
+    }
+  ],
+  "gitShaShort": "538c398",
+  "date": "2026-09-11",
+  "data": null,
+  "consoleLines": []
+}

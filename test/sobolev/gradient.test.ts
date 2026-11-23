@@ -142,7 +142,7 @@ for (const name of FIXTURE_NAMES) {
 // ─── Phase-ledger contract of the `saddle?` (WebGPU Phase 2a) seam path ───────────
 //
 // `solveConstrainedGradientSetFrozen`'s two arms both wrap their solve in
-// `timed('saddle', …)` — gradient.ts:143 for the default CPU arm, gradient.ts:132 for
+// `timed('saddle', …)` — gradient.ts:177 for the default CPU arm, gradient.ts:166 for
 // the PreparedSaddle arm. Only the CPU one was pinned by a test (test/gpu/
 // saddleSeam.test.ts:87 asserts `saddle.calls >= 1` on a seam-ABSENT step), so the
 // seam arm's key was free to drift to any other string without a red test. The key IS
@@ -171,6 +171,8 @@ function preparedFromCore(
     const A = assembleAFlat(f.vertices, f.edges, disjointPairs, f.alpha, f.beta, f.epsilon);
     let calls = 0;
     return {
+        // `kind: 'dense'` — Phase 2H made PreparedSaddle a tagged union (spec §5.1 / §11.4).
+        kind: 'dense',
         A,
         factorCalls: () => calls,
         factor(C: number[][]): SaddleFactorization {
@@ -235,8 +237,8 @@ test('solveConstrainedGradientSetFrozen: the PreparedSaddle arm records its solv
     ).toBeLessThanOrEqual(1e-9);
 
     // The contract. solveSaddleFrozen deliberately fires no 'factor' sub-phase
-    // (linsolve.ts:924-925 — "no factorization; that is the point of the reuse") and
-    // evaluateConstraintSet is untimed, so gradient.ts:132 is the ONE timed() call on
+    // (linsolve.ts:1101-1102 — "no factorization; that is the point of the reuse") and
+    // evaluateConstraintSet is untimed, so gradient.ts:166 is the ONE timed() call on
     // this arm and the ledger must be exactly {saddle: 1 call}.
     expect(Object.keys(ledger ?? {})).toEqual(['saddle']);
     expect(ledger?.saddle?.calls).toBe(1);

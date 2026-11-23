@@ -49,6 +49,7 @@ import {
     gradientAnalytical,
 } from '../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../src/core/testConfigs';
+import { median } from './stats';
 
 type ConstraintMode = 'total' | 'perEdge';
 
@@ -73,12 +74,6 @@ interface ResultsFile {
 }
 
 const { alpha, beta, epsilon } = DEFAULTS;
-
-function median(xs: number[]): number {
-    const s = [...xs].sort((a, b) => a - b);
-    const mid = Math.floor(s.length / 2);
-    return s.length % 2 === 1 ? s[mid] : 0.5 * (s[mid - 1] + s[mid]);
-}
 
 const round3 = (x: number): number => Math.round(x * 1000) / 1000;
 

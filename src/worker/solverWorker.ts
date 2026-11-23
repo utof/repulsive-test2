@@ -40,7 +40,7 @@ self.onmessage = (event: MessageEvent<SolverWorkerRequest>) => {
         // with a silently missing factorization. Inside the try so the existing catch
         // (:105-115) reports it as { type: 'error' } to the caller that erred. It must
         // read `msg.args`, NOT `msg`: SolverWorkerRequest's 'step' arm is
-        // { type, graphVersion, args } (dispatch.ts:411) and DispatchStepArgs =
+        // { type, graphVersion, args } (dispatch.ts:436) and DispatchStepArgs =
         // Omit<DispatchDescentStepArgs, 'edges' | 'disjointPairs'> (:383), so `saddle`
         // can only ever appear at msg.args.saddle — `'saddle' in msg` is false for every
         // message the protocol can carry, i.e. a guard that can never fire while

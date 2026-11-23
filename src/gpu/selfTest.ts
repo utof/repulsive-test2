@@ -9,6 +9,7 @@ import {
     gradientAnalytical,
 } from '../core/tangentPointEnergy';
 import type { Vec3 } from '../core/testConfigs';
+import { T1_REL_ERR } from './gateTolerances';
 import { GpuTangentPoint } from './tangentPoint';
 import { packTopology } from './topology';
 
@@ -20,7 +21,7 @@ import { packTopology } from './topology';
  */
 export function selfTestVerdict(gpu: number, cpu64: number): { ok: boolean; relErr: number } {
     const relErr = Math.abs(gpu - cpu64) / Math.abs(cpu64);
-    return { ok: Number.isFinite(relErr) && relErr < 1e-5, relErr };
+    return { ok: Number.isFinite(relErr) && relErr < T1_REL_ERR, relErr };
 }
 
 /**
@@ -51,7 +52,7 @@ export function gradientVerdict(gpu: Vec3[], cpu64: Vec3[]): { ok: boolean; relE
         }
     }
     const relErr = scale > 0 ? worst / scale : worst;
-    return { ok: finite && Number.isFinite(relErr) && relErr < 1e-5, relErr };
+    return { ok: finite && Number.isFinite(relErr) && relErr < T1_REL_ERR, relErr };
 }
 
 /**

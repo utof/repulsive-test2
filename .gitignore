@@ -38,3 +38,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # python bytecode (oracle harness)
 __pycache__/
+
+# review-loop ledgers: the .md reports are tracked (the decision record); the raw
+# diffs (regenerable from git history, 1.8 MB) and one-off probe scripts stay local
+docs/superpowers/plans/*-review-ledger/*.diff
+docs/superpowers/plans/*-review-ledger/probes/

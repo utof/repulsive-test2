@@ -348,6 +348,16 @@ judgement.
 
 ## E. K1 calibration
 
+> **CORRECTION (2026-09-11, utof/repulsive-test2#51):** every number in this
+> section is still correct **for a dense Cholesky**, and nothing below is
+> withdrawn. But #51 adopts the hierarchical (BCT + preconditioned GMRES)
+> architecture, and both bars this section calibrates are **Cholesky-shaped**:
+> K1's currency is a *factorization* backward error `‖LLᵀ − A_σ‖_F/‖A_σ‖_F`
+> and 2H has no factorization, while §E.5's `t4: {maxIters: 4, tol: 1e-10}`
+> demands a relative residual an iterative solve targets at ~1e-2. Both are
+> **pre-registered kill gates**, so they need *derived replacements* in the 2H
+> spec — not silent removal. Tracked in #51.
+
 K1's currency is the backward error `‖LLᵀ − A_σ‖_F/‖A_σ‖_F`, f64-measured from
 the read-back L. Its bar is the geometric mean of two **bisected, per-N**
 quantities — equidistant in log space from "indistinguishable from a correct

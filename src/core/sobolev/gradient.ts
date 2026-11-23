@@ -83,6 +83,11 @@ export function solveConstrainedGradientSet(
  * → solveSaddleFromA's default, 'ldlt' since the 2026-07-06 gate verdict;
  * 'lu' is bit-identical to the pre-option path) and rides into the returned
  * frozen operator's `fac`, so reuse solves inherit the choice for free.
+ * **It is SILENTLY INERT when `saddle.kind === 'hierarchical'`** (spec §11.2 row 8b, R2): that
+ * branch returns before `solveSaddleFromA` (the only read of the value in this file) and its frozen
+ * operator has no `fac` to carry a choice into, because there is no factorization at all
+ * (spec §1.1). Not a bug and not guarded — see the option's own TSDoc in `src/core/optimizer.ts`
+ * for why; the end-to-end A/B is in `test/sobolev/hierarchicalSaddleReal.test.ts`.
  *
  * `saddle` is the WebGPU Phase 2a seam: when present, `A` and the factorization
  * come from the caller (the GPU Cholesky) instead of `assembleAFlat` +
@@ -92,6 +97,13 @@ export function solveConstrainedGradientSet(
  * (the golden suites are the backstop), exactly like `dE` one level up. `C` is
  * always evaluated by the CORE and handed to `saddle.factor`, never supplied by
  * the caller.
+ *
+ * `saddle.kind === 'hierarchical'` is the Phase 2H arm and is NOT a source selection — it is a
+ * different solve: `prepare(C)` returns a {@link HierarchicalSaddleSolver} and every solve is a
+ * fresh iterative one, because a matrix-free operator has no factorization to freeze (spec §1.1,
+ * §5.1). It therefore does NOT claim bit-identity with the dense arm; the dense arm's bit-identity
+ * is what `test/sobolev/denseSaddleBitGolden.test.ts` gates.
+ * @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b
  * @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
  * @see docs/superpowers/plans/2026-07-06-ldlt-factor.md (pinned decision 4 + verdict)
  * @see oracle/tpe_constraints_oracle.py (solve_constrained_gradient_set_frozen)
@@ -114,6 +126,25 @@ export function solveConstrainedGradientSetFrozen(
     // constraint-projection solve which passes −Φ there.
     // @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §B ("Gradient saddle system" — RHS [dE; 0])
     const { C } = evaluateConstraintSet(set, vertices, edges);
+    if (saddle?.kind === 'hierarchical') {
+        // Phase 2H: no matrix and no factorization (spec §1.1) — `prepare(C)` hands out the
+        // reusable solver and the gradient solve is its first call. The returned `frozen` carries
+        // that SAME solver, so the projection's reuse solves (lineSearch.ts, via
+        // solveSaddleFrozen's kind dispatch) never assemble a dense Ā. `residual` comes from the
+        // solver because only it can certify a matrix-free solve (operatorSaddleResidual is the
+        // shape; linsolve.ts). The 'saddle' timing key is unchanged, so the phase ledger stays
+        // comparable across the two arms; 'factor' simply never fires here — which is the point.
+        // The PRODUCER of this arm is `hierarchical/hierarchicalSaddle.ts` (spec §11.2 row 8b).
+        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §5.1, §11.2 rows 8, 8b
+        const solver = saddle.prepare(C);
+        const { x, lambda, residual } = timed('saddle', () => solver.solve(flatten(dE)));
+        return {
+            gTilde: unflatten(x),
+            lambda,
+            residual,
+            frozen: { kind: 'hierarchical', n: vertices.length, C, op: saddle.op, solver },
+        };
+    }
     if (saddle) {
         // Source selection, never arithmetic (the Phase 1 `dE?` rule): A comes from
         // the caller instead of assembleAFlat, the factorization comes from the GPU
@@ -124,6 +155,9 @@ export function solveConstrainedGradientSetFrozen(
         // C is evaluated by the CORE above, never by the driver.
         // @see docs/superpowers/specs/2026-09-03-webgpu-solver-phase2-design.md §4.4
         const frozen: FrozenSaddleOperator = {
+            // `kind: 'dense'` is the 2H discriminant; this arm's arithmetic is untouched and
+            // bit-gated by test/sobolev/denseSaddleBitGolden.test.ts (spec §11.2 row 8 / A24).
+            kind: 'dense',
             a: saddle.A,
             n: vertices.length,
             C,
@@ -147,7 +181,9 @@ export function solveConstrainedGradientSetFrozen(
         gTilde: unflatten(x),
         lambda,
         residual,
-        frozen: { a: A, n: vertices.length, C, fac },
+        // `kind: 'dense'` — the 2H discriminant on the DEFAULT (no-seam) path. Bit-gated by
+        // test/sobolev/denseSaddleBitGolden.test.ts T1b (spec §11.2 row 8 / A24).
+        frozen: { kind: 'dense', a: A, n: vertices.length, C, fac },
     };
 }
 
