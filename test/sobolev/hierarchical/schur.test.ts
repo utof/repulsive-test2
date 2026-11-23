@@ -67,6 +67,7 @@ import {
 } from '../../../src/core/sobolev/linsolve';
 import { calculateDisjointPairs, gradientAnalytical } from '../../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../../src/core/testConfigs';
+import { fullDescribe, fullTest } from '../../tier';
 import { cholesky, cholSolve, densify, spectrum } from './denseSpectrum';
 
 setDefaultTimeout(900_000);
@@ -493,7 +494,11 @@ describe('Schur vs dense: same operator (lists at DEFAULT_THETA), spec §11.2 ro
     for (const name of SET_NAMES) {
         // n = 960: the literal agreement is LOGGED (it plateaus at the oracle's own error); the 1e-10
         // bar is asserted against the refined truth.
-        test(`n=960 ${name}: 1e-10 vs refined truth (literal agreement logged)`, () => {
+        // FULL TIER ONLY (test/tier.ts): one dense LDLᵀ + refinement of the 2880-dim saddle per set
+        // (~8.5 s each). Why: the n = 240 cells above assert the literal AND the truth bar on every
+        // set in the default tier; what waits for a full run is a defect that only shows at n = 960
+        // (deeper tree, more far blocks, κ·u near the bar) (README.md "Tests").
+        fullTest(`n=960 ${name}: 1e-10 vs refined truth (literal agreement logged)`, () => {
             checkCells(960, DEFAULT_THETA, 'op', name, { literalBar: false, truthBar: true });
         });
     }
@@ -516,7 +521,17 @@ describe('Schur vs dense: independent operator path (θ = 0 streaming vs assembl
 // 2. tol: the measurement behind DEFAULT_SCHUR_TOL, and the gate's non-vacuity.
 // ===========================================================================
 
-describe('tol sweep (spec §8.3; the knee behind DEFAULT_SCHUR_TOL), n = 960', () => {
+// The constant the sweep below justifies stays pinned in the DEFAULT tier, so changing it cannot
+// slip past a default run even though the sweep itself waits for the full tier.
+test('DEFAULT_SCHUR_TOL is 1e-12, the knee the full-tier tol sweep measures', () => {
+    expect(DEFAULT_SCHUR_TOL).toBe(1e-12);
+});
+
+// FULL TIER ONLY (test/tier.ts): a calibration measurement, five prepareSchur + solves per set at
+// n = 960 (~21 s). Why: it is the evidence behind DEFAULT_SCHUR_TOL (pinned by the default test
+// above), not a per-merge check; re-run it (`bun run test:full`) whenever the tol, the GMRES
+// stopping rule or the operator changes (README.md "Tests").
+fullDescribe('tol sweep (spec §8.3; the knee behind DEFAULT_SCHUR_TOL), n = 960', () => {
     // MEASURED (n = 960, barylen and pin, grad/0 and gen/-phi), error vs refined truth:
     //   tol 1e-6: 2.5e-6..3.2e-6   1e-8: 3.3e-8..7.4e-8   1e-10: 2.2e-10..5.7e-10   1e-11: 2.1e-11..7.3e-11
     //   tol 1e-12: 3.7e-12..7.6e-12   1e-13: 2.2e-12..3.2e-12   1e-14: 2.2e-12..3.2e-12 (identical)
