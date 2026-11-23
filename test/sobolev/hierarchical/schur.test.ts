@@ -424,25 +424,32 @@ function checkCells(
 ): void {
     const { fx, C, k, cells } = setup(n, theta, name);
     const solver = prepareSchur(fx.op, fx.P, C);
-    const refs = denseRefs(fx, theta, matrix, name, C, cells);
     const unpinned = UNPINNED.has(name);
+    // Why: on an UNPINNED set with no literal bar (n = 960 k0 / len) no assertion reads the dense
+    // reference -- the truth bar is skipped where the dense saddle is translation-singular -- so
+    // building it (one ~8.5 s LDLᵀ of the 2880-dim saddle) only fed the log line. Skip it; the
+    // log then shows `literal=NaN`. (test-suite review 2026-11-24, README.md "Tests")
+    const needRef = opts.literalBar || (opts.truthBar && !unpinned);
+    const refs = needRef ? denseRefs(fx, theta, matrix, name, C, cells) : null;
     expect(solver.report.pinned).toBe(!unpinned);
     // Structure: prepare ran exactly k GMRES, and ran them at the default tol.
     expect(solver.report.columns.length).toBe(k);
     expect(solver.report.tol).toBe(DEFAULT_SCHUR_TOL);
     for (const rhs of cells) {
         const r = solver.solve(rhs.top, rhs.bottom);
-        const ref = refs.get(rhs.name);
-        if (!ref) throw new Error(`no dense reference for ${rhs.name}`);
+        const ref = refs?.get(rhs.name);
+        if (refs && !ref) throw new Error(`no dense reference for ${rhs.name}`);
         // The literal oracle: the dense LDLᵀ x (mean-free where the dense system is singular, since
         // its translation is arbitrary: MEASURED, ldlt and lu return means 6.0e-2 vs 8.0e-2 at k = 0).
-        const literal = unpinned
-            ? relErr(demean(r.x, n), demean(ref.ldltX, n))
-            : relErr(r.x, ref.ldltX);
-        const lamLiteral = lamErr(r.lambda, ref.ldltLambda);
-        const vsTruth = unpinned ? Number.NaN : relErr(r.x, ref.x);
-        const denseVsTruth = unpinned ? Number.NaN : relErr(ref.ldltX, ref.x);
-        const lamTruth = unpinned ? Number.NaN : lamErr(r.lambda, ref.lambda);
+        const literal = !ref
+            ? Number.NaN
+            : unpinned
+              ? relErr(demean(r.x, n), demean(ref.ldltX, n))
+              : relErr(r.x, ref.ldltX);
+        const lamLiteral = ref ? lamErr(r.lambda, ref.ldltLambda) : Number.NaN;
+        const vsTruth = unpinned || !ref ? Number.NaN : relErr(r.x, ref.x);
+        const denseVsTruth = unpinned || !ref ? Number.NaN : relErr(ref.ldltX, ref.x);
+        const lamTruth = unpinned || !ref ? Number.NaN : lamErr(r.lambda, ref.lambda);
         log(
             `n=${n} th=${theta === 0 ? '0(stream)' : theta} ${name} ${rhs.name}`,
             `literal=${literal.toExponential(2)} vsTruth=${vsTruth.toExponential(2)} ` +
@@ -463,6 +470,7 @@ function checkCells(
             expect(lamLiteral).toBeLessThan(1e-9);
         }
         if (opts.truthBar && !unpinned) {
+            if (!ref) throw new Error('truth bar without a dense reference'); // needRef guarantees it
             // The truth is only a referee if refinement converged to roundoff.
             expect(ref.lastCorrection).toBeLessThan(1e-14);
             expect(vsTruth).toBeLessThan(BAR);
