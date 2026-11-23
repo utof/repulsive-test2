@@ -47,3 +47,5 @@ docs/superpowers/plans/*-review-ledger/probes/
 # the Repulsive Curves knot datasets (Knot128, Trefoil100), 9 MB, from
 # https://www.cs.cmu.edu/~kmcrane/Projects/RepulsiveCurves/index.html — kept local
 oracle/KnotDatasets.zip
+# the paper's supplemental PDF (publisher copy) — kept local
+oracle/*Supplemental*.pdf
