@@ -142,8 +142,37 @@ function makeIpA(Aflat: Float64Array, n: number) {
     };
 }
 
-/** The reusable n=960 / n=240 fixture: the curve, its disjoint pairs, and the dense `Ā` metric. */
+/**
+ * Memoise a zero-argument computation: computed on first call, shared afterwards. Why: the
+ * describes below need a dense reference step that must NOT be computed in the describe body --
+ * bun executes describe bodies at collection, even for a skipped describe and for a `-t` filtered
+ * run, so body work was paid by every run of this file (44 s at n = 960). @see test/tier.ts
+ */
+function lazy<T>(f: () => T): () => T {
+    let box: { v: T } | undefined;
+    return () => {
+        box ??= { v: f() };
+        return box.v;
+    };
+}
+
+const fixtureCache = new Map<number, ReturnType<typeof buildFixture>>();
+/**
+ * The reusable n=960 / n=240 fixture, memoised per n. Why: two describes and the θ = 0 cell ask
+ * for the same n, and each build assembles the dense `Ā` (`assembleAFlat`, 0.5-6 s at n = 960).
+ * Shared, so READ-ONLY: every caller only reads the curve and the metric.
+ */
 function fixture(n: number) {
+    let f = fixtureCache.get(n);
+    if (!f) {
+        f = buildFixture(n);
+        fixtureCache.set(n, f);
+    }
+    return f;
+}
+
+/** The curve, its disjoint pairs, and the dense `Ā` metric (built fresh; use `fixture(n)`). */
+function buildFixture(n: number) {
     const { vertices, edges } = trefoil(n);
     const disjointPairs = calculateDisjointPairs(edges);
     const Aflat = assembleAFlat(vertices, edges, disjointPairs, ALPHA, BETA, EPS);
@@ -191,13 +220,17 @@ const STEP = { mode: 'analytical' as const, projectionMode: 'frozen' as const, c
 // ---------------------------------------------------------------------------
 
 describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, trefoil', () => {
-    const f = fixture(960);
-    const set: ConstraintSet = [barycenterBlock(offsetBaryTarget(f.vertices, f.edges))];
-    const dense = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, set, STEP);
-    const gd = flatten(dense.descentField as Vec3[]);
-    const gdm = demean(gd, f.n);
+    // Lazy, not describe-body work: see `lazy`.
+    const ref = lazy(() => {
+        const f = fixture(960);
+        const set: ConstraintSet = [barycenterBlock(offsetBaryTarget(f.vertices, f.edges))];
+        const dense = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, set, STEP);
+        const gd = flatten(dense.descentField as Vec3[]);
+        return { f, set, dense, gd, gdm: demean(gd, f.n) };
+    });
 
     const runHier = (opts?: Parameters<typeof makeHierarchicalSaddle>[3], verts?: Vec3[]) => {
+        const { f, set, gd, gdm } = ref();
         const saddle = makeHierarchicalSaddle(verts ?? f.vertices, f.edges, f.disjointPairs, opts);
         const out = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, set, { ...STEP, saddle });
         const g = flatten(out.descentField as Vec3[]);
@@ -210,6 +243,7 @@ describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, 
     };
 
     test('cos∠_Ā >= 0.9 against the dense f64 reference step, and the step agrees mod translation', () => {
+        const { f, set, dense } = ref();
         const h = runHier();
         log('n=960 bary build', JSON.stringify(h.saddle.build));
         log('n=960 bary bct.stats', JSON.stringify(h.saddle.parts.bct.stats));
@@ -273,7 +307,7 @@ describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, 
         // DIFFERENT curve of the same n passes every guard. This is the Phase 1 "same vertices"
         // rule (`DensePreparedSaddle` TSDoc, `src/gpu/driver.ts:164`) with no enforcement, and it
         // is the reason `cos∠_Ā` alone is not an adequate gate for row 8b.
-        const scaled = f.vertices.map((p) => [2 * p[0], 2 * p[1], 2 * p[2]] as Vec3);
+        const scaled = ref().f.vertices.map((p) => [2 * p[0], 2 * p[1], 2 * p[2]] as Vec3);
         const h = runHier(undefined, scaled);
         log('n=960 wrong-geometry (2x) cos∠_Ā', h.cos);
         log('n=960 wrong-geometry (2x) modTrans', h.modTrans);
@@ -290,14 +324,19 @@ describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, 
 // ---------------------------------------------------------------------------
 
 describe('k = 0 (empty constraint set) against the dense reference, MOD TRANSLATION', () => {
-    const f = fixture(960);
-    const dense = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, [], STEP);
-    const saddle = makeHierarchicalSaddle(f.vertices, f.edges, f.disjointPairs);
-    const hier = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, [], { ...STEP, saddle });
-    const gd = flatten(dense.descentField as Vec3[]);
-    const gh = flatten(hier.descentField as Vec3[]);
+    // Lazy, not describe-body work: see `lazy`.
+    const arms = lazy(() => {
+        const f = fixture(960);
+        const dense = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, [], STEP);
+        const saddle = makeHierarchicalSaddle(f.vertices, f.edges, f.disjointPairs);
+        const hier = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, [], { ...STEP, saddle });
+        const gd = flatten(dense.descentField as Vec3[]);
+        const gh = flatten(hier.descentField as Vec3[]);
+        return { f, dense, hier, gd, gh };
+    });
 
     test('the two arms agree to 2.2e-3 mod translation, and NOT AT ALL literally', () => {
+        const { f, gd, gh } = arms();
         const literal = relErr(gh, gd);
         const modTrans = relErr(demean(gh, f.n), demean(gd, f.n));
         log('n=960 k0 cos∠_Ā', f.cosA(gh, gd));
@@ -334,6 +373,7 @@ describe('k = 0 (empty constraint set) against the dense reference, MOD TRANSLAT
         // Consequence for the spec: on a translation-singular set the dense path is not a reference
         // for the STEP either, only for `x` mod translation. Do not read this cell as "the two arms
         // produce the same step".
+        const { f, dense, hier } = arms();
         const nd = l2CurveNorm(dense.descentField as Vec3[], f.vertices, f.edges);
         const nh = l2CurveNorm(hier.descentField as Vec3[], f.vertices, f.edges);
         log('n=960 k0 l2CurveNorm dense/hier', `${nd} / ${nh}`);
