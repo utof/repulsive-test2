@@ -389,6 +389,21 @@ export interface LineSearchOptions {
      */
     energyBefore?: number;
     /**
+     * Source of the tangent-point energy for E₀ and every Armijo trial. Absent ⇒ the exact
+     * all-pairs `calculateEnergy` (unchanged, bit-identical path). Penalties are still added on
+     * top of whatever this returns.
+     *
+     * Why this is pluggable after all (the function TSDoc below says the energy is not): the
+     * all-pairs energy is O(n²) time and needs `disjointPairs`, n rows of n − 3 entries, so above
+     * a few thousand vertices it is the step's dominant cost and at n = 30 000 the list cannot be
+     * built (`bench/results/2026-11-23-h-step-scale.jsonl`). The paper evaluates the energy by
+     * Barnes–Hut for the same reason (arXiv:2006.07859 §6.1). The Armijo rule then gates on an
+     * approximation of the objective, so the supplied function must be accurate to well below
+     * the decrease it is asked to certify — that is the caller's invariant.
+     * @see src/core/barnesHut.ts
+     */
+    tpeEnergy?: (V: Vec3[]) => number;
+    /**
      * Soft-constraint penalties (5C). When active, Armijo gates on the TOTAL
      * objective E_tpe + E_pen — still "the exact energy the flow is
      * minimizing" (the module's non-pluggability rule is about arbitrary
@@ -448,11 +463,13 @@ export interface LineSearchStepResult {
  * E(γ_proj) ≤ E₀ − c₁·τ·m with slope m = dEᵀp.
  *
  * `dE` is a PARAMETER (same pluggability contract as
- * `solveConstrainedGradientSet` in `./gradient`); the ENERGY is not — it is
- * the app's own objective, because Armijo must gate on the exact energy the
- * flow is minimizing: `calculateEnergy`, plus the active soft-constraint
+ * `solveConstrainedGradientSet` in `./gradient`); the ENERGY is the app's own
+ * objective, because Armijo must gate on the energy the flow is minimizing:
+ * by default the exact `calculateEnergy`, plus the active soft-constraint
  * penalties when `opts.penalties` is set (plan §2.4 — the penalties are part
- * of the objective, not a pluggable energy). The set must be the SAME
+ * of the objective, not a pluggable energy). The one sanctioned substitution is
+ * `opts.tpeEnergy` (Barnes–Hut at large n), whose TSDoc states the accuracy it
+ * must then meet. The set must be the SAME
  * frozen-target set used for the gradient solve (spec §3.5).
  * @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C
@@ -483,8 +500,9 @@ export function lineSearchStepSet(
     // negligible next to the O(E²) energy kernel).
     // @see docs/superpowers/plans/2026-07-03-sobolev-penalties.md §2.4
     const objectiveEnergy = (V: Vec3[]): number => {
+        const tpe = opts?.tpeEnergy;
         const e = timed('energy', () =>
-            calculateEnergy(V, edges, disjointPairs, alpha, beta, epsilon),
+            tpe ? tpe(V) : calculateEnergy(V, edges, disjointPairs, alpha, beta, epsilon),
         );
         return pen ? e + penaltyEnergy(V, edges, pen) : e;
     };
