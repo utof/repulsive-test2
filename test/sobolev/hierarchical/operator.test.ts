@@ -147,19 +147,29 @@ describe('RULING 1: structural trace == densified diagonal sum', () => {
             });
 });
 
+/**
+ * `assembleAFlat` of `trefoil(n)` (the exact dense `A`), memoised per n. Why: gate 5a needs it
+ * for every theta and gate 5d for n = 960 again, but it depends on n only (one n = 960 build is
+ * ~0.5 s warm). Shared, so READ-ONLY: both gates only sum its diagonal (test-suite review
+ * 2026-11-24, README.md "Tests").
+ */
+const exactCache = new Map<number, Float64Array>();
+function exactA(n: number): Float64Array {
+    let A = exactCache.get(n);
+    if (!A) {
+        const { vertices, edges } = trefoil(n);
+        A = assembleAFlat(vertices, edges, calculateDisjointPairs(edges), ALPHA, BETA, EPS);
+        exactCache.set(n, A);
+    }
+    return A;
+}
+
 describe('gate 5a: trace ratio tr(A_bct)/tr(A)', () => {
     for (const n of [240, 480, 960])
         for (const theta of THETAS)
             test(`n=${n} theta=${theta}`, () => {
-                const { H, vertices, edges } = prep(n, theta);
-                const A = assembleAFlat(
-                    vertices,
-                    edges,
-                    calculateDisjointPairs(edges),
-                    ALPHA,
-                    BETA,
-                    EPS,
-                );
+                const { H } = prep(n, theta);
+                const A = exactA(n);
                 let trA = 0;
                 for (let i = 0; i < n; i++) trA += A[i * n + i];
                 const ratio = traceA(H) / trA;
@@ -233,9 +243,9 @@ describe('gate 5c: symmetry defect (densified)', () => {
 
 describe('gate 5d: sigma is the HIERARCHICAL trace', () => {
     test('n=960 theta=0.5 differs from tr(A_exact)/n by >= 0.5%', () => {
-        const { H, vertices, edges } = prep(960, 0.5);
+        const { H } = prep(960, 0.5);
         const op = makeHierarchicalOperator(H);
-        const A = assembleAFlat(vertices, edges, calculateDisjointPairs(edges), ALPHA, BETA, EPS);
+        const A = exactA(960);
         let trA = 0;
         for (let i = 0; i < 960; i++) trA += A[i * 960 + i];
         const exactSigma = trA / 960;
