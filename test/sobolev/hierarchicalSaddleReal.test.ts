@@ -72,7 +72,7 @@ import {
 } from '../../src/core/sobolev/linsolve';
 import { calculateDisjointPairs } from '../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
-import { lazy } from '../tier';
+import { fullDescribe, lazy } from '../tier';
 
 setDefaultTimeout(900_000);
 
@@ -202,15 +202,54 @@ function isNullspaceRoute(s: SchurSolver | NullspaceSolver): s is NullspaceSolve
 const STEP = { mode: 'analytical' as const, projectionMode: 'frozen' as const, collectField: true };
 
 // ---------------------------------------------------------------------------
-// A. End-to-end at n = 960: row 8b's headline cell, plus the three tripwires that
-//    show the bar can fail and the one that shows what it cannot see.
+// A. End-to-end: row 8b's headline cell, plus the three tripwires that show the bar can fail
+//    and the one that shows what it cannot see. B. k = 0, the one constraint cell row 8b owns
+//    (A33 item 1 / A35 item 3). Both run at n = 960 (row 8b's own cell, FULL TIER) and at
+//    n = 240 (the DEFAULT TIER stand-in), with the per-n figures in `END_TO_END`.
 // ---------------------------------------------------------------------------
 
-describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, trefoil', () => {
+/**
+ * Per-n figures of sections A and B. n = 960 is row 8b's own cell, and every n = 960 figure in
+ * this file is the task-8b report's (module TSDoc). n = 240 is the default-tier stand-in
+ * (test/tier.ts; README.md "Tests"): its figures were MEASURED 2026-11-24 by re-running these two
+ * sections' exact computations at n = 240 with a scratch script, which reproduced every n = 960
+ * figure here to the printed digits. The gate bars (`COS_BAR`, `MOD_TRANS_BAR`) and every other
+ * bar are the SAME at both n; only the fields below differ, each with its measurement and margin.
+ *
+ * Why n = 960 is full-tier: the two dense n = 960 reference steps cost ~40 s and the cells ~18 s.
+ * What a default run no longer checks: row 8b's headline at the scale floor, i.e. a compression-
+ * accuracy regression that shows only at n = 960, and the `beta = 8` cos tripwire (below).
+ */
+const END_TO_END = {
+    960: {
+        /** Clean `cos∠_Ā`, which the wrong-geometry saddle stays within 1e-3 of. MEASURED 0.999840. */
+        cleanCos: 0.9998,
+        /** `beta = 8` trips the 0.9 bar here: MEASURED 0.878. */
+        beta8TripsCos: true,
+        /** Bar on the `maxit = 1` residual: MEASURED 1.82, bar 1 (1.8x). */
+        maxit1Residual: 1,
+    },
+    240: {
+        /** MEASURED 0.999963 (n = 240, θ = DEFAULT_THETA). */
+        cleanCos: 0.99996,
+        /**
+         * `beta = 8` does NOT trip the 0.9 bar at n = 240: MEASURED cos∠_Ā = 0.9437. A tripwire
+         * that cannot trip is not a test, so at n = 240 only its mod-translation half is asserted
+         * (MEASURED 0.437, 44x over `MOD_TRANS_BAR`); the cos half runs at n = 960, full tier only.
+         */
+        beta8TripsCos: false,
+        /** Bar on the `maxit = 1` residual: MEASURED 0.598, bar 0.3 (2x, as at n = 960). */
+        maxit1Residual: 0.3,
+    },
+} as const;
+
+/** Section A at one n: the barycentre set, the headline gate and its tripwires. */
+function rowEightB(n: 240 | 960): void {
+    const X = END_TO_END[n];
     // Lazy, not describe-body work (test/tier.ts `lazy`): bun runs describe bodies at
     // collection, which cost every run of this file ~44 s at n = 960.
     const ref = lazy(() => {
-        const f = fixture(960);
+        const f = fixture(n);
         const set: ConstraintSet = [barycenterBlock(offsetBaryTarget(f.vertices, f.edges))];
         const dense = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, set, STEP);
         const gd = flatten(dense.descentField as Vec3[]);
@@ -233,23 +272,25 @@ describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, 
     test('cos∠_Ā >= 0.9 against the dense f64 reference step, and the step agrees mod translation', () => {
         const { f, set, dense } = ref();
         const h = runHier();
-        log('n=960 bary build', JSON.stringify(h.saddle.build));
-        log('n=960 bary bct.stats', JSON.stringify(h.saddle.parts.bct.stats));
-        log('n=960 bary cos∠_Ā', h.cos);
-        log('n=960 bary modTrans relErr', h.modTrans);
-        log('n=960 bary residual dense/hier', `${dense.stats.residual} / ${h.out.stats.residual}`);
-        log('n=960 bary tau dense/hier', `${dense.stats.tau} / ${h.out.stats.tau}`);
+        log(`n=${n} bary build`, JSON.stringify(h.saddle.build));
+        log(`n=${n} bary bct.stats`, JSON.stringify(h.saddle.parts.bct.stats));
+        log(`n=${n} bary cos∠_Ā`, h.cos);
+        log(`n=${n} bary modTrans relErr`, h.modTrans);
+        log(`n=${n} bary residual dense/hier`, `${dense.stats.residual} / ${h.out.stats.residual}`);
+        log(`n=${n} bary tau dense/hier`, `${dense.stats.tau} / ${h.out.stats.tau}`);
         log(
-            'n=960 bary projIters dense/hier',
+            `n=${n} bary projIters dense/hier`,
             `${dense.stats.projectionIterations} / ${h.out.stats.projectionIterations}`,
         );
-        log('n=960 bary energy dense/hier', `${dense.energy} / ${h.out.energy}`);
-        // MEASURED 0.999840. The gate, and it is about θ, not about the solver (module TSDoc).
+        log(`n=${n} bary energy dense/hier`, `${dense.energy} / ${h.out.energy}`);
+        // MEASURED 0.999840 (n = 960) / 0.999963 (n = 240). The gate, and it is about θ, not
+        // about the solver (module TSDoc).
         expect(h.cos).toBeGreaterThanOrEqual(COS_BAR);
-        // MEASURED 2.226e-3. The sharp companion.
+        // MEASURED 2.226e-3 (n = 960) / 2.859e-3 (n = 240). The sharp companion.
         expect(h.modTrans).toBeLessThan(MOD_TRANS_BAR);
         // The step itself must RUN, not merely produce a direction: both arms accept at the same τ
         // and take the same number of projection iterates, so the line search saw the same shape.
+        // MEASURED at both n: τ = 1 and 3 projection iterates on both arms.
         expect(h.out.accepted).toBe(true);
         expect(dense.accepted).toBe(true);
         expect(h.out.stats.tau).toBe(dense.stats.tau);
@@ -264,31 +305,45 @@ describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, 
         expect(typeof r.residual).toBe('number');
     });
 
-    test('the 0.9 bar CAN fail: alpha/beta mismatched with the step, and maxit = 1', () => {
-        // The exact trap A33's third fact names: `dispatch.ts` forwards no α/β/ε, so a saddle built
-        // with different ones is an operator that is not the Ā of the step consuming it, and
-        // nothing downstream can see the disagreement. These are reachable through the shipped
-        // options with no knock-out flag, which is why they are the right falsifiers.
-        const bad = runHier({ alpha: 2 });
-        log('n=960 alpha=2 cos∠_Ā', bad.cos);
-        log('n=960 alpha=2 modTrans', bad.modTrans);
-        expect(bad.cos).toBeLessThan(COS_BAR); // MEASURED 0.790
-        expect(bad.modTrans).toBeGreaterThan(MOD_TRANS_BAR); // MEASURED 9.23e-1
+    test(
+        X.beta8TripsCos
+            ? 'the 0.9 bar CAN fail: alpha/beta mismatched with the step, and maxit = 1'
+            : 'the 0.9 bar CAN fail: alpha mismatched with the step, and maxit = 1 (beta: modTrans only)',
+        () => {
+            // The exact trap A33's third fact names: `dispatch.ts` forwards no α/β/ε, so a saddle
+            // built with different ones is an operator that is not the Ā of the step consuming
+            // it, and nothing downstream can see the disagreement. These are reachable through
+            // the shipped options with no knock-out flag, which is why they are the right
+            // falsifiers.
+            const bad = runHier({ alpha: 2 });
+            log(`n=${n} alpha=2 cos∠_Ā`, bad.cos);
+            log(`n=${n} alpha=2 modTrans`, bad.modTrans);
+            // MEASURED 0.790 (n = 960) / 0.8983 (n = 240). At n = 240 it trips by only 0.0017: if
+            // a change lifts it over 0.9 there, compare the n = 960 cell (full tier) before
+            // anything else, and do not move COS_BAR.
+            expect(bad.cos).toBeLessThan(COS_BAR);
+            // MEASURED 9.23e-1 (n = 960) / 6.68e-1 (n = 240)
+            expect(bad.modTrans).toBeGreaterThan(MOD_TRANS_BAR);
 
-        const bad2 = runHier({ beta: 8 });
-        log('n=960 beta=8 cos∠_Ā', bad2.cos);
-        expect(bad2.cos).toBeLessThan(COS_BAR); // MEASURED 0.878
-        expect(bad2.modTrans).toBeGreaterThan(MOD_TRANS_BAR); // MEASURED 7.78e-1
+            const bad2 = runHier({ beta: 8 });
+            log(`n=${n} beta=8 cos∠_Ā`, bad2.cos);
+            log(`n=${n} beta=8 modTrans`, bad2.modTrans);
+            // MEASURED 0.878 (n = 960); 0.9437 at n = 240, which does NOT trip: `END_TO_END`.
+            if (X.beta8TripsCos) expect(bad2.cos).toBeLessThan(COS_BAR);
+            // MEASURED 7.78e-1 (n = 960) / 4.37e-1 (n = 240)
+            expect(bad2.modTrans).toBeGreaterThan(MOD_TRANS_BAR);
 
-        // A truncated GMRES. `etaAccept: Infinity` is REQUIRED to observe it: at the shipped
-        // certificate this very configuration throws `SchurConvergenceError` instead (asserted in
-        // the 'typed errors' block), which is the production behaviour.
-        const bad3 = runHier({ schur: { maxit: 1, etaAccept: Number.POSITIVE_INFINITY } });
-        log('n=960 maxit=1 cos∠_Ā', bad3.cos);
-        log('n=960 maxit=1 residual', bad3.out.stats.residual);
-        expect(bad3.cos).toBeLessThan(COS_BAR); // MEASURED 0.778
-        expect(bad3.out.stats.residual).toBeGreaterThan(1); // MEASURED 1.82 — the certificate's job
-    });
+            // A truncated GMRES. `etaAccept: Infinity` is REQUIRED to observe it: at the shipped
+            // certificate this very configuration throws `SchurConvergenceError` instead
+            // (asserted in the 'typed errors' block), which is the production behaviour.
+            const bad3 = runHier({ schur: { maxit: 1, etaAccept: Number.POSITIVE_INFINITY } });
+            log(`n=${n} maxit=1 cos∠_Ā`, bad3.cos);
+            log(`n=${n} maxit=1 residual`, bad3.out.stats.residual);
+            expect(bad3.cos).toBeLessThan(COS_BAR); // MEASURED 0.778 (n = 960) / 0.780 (n = 240)
+            // MEASURED 1.82 (n = 960) / 0.598 (n = 240) — the certificate's job (`END_TO_END`)
+            expect(bad3.out.stats.residual).toBeGreaterThan(X.maxit1Residual);
+        },
+    );
 
     test('the 0.9 bar is BLIND to a saddle built for the wrong geometry; modTrans is not', () => {
         // `op.n` is the only shape the seam checks (`optimizer.ts:314`), so a saddle built from a
@@ -297,25 +352,23 @@ describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, 
         // is the reason `cos∠_Ā` alone is not an adequate gate for row 8b.
         const scaled = ref().f.vertices.map((p) => [2 * p[0], 2 * p[1], 2 * p[2]] as Vec3);
         const h = runHier(undefined, scaled);
-        log('n=960 wrong-geometry (2x) cos∠_Ā', h.cos);
-        log('n=960 wrong-geometry (2x) modTrans', h.modTrans);
+        log(`n=${n} wrong-geometry (2x) cos∠_Ā`, h.cos);
+        log(`n=${n} wrong-geometry (2x) modTrans`, h.modTrans);
         // The gate PASSES on a wrong operator — that is the finding, asserted so it cannot rot.
-        expect(h.cos).toBeGreaterThanOrEqual(COS_BAR); // MEASURED 0.999839, clean is 0.999840
-        expect(Math.abs(h.cos - 0.9998)).toBeLessThan(1e-3);
+        // MEASURED 0.999839 against a clean 0.999840 (n = 960); 0.999954 against 0.999963 (n = 240).
+        expect(h.cos).toBeGreaterThanOrEqual(COS_BAR);
+        expect(Math.abs(h.cos - X.cleanCos)).toBeLessThan(1e-3);
         // And the companion catches it.
-        expect(h.modTrans).toBeGreaterThan(1); // MEASURED 4.04
+        expect(h.modTrans).toBeGreaterThan(1); // MEASURED 4.04 (n = 960) / 4.06 (n = 240)
     });
-});
+}
 
-// ---------------------------------------------------------------------------
-// B. k = 0, the one constraint cell row 8b owns (A33 item 1 / A35 item 3).
-// ---------------------------------------------------------------------------
-
-describe('k = 0 (empty constraint set) against the dense reference, MOD TRANSLATION', () => {
+/** Section B at one n: the empty constraint set, compared MOD TRANSLATION. */
+function kZero(n: 240 | 960): void {
     // Lazy, not describe-body work (test/tier.ts `lazy`): bun runs describe bodies at
     // collection, which cost every run of this file ~44 s at n = 960.
     const arms = lazy(() => {
-        const f = fixture(960);
+        const f = fixture(n);
         const dense = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, [], STEP);
         const saddle = makeHierarchicalSaddle(f.vertices, f.edges, f.disjointPairs);
         const hier = sobolevStepSet(f.vertices, f.edges, f.disjointPairs, [], { ...STEP, saddle });
@@ -328,26 +381,28 @@ describe('k = 0 (empty constraint set) against the dense reference, MOD TRANSLAT
         const { f, gd, gh } = arms();
         const literal = relErr(gh, gd);
         const modTrans = relErr(demean(gh, f.n), demean(gd, f.n));
-        log('n=960 k0 cos∠_Ā', f.cosA(gh, gd));
-        log('n=960 k0 LITERAL relErr', literal);
-        log('n=960 k0 MOD-TRANSLATION relErr', modTrans);
-        log('n=960 k0 blockMeans(dense)', JSON.stringify(blockMeans(gd, f.n)));
-        log('n=960 k0 blockMeans(hier)', JSON.stringify(blockMeans(gh, f.n)));
-        // The bar, mod translation. MEASURED 2.226e-3 — the SAME number as the k = 3 barycentre
-        // cell's 2.226e-3, because what is left after the gauge is exactly θ's compression.
+        log(`n=${n} k0 cos∠_Ā`, f.cosA(gh, gd));
+        log(`n=${n} k0 LITERAL relErr`, literal);
+        log(`n=${n} k0 MOD-TRANSLATION relErr`, modTrans);
+        log(`n=${n} k0 blockMeans(dense)`, JSON.stringify(blockMeans(gd, f.n)));
+        log(`n=${n} k0 blockMeans(hier)`, JSON.stringify(blockMeans(gh, f.n)));
+        // The bar, mod translation. MEASURED 2.226e-3 at n = 960 — the SAME number as the k = 3
+        // barycentre cell's 2.226e-3, because what is left after the gauge is exactly θ's
+        // compression (n = 240: 2.859e-3 here and in the k = 3 cell, the same coincidence).
         expect(modTrans).toBeLessThan(MOD_TRANS_BAR);
         // NON-VACUITY of the demeaning, which is the whole point of A35 item 3: the literal
         // comparison fails by 370×. If a future change made the dense k = 0 path return the A_σ
         // gauge too, THIS assertion goes red and the demeaning becomes unnecessary — that is the
         // intended signal, not a regression.
-        expect(literal).toBeGreaterThan(0.5); // MEASURED 8.203e-1
+        expect(literal).toBeGreaterThan(0.5); // MEASURED 8.203e-1 (n = 960) / 9.173e-1 (n = 240)
         // Why they differ: `schur.ts` returns the A_σ gauge (`Nᵀx = Nᵀb/σ`, ≈ 0 for a mean-free
         // energy gradient) while dense LDLᵀ on a translation-singular saddle returns an ARBITRARY
         // translation (A35 item 3 measured LDLᵀ vs LU at 6.0e-2 vs 8.0e-2 for the same system).
+        // MEASURED max |mean| 3.7e-17 (n = 960) / 3.8e-17 (n = 240).
         for (const m of blockMeans(gh, f.n)) expect(Math.abs(m)).toBeLessThan(1e-14);
-        expect(l2(blockMeans(gd, f.n))).toBeGreaterThan(1e-3); // MEASURED 0.21
+        expect(l2(blockMeans(gd, f.n))).toBeGreaterThan(1e-3); // MEASURED 0.21 (960) / 0.34 (240)
         // And `cos∠_Ā` cannot see any of it: Ā annihilates the translation, so this reads the same
-        // 0.99984 as the k = 3 cell.
+        // 0.99984 as the k = 3 cell (n = 240: 0.999963, again the k = 3 value).
         expect(f.cosA(gh, gd)).toBeGreaterThanOrEqual(COS_BAR);
     });
 
@@ -361,22 +416,36 @@ describe('k = 0 (empty constraint set) against the dense reference, MOD TRANSLAT
         // neither can the mod-translation bar (both arms' MEAN-FREE parts agree to 2.2e-3).
         // Consequence for the spec: on a translation-singular set the dense path is not a reference
         // for the STEP either, only for `x` mod translation. Do not read this cell as "the two arms
-        // produce the same step".
+        // produce the same step". (Figures above: n = 960. At n = 240: ratio 2.54, energy 0.890.)
         const { f, dense, hier } = arms();
         const nd = l2CurveNorm(dense.descentField as Vec3[], f.vertices, f.edges);
         const nh = l2CurveNorm(hier.descentField as Vec3[], f.vertices, f.edges);
-        log('n=960 k0 l2CurveNorm dense/hier', `${nd} / ${nh}`);
-        log('n=960 k0 curve-norm ratio', nd / nh);
-        log('n=960 k0 energy dense/hier', `${dense.energy} / ${hier.energy}`);
-        expect(nd / nh).toBeGreaterThan(1.5); // MEASURED 1.7686
-        expect(Math.abs(hier.energy - dense.energy)).toBeGreaterThan(1e-2); // MEASURED 0.615
+        log(`n=${n} k0 l2CurveNorm dense/hier`, `${nd} / ${nh}`);
+        log(`n=${n} k0 curve-norm ratio`, nd / nh);
+        log(`n=${n} k0 energy dense/hier`, `${dense.energy} / ${hier.energy}`);
+        expect(nd / nh).toBeGreaterThan(1.5); // MEASURED 1.7686 (n = 960) / 2.5377 (n = 240)
+        // MEASURED 0.615 (n = 960) / 0.890 (n = 240)
+        expect(Math.abs(hier.energy - dense.energy)).toBeGreaterThan(1e-2);
         // Both still ACCEPT, which is why nothing downstream flags the divergence.
         expect(dense.accepted).toBe(true);
         expect(hier.accepted).toBe(true);
         expect(dense.stats.projectionIterations).toBe(0);
         expect(hier.stats.projectionIterations).toBe(0);
     });
-});
+}
+
+// n = 240: DEFAULT TIER. n = 960: row 8b's own cell, FULL TIER ONLY (`END_TO_END` says what waits).
+describe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 240, trefoil', () =>
+    rowEightB(240));
+fullDescribe('row 8b end-to-end: sobolevStepSet on the hierarchical route, n = 960, trefoil', () =>
+    rowEightB(960),
+);
+describe('k = 0 (empty constraint set) against the dense reference, MOD TRANSLATION, n = 240', () =>
+    kZero(240));
+fullDescribe(
+    'k = 0 (empty constraint set) against the dense reference, MOD TRANSLATION, n = 960',
+    () => kZero(960),
+);
 
 // ---------------------------------------------------------------------------
 // C. The exactness differential — the cell that CAN separate the solver from θ.
