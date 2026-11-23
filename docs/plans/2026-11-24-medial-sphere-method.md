@@ -126,3 +126,35 @@ by a failure:
 | Every edge wiggles, the drawing swells to 1.5–2.4× its size | edges meeting at a junction are always within range, so they repel forever (the space-filling behaviour) | edges that share a junction do not interact |
 | A squeezed-then-released edge stays a zigzag | springs do not resist bending | a small constant tension (the paper's length term at 0.5) |
 | The drawing opens very slowly | mass weight 1 turns whole-drawing modes into plain gradient descent | mass weight 0.1 |
+
+Benchmark (`bench/results/2026-11-23-medial-graph-layout.jsonl`; a jittered grid whose middle
+third is squeezed to a fifth, 8 segments per edge; crossings before → after, clearance =
+smallest distance between non-incident edges):
+
+| Segments | Medial-sphere graph flow | Tangent-point flow + crossing guard |
+|---|---|---|
+| 896 | 17 ms/step; converged in 196 steps (3.4 s); crossings 0 → 0; clearance 0.17 → 0.65 | 759 ms/step; 10 steps (7.6 s); 0 → 0; 0.17 → 0.64 |
+| 4,896 | 201 ms/step; NOT converged in 300 steps; 0 → 0; clearance 0.14 → 0.11 | first step rejected (this flow does not run a graph of 4,608 points) |
+| 20,160 | 1,173 ms/step; NOT converged; 0 → 0; clearance → under 1e-4 | not attempted (minutes per step) |
+
+**Verdict: PARTIAL.** Against the bar ("≥ 10× faster per step at 5k+ segments and keeps a clean
+drawing clean"): it is 44× faster per step where both run, it is the only one of the two that
+runs at 5k and 20k, and it never created a crossing. But at 5k and 20k it does not converge and
+lets strands be pressed to within rounding of each other, so it is not a usable layout engine
+at the target size yet.
+
+What is known about the failure at scale:
+- The node movement per step stays near 4e-2·r instead of decaying (chatter, as in Spike A).
+- A contact barrier on the push (`barrier` = 1 or 2: the deficit times `(rMax/R)^barrier`) does
+  NOT fix it — tried on the 4,896-segment grid for 300 steps; clearance ends at 0.12 and
+  under 1e-4. The option is left in, off by default.
+- The drawing opens to height 13.8 of a rest height of 17 and stops: whole-drawing motion is
+  slow. The mass term screens the Laplacian beyond about one grid cell, and lowering it makes
+  the Jacobi-preconditioned CG need 170–200 iterations.
+- Time per step grows faster than the size (60 µs per node-step against 16 in Spike A): the
+  per-node limits look at every pair within the full range.
+
+Next for the graph flow, in order: (1) find and damp the chatter (it is shared with Spike A, so
+it is worth doing once, properly: an energy that is consistent with the frozen-centre gradient,
+or a line search on it); (2) a real sparse solver so the mass term can go to ~0; (3) per-node
+limits that only look as far as the node wants to move.
