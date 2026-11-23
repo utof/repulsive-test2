@@ -12,8 +12,8 @@ import {
     makeDirectSolve,
 } from '../../../src/core/sobolev/hierarchical/directSolve';
 import {
+    makeAutoSaddle,
     makeDirectSaddle,
-    makeRingSaddle,
 } from '../../../src/core/sobolev/hierarchical/hierarchicalSaddle';
 import { assembleAFlat } from '../../../src/core/sobolev/innerProduct';
 import { calculateDisjointPairs, gradientAnalytical } from '../../../src/core/tangentPointEnergy';
@@ -161,27 +161,27 @@ describe('directIsCheaper', () => {
     });
 });
 
-describe('makeRingSaddle', () => {
+describe('makeAutoSaddle', () => {
     test("'auto' takes the direct route on a tangle and the tree on a large smooth ring", () => {
         const t = tangle(300, 6);
-        const a = makeRingSaddle(t.V, t.E);
+        const a = makeAutoSaddle(t.V, t.E);
         expect(a.solver).toBe('direct');
         // MEASURED: every pair of this tangle is near-field.
         expect((a.nearPairs ?? 0) / (300 * 300)).toBeGreaterThan(0.5);
 
         const g = largeKnot.generate({ vertices: 3000 });
-        const b = makeRingSaddle(g.vertices, g.edges);
+        const b = makeAutoSaddle(g.vertices, g.edges);
         expect(b.solver).toBe('gmres');
         expect(directIsCheaper(3000, b.nearPairs ?? 0)).toBe(false);
     });
 
     test('a forced route is honoured; above the cap the direct route is refused', () => {
         const t = tangle(200, 7);
-        expect(makeRingSaddle(t.V, t.E, { linearSolver: 'gmres' }).solver).toBe('gmres');
-        expect(makeRingSaddle(t.V, t.E, { linearSolver: 'direct' }).solver).toBe('direct');
+        expect(makeAutoSaddle(t.V, t.E, { linearSolver: 'gmres' }).solver).toBe('gmres');
+        expect(makeAutoSaddle(t.V, t.E, { linearSolver: 'direct' }).solver).toBe('direct');
         const g = largeKnot.generate({ vertices: DIRECT_MAX_N + 2 });
         expect(makeDirectSaddle(g.vertices, g.edges)).toBeNull();
-        expect(makeRingSaddle(g.vertices, g.edges, { linearSolver: 'direct' }).solver).toBe(
+        expect(makeAutoSaddle(g.vertices, g.edges, { linearSolver: 'direct' }).solver).toBe(
             'gmres',
         );
     });
@@ -198,7 +198,7 @@ describe('makeRingSaddle', () => {
         });
         const rhs = Array.from({ length: 3 * n }, (_, i) => Math.cos(0.05 * i));
         const solve = (linearSolver: 'gmres' | 'direct') =>
-            makeRingSaddle(g.vertices, g.edges, { linearSolver, schur: { tol: 1e-10 } })
+            makeAutoSaddle(g.vertices, g.edges, { linearSolver, schur: { tol: 1e-10 } })
                 .saddle.prepare(C)
                 .solve(rhs).x;
         // MEASURED 2.2e-3: the size of the block cluster tree's own approximation at θ = 0.25.

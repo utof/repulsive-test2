@@ -12,6 +12,7 @@
  * This module is worker-bundle pure: no store, no React.
  * @see bench/results/2026-11-23-h-step-scale.jsonl, bench/results/2026-11-23-bh-step-scale.jsonl
  */
+import { DIRECT_MAX_N } from './sobolev/hierarchical/directSolve';
 import type { Edge } from './testConfigs';
 
 /** The user's preference. `'auto'` picks by size and topology. */
@@ -36,6 +37,17 @@ export const PAIR_LIST_MAX_N = 4000;
  * is exact there, so it stays the default.
  */
 export const HIERARCHICAL_AUTO_MIN_N = 240;
+
+/**
+ * Smallest graph that is NOT one closed loop that `'auto'` sends to the hierarchical route —
+ * where such a graph always runs the direct solver (`makeAutoSaddle`).
+ * Why 64: measured, one step from a force-laid-out start (`bench/scale/graphRoutes.ts`,
+ * 2026-11-23), dense against direct: 30 / 10 ms at 27 nodes, 140 / 34 ms at 64, 72 / 23 ms at
+ * 127 (a tree), 694 / 251 ms at 216, 3 824 / 1 179 ms at 512 — the same exact-energy decrease
+ * to ten digits every time. Direct is faster at every size; below 64 the dense route costs a few tens of
+ * milliseconds and evaluates the energy exactly, so it stays the default there.
+ */
+export const GRAPH_AUTO_MIN_N = 64;
 
 /**
  * GMRES stopping tolerance of the hierarchical route in the app.
@@ -140,10 +152,18 @@ export function resolveSobolevRoute(
     analytical: boolean,
 ): SobolevRoute | null {
     const canDense = pairListFits(nVertices);
-    const canHier = analytical && isClosedNaturalRing(nVertices, edges);
+    // One closed loop: tree or direct, at any size. Any other graph: the direct solver, which
+    // is capped (`DIRECT_MAX_N`) — the tree route does not serve graphs (#93).
+    const canHier =
+        analytical &&
+        edges.length > 0 &&
+        (isClosedNaturalRing(nVertices, edges) || nVertices <= DIRECT_MAX_N);
     if (!canDense) return canHier ? 'hierarchical' : null;
     if (!canHier) return 'dense';
     if (preference === 'dense') return 'dense';
     if (preference === 'hierarchical') return 'hierarchical';
-    return nVertices >= HIERARCHICAL_AUTO_MIN_N ? 'hierarchical' : 'dense';
+    const autoMin = isClosedNaturalRing(nVertices, edges)
+        ? HIERARCHICAL_AUTO_MIN_N
+        : GRAPH_AUTO_MIN_N;
+    return nVertices >= autoMin ? 'hierarchical' : 'dense';
 }

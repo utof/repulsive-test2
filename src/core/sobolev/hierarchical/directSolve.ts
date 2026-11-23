@@ -37,6 +37,13 @@ import type { HierarchicalOperator } from './operator';
 export const DIRECT_MAX_N = 4000;
 
 /**
+ * Largest relative error accepted in {@link makeDirectSolve}'s probe solve. Healthy curves
+ * measure 1e-14 to 3e-13; a factor of a singular matrix measures O(1) or NaN. 1e-6 separates
+ * the two with room on both sides.
+ */
+const DIRECT_PROBE_TOL = 1e-6;
+
+/**
  * Is the direct route cheaper than the tree route for a ring of `n` vertices whose block lists
  * hold `nearPairs` near-field edge pairs?
  *
@@ -260,8 +267,9 @@ export interface DirectSolve {
 }
 
 /**
- * Assemble, factor, and wrap. Returns `null` when the factorization meets a non-positive pivot
- * (a degenerate curve); the caller then uses another route.
+ * Assemble, factor, verify, and wrap. Returns `null` when the factorization meets a non-positive
+ * pivot or fails its probe solve (a degenerate curve, or a graph whose `A` is singular beyond
+ * the constants); the caller then uses another route. Works for any graph, not only a ring.
  *
  * `A` has the constants in its kernel (translations), so it is `A_σ = A + (σ/n)·11ᵀ` that is
  * factored — the same shift, with the same σ = tr(A)/n, that the hierarchical route solves
@@ -342,10 +350,33 @@ export function makeDirectSolve(
             }
         }
     };
+    // One probe before anything trusts the factor: solve A_σ x = A_σ u for a fixed u and compare.
+    // Why: Cholesky only fails outright on a non-positive pivot. A graph whose A is singular
+    // beyond the constants (an isolated vertex, a star with no two disjoint edges) can instead
+    // slip through on pivots that are positive by rounding alone, and the "inverse" is garbage.
+    // MEASURED on healthy curves: 1e-14 at n = 500, 3e-13 at n = 2 000.
+    const u = new Float64Array(3 * n);
+    for (let i = 0; i < 3 * n; i++) u[i] = Math.sin(1.7 * i + 0.3);
+    const b = new Float64Array(3 * n);
+    const x = new Float64Array(3 * n);
+    applyA(u, b);
+    for (let c = 0; c < 3; c++) {
+        let sum = 0;
+        for (let i = 0; i < n; i++) sum += u[c * n + i];
+        for (let i = 0; i < n; i++) b[c * n + i] += shift * sum;
+    }
+    apply(b, x);
+    let err = 0;
+    let ref = 0;
+    for (let i = 0; i < 3 * n; i++) {
+        err += (x[i] - u[i]) ** 2;
+        ref += u[i] ** 2;
+    }
+    if (!(Math.sqrt(err / ref) < DIRECT_PROBE_TOL)) return null;
     return {
         op: { n, sigma, applyA },
         precond: { n, sigma, apply },
         assembleMs: t1 - t0,
-        factorMs: t2 - t1,
+        factorMs: performance.now() - t1,
     };
 }

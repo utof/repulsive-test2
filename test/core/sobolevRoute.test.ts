@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import {
+    GRAPH_AUTO_MIN_N,
     HIERARCHICAL_AUTO_MIN_N,
     isClosedNaturalRing,
     needsRefinement,
@@ -65,10 +66,27 @@ describe('resolveSobolevRoute', () => {
         expect(resolveSobolevRoute('dense', mid, ring(mid), true)).toBe('dense');
         expect(resolveSobolevRoute('hierarchical', small, ring(small), true)).toBe('hierarchical');
     });
-    test('hierarchical falls back to dense for an open chain and for finite differences', () => {
-        expect(resolveSobolevRoute('hierarchical', mid, chain(mid), true)).toBe('dense');
+    test('finite differences always take the dense route', () => {
         expect(resolveSobolevRoute('hierarchical', mid, ring(mid), false)).toBe('dense');
-        expect(resolveSobolevRoute('auto', mid, chain(mid), true)).toBe('dense');
+        expect(resolveSobolevRoute('hierarchical', mid, chain(mid), false)).toBe('dense');
+    });
+    test('a graph that is not one closed loop is served too (by the direct solver)', () => {
+        // An open chain stands for every non-ring: junctions, several components, open ends.
+        expect(resolveSobolevRoute('hierarchical', mid, chain(mid), true)).toBe('hierarchical');
+        expect(resolveSobolevRoute('dense', mid, chain(mid), true)).toBe('dense');
+        // 'auto' switches such a graph at GRAPH_AUTO_MIN_N, not at the ring's threshold.
+        expect(GRAPH_AUTO_MIN_N).toBeLessThan(HIERARCHICAL_AUTO_MIN_N);
+        expect(
+            resolveSobolevRoute('auto', GRAPH_AUTO_MIN_N - 1, chain(GRAPH_AUTO_MIN_N - 1), true),
+        ).toBe('dense');
+        expect(resolveSobolevRoute('auto', GRAPH_AUTO_MIN_N, chain(GRAPH_AUTO_MIN_N), true)).toBe(
+            'hierarchical',
+        );
+        expect(resolveSobolevRoute('auto', GRAPH_AUTO_MIN_N, ring(GRAPH_AUTO_MIN_N), true)).toBe(
+            'dense',
+        );
+        // No edges, no route but the dense one (which reports the singular system itself).
+        expect(resolveSobolevRoute('hierarchical', 5, [], true)).toBe('dense');
     });
     test('above the pair-list limit a ring is hierarchical whatever the preference', () => {
         expect(resolveSobolevRoute('dense', big, ring(big), true)).toBe('hierarchical');

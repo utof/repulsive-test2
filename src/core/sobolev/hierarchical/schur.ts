@@ -84,7 +84,14 @@
  * @issue utof/repulsive-test2#62
  */
 import { operatorSaddleResidual, SolveNotCertifiedError } from '../linsolve';
-import { applyAsigma, backwardError, estimateNorm2, type GmresStop, gmres } from './gmres';
+import {
+    applyAsigma,
+    backwardError,
+    estimateNorm2,
+    type GmresResult,
+    type GmresStop,
+    gmres,
+} from './gmres';
 import type { HierarchicalOperator } from './operator';
 import type { Preconditioner } from './precond';
 
@@ -241,6 +248,15 @@ export interface SchurOptions {
     /** Required to pass `defect` (mirrors `precond.ts`'s and `apply.ts`'s knock-out guards). */
     knockOut?: boolean;
     defect?: SchurDefect;
+    /**
+     * The "preconditioner" IS `A_σ⁻¹` (the direct route's Cholesky solve). Each solve is then
+     * ONE application of it instead of a GMRES run — which with an exact inverse converges in
+     * one iteration anyway but spends two applications and a matvec getting there. The TRUE
+     * backward error is still measured with one matvec and still checked against `etaAccept`,
+     * so a caller that sets this on an inexact preconditioner is refused, not believed.
+     * @see src/core/sobolev/hierarchical/directSolve.ts
+     */
+    exactInverse?: boolean;
 }
 
 /**
@@ -507,7 +523,25 @@ export function prepareSchur(
                 },
             };
         }
-        const res = gmres(op, precond, b, { tol, maxit: opts.maxit });
+        let res: Pick<
+            GmresResult,
+            'x' | 'iters' | 'matvecs' | 'precondApplies' | 'stop' | 'recurrence' | 'censored'
+        >;
+        if (opts.exactInverse) {
+            const x = new Float64Array(m);
+            precond.apply(b, x);
+            // Recorded as a zero-iteration run that met its tolerance: the
+            // certificate below (η, from a true matvec) is what vouches for it.
+            res = {
+                x,
+                iters: 0,
+                matvecs: 0,
+                precondApplies: 1,
+                stop: 'tol',
+                recurrence: new Float64Array(0),
+                censored: false,
+            };
+        } else res = gmres(op, precond, b, { tol, maxit: opts.maxit });
         applyAsigma(op, res.x, ax);
         let rr = 0;
         for (let i = 0; i < m; i++) rr += (b[i] - ax[i]) ** 2;
