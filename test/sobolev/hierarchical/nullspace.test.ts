@@ -71,6 +71,7 @@ import {
 } from '../../../src/core/sobolev/linsolve';
 import { calculateDisjointPairs, gradientAnalytical } from '../../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../../src/core/testConfigs';
+import { fullDescribe } from '../../tier';
 import { cholesky, densify, spectrum } from './denseSpectrum';
 
 setDefaultTimeout(900_000);
@@ -1300,7 +1301,12 @@ describe('refusals (all typed, all trippable)', () => {
 // 8. n = 960: the amended bar where it matters, and the oracle's own failure (A35 item 1).
 // ===========================================================================
 
-describe('n = 960 (the amended bar, and the oracle over it)', () => {
+// FULL TIER ONLY (`TEST_TIER=full`, test/tier.ts): one refined dense truth of the 3843-dim saddle
+// (~25 s). Why: the six n = 48/240 cells of 'accuracy against the DD-refined truth' assert the same
+// 1e-10 bar on x and λ in the default tier; what waits for a full run is the bar at n = 960, the
+// floor of the production range, where the n²-conditioned λ recovery bites and the dense oracle
+// itself is over the bar (README.md "Tests").
+fullDescribe('n = 960 (the amended bar, and the oracle over it)', () => {
     test('bary+edge, grad/−φ: within 1e-10 of truth while dense LDLᵀ is NOT', () => {
         const n = 960;
         const fx = fixture(n);
