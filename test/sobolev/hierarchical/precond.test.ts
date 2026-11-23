@@ -78,6 +78,7 @@ import {
     makePreconditioner,
 } from '../../../src/core/sobolev/hierarchical/precond';
 import type { Edge, Vec3 } from '../../../src/core/testConfigs';
+import { fullTest } from '../../tier';
 import { cholesky, cholSolve, densify, matmul, spectrum, transpose } from './denseSpectrum';
 
 setDefaultTimeout(900_000);
@@ -327,6 +328,25 @@ function kappaOf(M: Float64Array, Asig: Float64Array, n: number) {
     return spectrum(matmul(transpose(R, n), matmul(M, R, n), n), n);
 }
 
+const shippedFactorCache = new Map<number, { R: Float64Array; Rt: Float64Array }>();
+/**
+ * `A_σ = R Rᵀ` of the SHIPPED operator at `n` (`prep(n)`), with `Rᵀ`, memoised per n. Why: the
+ * κ ladder's n = 960 rung and the in-band sweep factor the same n = 960 `A_σ` (~1.5 s); the
+ * spectrum they take from it is the same `spectrum(Rᵀ (M R))` `kappaOf` takes, so sharing changes
+ * no bit. READ-ONLY: `matmul`/`transpose` only read it. Never hand `R` or `Rt` to `spectrum`,
+ * whose `tridiagonalize` destroys its input (test-suite review 2026-11-24, README.md "Tests").
+ */
+function shippedFactor(n: number): { R: Float64Array; Rt: Float64Array } {
+    let f = shippedFactorCache.get(n);
+    if (!f) {
+        const { H, op } = prep(n);
+        const R = cholesky(densifyASigma(H, op.sigma, n), n);
+        f = { R, Rt: transpose(R, n) };
+        shippedFactorCache.set(n, f);
+    }
+    return f;
+}
+
 /** Least-squares slope of `log y` against `log n` — H5 property 2's exponent `p`. */
 function fitExponent(ns: number[], ys: number[]): number {
     const k = ns.length;
@@ -388,86 +408,84 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
         }
     });
 
-    test('κ_eig of the SHIPPED Ã⁻¹A_σ, n=64..960, both definitions', () => {
-        // n=960 ADDED with the property-2 level bar (A32, #71): the gate must cover CLAUDE.md's
-        // floor of the production regime, and n=960 is where `κ_excl` peaks over the whole measured
-        // ladder (20.8632 at θ=0.5, 19.6713 here at θ=0.25 — it is NOT monotone, see the bar below).
-        // Costs ~8 s of the suite's time; n=1920 would cost 46 s and n=3840 442 s (`eig` is O(n³)),
-        // which is why the ladder stops here and A32 registers no bar that needs those points.
-        const ns = [64, 120, 240, 480, 960];
-        const kInc: number[] = [];
-        const kExc: number[] = [];
-        for (const n of ns) {
-            const { vertices, H, op, P } = prep(n);
-            // A-SCALE: the κ of the shipped operator was NOT scale-invariant under the old bare
-            // `massWeight = 1` (module TSDoc, 53-62x between extent 5.4716 and 1.0) and is only
-            // NEARLY so now (the #72 describe below), so a number without its extent is still not a
-            // measurement.
-            const ext = extentOf(vertices);
-            log(`extent n=${n}`, ext);
-            expect(ext / EXTENT).toBeCloseTo(1, 2);
-            const sp = kappaOf(
-                densify(n, (u, out) => P.applyScalar(u, out)),
-                densifyASigma(H, op.sigma, n),
-                n,
-            );
-            kInc.push(sp.lambdaMax / sp.lambda1);
-            kExc.push(sp.lambdaMax / sp.lambda2);
-            log(`λ₁ n=${n}`, sp.lambda1);
-            log(`λ₂ n=${n}`, sp.lambda2);
-            log(`λ_max n=${n}`, sp.lambdaMax);
-            log(`λ_max/λ₂ n=${n}`, sp.lambdaMax / sp.lambda2);
-            log(`kappaInclConst n=${n}`, sp.lambdaMax / sp.lambda1);
-            log(`kappaExclConst n=${n}`, sp.lambdaMax / sp.lambda2);
-            log(`nullDim(Ã⁻¹A_σ) n=${n}`, sp.nullDim);
-            // The pinned constant mode, again exactly 1, and it is the SMALLEST eigenvalue — which
-            // is why the corpus's `max|λ|/min|λ|` is just `λ_max`.
-            //
-            // THESE TWO LINES ARE THE PRECONDITION OF `kappaExclConst`, NOT A SANITY CHECK — do not
-            // weaken them (A32, @issue utof/repulsive-test2#71). `κ_excl := λ_max/λ₂` means
-            // "excluding the constant mode" ONLY while the constant mode is the smallest
-            // eigenvalue. MEASURED: `Ã⁻¹A_σ·1 = 1` to 1.8652e-14 at m̂ ∈ {30,70,100,300}
-            // (bit-identical — the `+11ᵀ/(nσ)` correction is mass-independent), but at m̂=100
-            // λ₁=0.7486 and λ₂=0.7652 are BOTH below 1, so two non-constant modes sit under the
-            // constant one and `λ_max/λ₂` silently stops being the excluded-constant conditioning.
-            // Any future trip demo outside the live mass band must assert this pair or declare the
-            // quantity invalid — the rule the withdrawn m̂ ∈ (70, 100] demo below broke, and that
-            // the in-band sweep test ("κ_excl's in-band supremum") now follows.
-            expect(Math.abs(sp.lambda1 - 1)).toBeLessThan(1e-11 * sp.lambdaMax);
-            expect(sp.lambda2).toBeGreaterThan(1.5);
-            expect(sp.nullDim).toBe(0);
-            // === H5 PROPERTY 2, the PRIMARY and only numeric bar (A32 supersedes A22) ===========
-            // `κ_excl ≤ 40` on the unnormalised trefoil, over a 15x range of n. Bounded `κ_excl`
-            // IS mesh independence — stated as a bound rather than a slope, which is what A22's own
-            // derivation said the property names. MEASURED max 19.6713 at n=960 here (θ=0.25, which
-            // is what `bct.ts` DEFAULT_THETA ships) ⇒ 2.03x margin, and 20.8632 at θ=0.5 (spec §4.1's
-            // ruled target, pending H6 — #51) ⇒ 1.92x. It passes at BOTH, so the gate survives the
-            // day H6 flips the default; the withdrawn `R` changes SIGN between them.
-            //
-            // SUPERSEDED SENTENCE, kept visible rather than deleted:
-            // > "TRIPS m̂=100 (65.9672 at n=960), 300 and 1000; does NOT trip m̂=70 (36.7279), so the
-            // >  DEMONSTRATED sensitivity floor is m̂ ∈ (70, 100]"
-            // WITHDRAWN as a demonstration OF THIS BAR, because it contradicts the precondition
-            // stated sixteen lines above it: m̂=100 has λ₁=0.748643 and λ₂=0.765218 (both below 1)
-            // and m̂=70 has λ₂=1.479087, so BOTH endpoints are outside the live mass band and the
-            // harness rules them `INVALID`, not RED (`hCalibration.ts` `finaliseH5`). The readings
-            // themselves are reproduced and correct; what they demonstrate is the PRECONDITION
-            // firing, not the level bar tripping. The in-band statement that replaces it is
-            // asserted in its own test below ("κ_excl's in-band supremum"), which publishes the
-            // 1.10x margin instead of leaving the bar's reachability unstated. A22's "trips m̂=70 at
-            // 41.8" was the lab operator and is not this one either.
-            //
-            // FIXTURE-SCOPED: K=40 must NOT be applied to another curve — at this mass weight
-            // `κ_excl` reaches 138 (arc n=480) and 159 (helix n=960) against the trefoil's ~20.
-            // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8 (A32)
-            // @issue utof/repulsive-test2#71
-            expect(sp.lambdaMax / sp.lambda2).toBeLessThan(40);
-            // H5 property 3 on the SHIPPED operator for the first time (it was quoted from
-            // `e0-closer-0b.json` before): `κ_eig · u_f32 <= 1e-2`. RECORDED, not a licence to
-            // solve in f32 — a bounded condition number is necessary, not sufficient.
-            log(`kappaInclConst · u_f32 n=${n}`, (sp.lambdaMax / sp.lambda1) * U_F32);
-            expect((sp.lambdaMax / sp.lambda1) * U_F32).toBeLessThan(1e-2);
-        }
+    /**
+     * One rung of the κ_eig ladder of the SHIPPED `Ã⁻¹A_σ`, with EVERY per-n assertion of the
+     * ladder; returns `κ_incl` / `κ_excl` for the ladder fit. Why a function: the default-tier
+     * ladder (n = 64..480) and the full-tier n = 960 test run the same rung code, so the n = 960
+     * rung is checked exactly as before, only in the full tier (test/tier.ts).
+     */
+    const kappaRung = (n: number): { kInc: number; kExc: number } => {
+        const { vertices, P } = prep(n);
+        // A-SCALE: the κ of the shipped operator was NOT scale-invariant under the old bare
+        // `massWeight = 1` (module TSDoc, 53-62x between extent 5.4716 and 1.0) and is only
+        // NEARLY so now (the #72 describe below), so a number without its extent is still not a
+        // measurement.
+        const ext = extentOf(vertices);
+        log(`extent n=${n}`, ext);
+        expect(ext / EXTENT).toBeCloseTo(1, 2);
+        // `kappaOf` with the memoised factor (`shippedFactor`): same arithmetic, same bits.
+        const { R, Rt } = shippedFactor(n);
+        const M = densify(n, (u, out) => P.applyScalar(u, out));
+        const sp = spectrum(matmul(Rt, matmul(M, R, n), n), n);
+        log(`λ₁ n=${n}`, sp.lambda1);
+        log(`λ₂ n=${n}`, sp.lambda2);
+        log(`λ_max n=${n}`, sp.lambdaMax);
+        log(`λ_max/λ₂ n=${n}`, sp.lambdaMax / sp.lambda2);
+        log(`kappaInclConst n=${n}`, sp.lambdaMax / sp.lambda1);
+        log(`kappaExclConst n=${n}`, sp.lambdaMax / sp.lambda2);
+        log(`nullDim(Ã⁻¹A_σ) n=${n}`, sp.nullDim);
+        // The pinned constant mode, again exactly 1, and it is the SMALLEST eigenvalue — which
+        // is why the corpus's `max|λ|/min|λ|` is just `λ_max`.
+        //
+        // THESE TWO LINES ARE THE PRECONDITION OF `kappaExclConst`, NOT A SANITY CHECK — do not
+        // weaken them (A32, @issue utof/repulsive-test2#71). `κ_excl := λ_max/λ₂` means
+        // "excluding the constant mode" ONLY while the constant mode is the smallest
+        // eigenvalue. MEASURED: `Ã⁻¹A_σ·1 = 1` to 1.8652e-14 at m̂ ∈ {30,70,100,300}
+        // (bit-identical — the `+11ᵀ/(nσ)` correction is mass-independent), but at m̂=100
+        // λ₁=0.7486 and λ₂=0.7652 are BOTH below 1, so two non-constant modes sit under the
+        // constant one and `λ_max/λ₂` silently stops being the excluded-constant conditioning.
+        // Any future trip demo outside the live mass band must assert this pair or declare the
+        // quantity invalid — the rule the withdrawn m̂ ∈ (70, 100] demo below broke, and that
+        // the in-band sweep test ("κ_excl's in-band supremum") now follows.
+        expect(Math.abs(sp.lambda1 - 1)).toBeLessThan(1e-11 * sp.lambdaMax);
+        expect(sp.lambda2).toBeGreaterThan(1.5);
+        expect(sp.nullDim).toBe(0);
+        // === H5 PROPERTY 2, the PRIMARY and only numeric bar (A32 supersedes A22) ===========
+        // `κ_excl ≤ 40` on the unnormalised trefoil, over a 15x range of n. Bounded `κ_excl`
+        // IS mesh independence — stated as a bound rather than a slope, which is what A22's own
+        // derivation said the property names. MEASURED max 19.6713 at n=960 here (θ=0.25, which
+        // is what `bct.ts` DEFAULT_THETA ships) ⇒ 2.03x margin, and 20.8632 at θ=0.5 (spec §4.1's
+        // ruled target, pending H6 — #51) ⇒ 1.92x. It passes at BOTH, so the gate survives the
+        // day H6 flips the default; the withdrawn `R` changes SIGN between them.
+        //
+        // SUPERSEDED SENTENCE, kept visible rather than deleted:
+        // > "TRIPS m̂=100 (65.9672 at n=960), 300 and 1000; does NOT trip m̂=70 (36.7279), so the
+        // >  DEMONSTRATED sensitivity floor is m̂ ∈ (70, 100]"
+        // WITHDRAWN as a demonstration OF THIS BAR, because it contradicts the precondition
+        // stated sixteen lines above it: m̂=100 has λ₁=0.748643 and λ₂=0.765218 (both below 1)
+        // and m̂=70 has λ₂=1.479087, so BOTH endpoints are outside the live mass band and the
+        // harness rules them `INVALID`, not RED (`hCalibration.ts` `finaliseH5`). The readings
+        // themselves are reproduced and correct; what they demonstrate is the PRECONDITION
+        // firing, not the level bar tripping. The in-band statement that replaces it is
+        // asserted in its own test below ("κ_excl's in-band supremum"), which publishes the
+        // 1.10x margin instead of leaving the bar's reachability unstated. A22's "trips m̂=70 at
+        // 41.8" was the lab operator and is not this one either.
+        //
+        // FIXTURE-SCOPED: K=40 must NOT be applied to another curve — at this mass weight
+        // `κ_excl` reaches 138 (arc n=480) and 159 (helix n=960) against the trefoil's ~20.
+        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8 (A32)
+        // @issue utof/repulsive-test2#71
+        expect(sp.lambdaMax / sp.lambda2).toBeLessThan(40);
+        // H5 property 3 on the SHIPPED operator for the first time (it was quoted from
+        // `e0-closer-0b.json` before): `κ_eig · u_f32 <= 1e-2`. RECORDED, not a licence to
+        // solve in f32 — a bounded condition number is necessary, not sufficient.
+        log(`kappaInclConst · u_f32 n=${n}`, (sp.lambdaMax / sp.lambda1) * U_F32);
+        expect((sp.lambdaMax / sp.lambda1) * U_F32).toBeLessThan(1e-2);
+        return { kInc: sp.lambdaMax / sp.lambda1, kExc: sp.lambdaMax / sp.lambda2 };
+    };
+
+    /** The ladder-level readings (exponent fits, R, projections): LOGGED, never asserted. */
+    const logLadder = (ns: number[], kInc: number[], kExc: number[]): void => {
         // H5 property 2's exponent. LOGGED, NOT ASSERTED, and deliberately: the `|p| <= 0.05` bar
         // reads RED on this operator AND on the lab reference under the excluded-constant
         // definition, so it is a bar a correct operator fails (#71, A22 — WITHDRAWN). The POINT SET
@@ -517,96 +535,134 @@ describe('precond: H5 κ_eig(Ã⁻¹A_σ) on the operator src/ ships (spec §7.8
             'kappaInclConst, shipped vs LAB at extent 5.4716, n=240',
             `${kInc[2]} vs ${e4row(240, 'vertex').kappaPrecond}`,
         );
+    };
+
+    test('κ_eig of the SHIPPED Ã⁻¹A_σ, n=64..480, both definitions', () => {
+        // n=960 ADDED with the property-2 level bar (A32, #71): the gate must cover CLAUDE.md's
+        // floor of the production regime, and n=960 is where `κ_excl` peaks over the whole measured
+        // ladder (20.8632 at θ=0.5, 19.6713 here at θ=0.25 — it is NOT monotone, see the bar below).
+        // Costs ~8 s of the suite's time; n=1920 would cost 46 s and n=3840 442 s (`eig` is O(n³)),
+        // which is why the ladder stops here and A32 registers no bar that needs those points.
+        // DEFAULT TIER: the rungs n = 64..480 (~1.6 s). The n = 960 rung (~8 s, O(n³) `eig`) is the
+        // full-tier test below, with the same per-rung code (README.md "Tests").
+        const ns = [64, 120, 240, 480];
+        const rungs = ns.map(kappaRung);
+        logLadder(
+            ns,
+            rungs.map((r) => r.kInc),
+            rungs.map((r) => r.kExc),
+        );
     });
 
-    test("κ_excl's in-band supremum is published as a MARGIN, and 40 is not reachable by mass weight", () => {
-        // WHAT THIS TEST IS FOR. The level bar above (`κ_excl < 40`) passes at 19.67, and a bar that
-        // passes tells you nothing until you know what would have failed it. On the mass-weight
-        // axis the answer is NOTHING: `κ_excl := λ_max/λ₂` is "excluding the constant mode" only
-        // while λ₁ == 1 and λ₂ > 1.5 (the precondition stated with the bar above), and every m̂ that
-        // drives `κ_excl` over 40 has already left that band — so `hCalibration.ts`'s `finaliseH5`
-        // returns INVALID there, never RED. This test measures where the band ends, asserts the
-        // supremum of `κ_excl` INSIDE it, and publishes the margin, which is what converts an
-        // unreachable bar into a stated one.
-        //
-        // THE BAR IS NOT MOVED, and must not be. 40 is `[A32]`'s, superseding `[A22]`. Choosing a
-        // tighter bar from this very sweep is the data-dependent bar-setting refused at A42 ruling
-        // 5, A43 and A47 item 6; the redesign belongs to #71 under a pre-registered analysis.
-        //
-        // The construction is `schur.test.ts`'s `tol`-sweep: sweep the dial, then ASSERT the side of
-        // the bar the sweep reaches, instead of reporting only that the shipped point passes.
-        //
-        // MEASURED here (n=960, θ=0.25 — the SHIPPED default, `bct.ts` DEFAULT_THETA):
-        //   m̂=66  λ₂=1.647483  κ_excl=35.0754  IN band
-        //   m̂=69  λ₂=1.515260  κ_excl=37.7469  IN band   <- largest in-band reading
-        //   m̂=70  λ₂=1.474705  κ_excl=38.6578  OUT (λ₂ ≤ 1.5), and still under 40
-        //   m̂=85  λ₂=1.020470  κ_excl=53.5356  OUT (λ₂ ≤ 1.5), over 40 but INVALID
-        // so the in-band supremum is ≈37.9 against 40: a 1.06x shortfall at the shipped θ. The
-        // ledger's θ=0.5 sweep reads 35.8543 at m̂=69 / 36.7279 at m̂=70, i.e. ≈36.2 and 1.10x
-        // (`docs/superpowers/plans/phase2h-review-ledger/probes/h5band.ts`) — the shipped θ is the
-        // tighter of the two, which is why this test runs at θ=0.25 and not at the ledger's θ.
-        //
-        // n=960 and not a cheaper rung: `κ_excl` peaks there over the whole measured ladder, so the
-        // in-band supremum there is the binding one. Three m̂ points cost ~70 s (`eig` is O(n³)); the
-        // operator and `A_σ` are built ONCE and only `makePreconditioner` is re-run per m̂.
-        // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8 (A32)
-        // @issue utof/repulsive-test2#71
-        const n = 960;
-        const { vertices, edges, op, Lo } = prep(n);
-        const ext = extentOf(vertices);
-        expect(ext / EXTENT).toBeCloseTo(1, 2);
-        const Asig = densifyASigma(prep(n).H, op.sigma, n);
-        const R = cholesky(Asig, n);
-        const Rt = transpose(R, n);
-        const at = (mHat: number) => {
-            // `massWeight` is a RAW ABSOLUTE override (`precond.ts`), so m̂ is divided by ext²
-            // here — the same spelling as the production default `DEFAULT_MASS_WEIGHT_HAT / ext²`.
-            const P = makePreconditioner(vertices, edges, Lo, op.sigma, {
-                massWeight: mHat / (ext * ext),
-            });
-            const M = densify(n, (u, out) => P.applyScalar(u, out));
-            const sp = spectrum(matmul(Rt, matmul(M, R, n), n), n);
-            const inBand = Math.abs(sp.lambda1 - 1) < 1e-11 * sp.lambdaMax && sp.lambda2 > 1.5;
-            return { mHat, ...sp, kappaExcl: sp.lambdaMax / sp.lambda2, inBand };
-        };
-        const sweep = [69, 70, 85].map(at);
-        for (const s of sweep) {
-            log(
-                `in-band sweep n=${n} θ=${THETA}`,
-                `mhat=${s.mHat} λ₁=${s.lambda1.toFixed(6)} λ₂=${s.lambda2.toFixed(6)} κ_excl=${s.kappaExcl.toFixed(4)} inBand=${s.inBand}`,
-            );
-        }
-        const row = (mHat: number) => sweep.find((s) => s.mHat === mHat) as (typeof sweep)[number];
-
-        // 1. THE BAND BOUNDARY IS WHERE IT IS SAID TO BE — both sides asserted, so neither the
-        //    in-band nor the out-of-band claim is a one-sided reading.
-        expect(row(69).inBand).toBe(true);
-        expect(row(69).lambda2).toBeGreaterThan(1.5);
-        expect(row(70).inBand).toBe(false);
-        expect(row(70).lambda2).toBeLessThanOrEqual(1.5);
-
-        // 2. THE IN-BAND SUPREMUM, ASSERTED AGAINST THE UNMOVED BAR. This is the published margin:
-        //    the largest `κ_excl` the mass-weight axis can reach while the quantity still means
-        //    what it is named is BELOW 40, so the bar has no reachable RED side on this axis.
-        const supInBand = Math.max(...sweep.filter((s) => s.inBand).map((s) => s.kappaExcl));
-        log(`in-band sup(κ_excl) n=${n}`, supInBand);
-        log(`in-band sup(κ_excl) margin to the bar 40`, 40 / supInBand);
-        expect(supInBand).toBeLessThan(40);
-        // Non-vacuity of the sweep itself: it really did climb to the edge of the band, rather than
-        // sampling three comfortable points. MEASURED 37.7469, i.e. 1.9x the shipped m̂=30 reading.
-        expect(supInBand).toBeGreaterThan(30);
-
-        // 3. AND THE VALUES THAT DO CLEAR 40 ARE ALREADY INVALID, which is the finding: `m̂=85`
-        //    reads 53.5356 — well over the bar — and it is NOT a RED, because λ₂ = 1.020470 means
-        //    `λ_max/λ₂` is no longer the excluded-constant conditioning. A trip demo quoting it
-        //    would be quoting a broken precondition as a tripped bar (the withdrawn m̂ ∈ (70, 100]
-        //    demo stamped above the level bar did exactly that).
-        expect(row(85).kappaExcl).toBeGreaterThan(40);
-        expect(row(85).inBand).toBe(false);
-        // λ₁ stays pinned the whole way: at this n the band is lost through λ₂, not through λ₁, so
-        // the two INVALID clauses are shown to be independent rather than assumed to be.
-        for (const s of sweep) expect(Math.abs(s.lambda1 - 1)).toBeLessThan(1e-11 * s.lambdaMax);
+    // FULL TIER ONLY (test/tier.ts). Why: n = 960 is where `κ_excl` peaks over the measured ladder
+    // (19.6713), so the property-2 level bar binds here; in the default tier it is checked at
+    // n <= 480 only, and a mass-weight or operator change that moves κ only at n = 960 waits for
+    // `bun run test:full` (README.md "Tests").
+    fullTest('κ_eig of the SHIPPED Ã⁻¹A_σ at n=960, and the ladder fit over n=64..960', () => {
+        const ns = [64, 120, 240, 480, 960];
+        const rungs = ns.map(kappaRung);
+        logLadder(
+            ns,
+            rungs.map((r) => r.kInc),
+            rungs.map((r) => r.kExc),
+        );
     });
+
+    // FULL TIER ONLY (test/tier.ts): three O(n³) eigensolves at n = 960 (~23 s). Why: a margin
+    // measurement for a bar this comment shows cannot be tripped on the mass-weight axis (#71); the
+    // level bar itself stays in the ladder tests above (README.md "Tests").
+    fullTest(
+        "κ_excl's in-band supremum is published as a MARGIN, and 40 is not reachable by mass weight",
+        () => {
+            // WHAT THIS TEST IS FOR. The level bar above (`κ_excl < 40`) passes at 19.67, and a bar that
+            // passes tells you nothing until you know what would have failed it. On the mass-weight
+            // axis the answer is NOTHING: `κ_excl := λ_max/λ₂` is "excluding the constant mode" only
+            // while λ₁ == 1 and λ₂ > 1.5 (the precondition stated with the bar above), and every m̂ that
+            // drives `κ_excl` over 40 has already left that band — so `hCalibration.ts`'s `finaliseH5`
+            // returns INVALID there, never RED. This test measures where the band ends, asserts the
+            // supremum of `κ_excl` INSIDE it, and publishes the margin, which is what converts an
+            // unreachable bar into a stated one.
+            //
+            // THE BAR IS NOT MOVED, and must not be. 40 is `[A32]`'s, superseding `[A22]`. Choosing a
+            // tighter bar from this very sweep is the data-dependent bar-setting refused at A42 ruling
+            // 5, A43 and A47 item 6; the redesign belongs to #71 under a pre-registered analysis.
+            //
+            // The construction is `schur.test.ts`'s `tol`-sweep: sweep the dial, then ASSERT the side of
+            // the bar the sweep reaches, instead of reporting only that the shipped point passes.
+            //
+            // MEASURED here (n=960, θ=0.25 — the SHIPPED default, `bct.ts` DEFAULT_THETA):
+            //   m̂=66  λ₂=1.647483  κ_excl=35.0754  IN band
+            //   m̂=69  λ₂=1.515260  κ_excl=37.7469  IN band   <- largest in-band reading
+            //   m̂=70  λ₂=1.474705  κ_excl=38.6578  OUT (λ₂ ≤ 1.5), and still under 40
+            //   m̂=85  λ₂=1.020470  κ_excl=53.5356  OUT (λ₂ ≤ 1.5), over 40 but INVALID
+            // so the in-band supremum is ≈37.9 against 40: a 1.06x shortfall at the shipped θ. The
+            // ledger's θ=0.5 sweep reads 35.8543 at m̂=69 / 36.7279 at m̂=70, i.e. ≈36.2 and 1.10x
+            // (`docs/superpowers/plans/phase2h-review-ledger/probes/h5band.ts`) — the shipped θ is the
+            // tighter of the two, which is why this test runs at θ=0.25 and not at the ledger's θ.
+            //
+            // n=960 and not a cheaper rung: `κ_excl` peaks there over the whole measured ladder, so the
+            // in-band supremum there is the binding one. Three m̂ points cost ~70 s (`eig` is O(n³)); the
+            // operator and `A_σ` are built ONCE and only `makePreconditioner` is re-run per m̂.
+            // @see docs/superpowers/specs/2026-10-09-phase2h-bct-gmres-design.md §7.8 (A32)
+            // @issue utof/repulsive-test2#71
+            const n = 960;
+            const { vertices, edges, op, Lo } = prep(n);
+            const ext = extentOf(vertices);
+            expect(ext / EXTENT).toBeCloseTo(1, 2);
+            // The same factor the ladder's n = 960 rung used (`shippedFactor`, read-only).
+            const { R, Rt } = shippedFactor(n);
+            const at = (mHat: number) => {
+                // `massWeight` is a RAW ABSOLUTE override (`precond.ts`), so m̂ is divided by ext²
+                // here — the same spelling as the production default `DEFAULT_MASS_WEIGHT_HAT / ext²`.
+                const P = makePreconditioner(vertices, edges, Lo, op.sigma, {
+                    massWeight: mHat / (ext * ext),
+                });
+                const M = densify(n, (u, out) => P.applyScalar(u, out));
+                const sp = spectrum(matmul(Rt, matmul(M, R, n), n), n);
+                const inBand = Math.abs(sp.lambda1 - 1) < 1e-11 * sp.lambdaMax && sp.lambda2 > 1.5;
+                return { mHat, ...sp, kappaExcl: sp.lambdaMax / sp.lambda2, inBand };
+            };
+            const sweep = [69, 70, 85].map(at);
+            for (const s of sweep) {
+                log(
+                    `in-band sweep n=${n} θ=${THETA}`,
+                    `mhat=${s.mHat} λ₁=${s.lambda1.toFixed(6)} λ₂=${s.lambda2.toFixed(6)} κ_excl=${s.kappaExcl.toFixed(4)} inBand=${s.inBand}`,
+                );
+            }
+            const row = (mHat: number) =>
+                sweep.find((s) => s.mHat === mHat) as (typeof sweep)[number];
+
+            // 1. THE BAND BOUNDARY IS WHERE IT IS SAID TO BE — both sides asserted, so neither the
+            //    in-band nor the out-of-band claim is a one-sided reading.
+            expect(row(69).inBand).toBe(true);
+            expect(row(69).lambda2).toBeGreaterThan(1.5);
+            expect(row(70).inBand).toBe(false);
+            expect(row(70).lambda2).toBeLessThanOrEqual(1.5);
+
+            // 2. THE IN-BAND SUPREMUM, ASSERTED AGAINST THE UNMOVED BAR. This is the published margin:
+            //    the largest `κ_excl` the mass-weight axis can reach while the quantity still means
+            //    what it is named is BELOW 40, so the bar has no reachable RED side on this axis.
+            const supInBand = Math.max(...sweep.filter((s) => s.inBand).map((s) => s.kappaExcl));
+            log(`in-band sup(κ_excl) n=${n}`, supInBand);
+            log(`in-band sup(κ_excl) margin to the bar 40`, 40 / supInBand);
+            expect(supInBand).toBeLessThan(40);
+            // Non-vacuity of the sweep itself: it really did climb to the edge of the band, rather than
+            // sampling three comfortable points. MEASURED 37.7469, i.e. 1.9x the shipped m̂=30 reading.
+            expect(supInBand).toBeGreaterThan(30);
+
+            // 3. AND THE VALUES THAT DO CLEAR 40 ARE ALREADY INVALID, which is the finding: `m̂=85`
+            //    reads 53.5356 — well over the bar — and it is NOT a RED, because λ₂ = 1.020470 means
+            //    `λ_max/λ₂` is no longer the excluded-constant conditioning. A trip demo quoting it
+            //    would be quoting a broken precondition as a tripped bar (the withdrawn m̂ ∈ (70, 100]
+            //    demo stamped above the level bar did exactly that).
+            expect(row(85).kappaExcl).toBeGreaterThan(40);
+            expect(row(85).inBand).toBe(false);
+            // λ₁ stays pinned the whole way: at this n the band is lost through λ₂, not through λ₁, so
+            // the two INVALID clauses are shown to be independent rather than assumed to be.
+            for (const s of sweep)
+                expect(Math.abs(s.lambda1 - 1)).toBeLessThan(1e-11 * s.lambdaMax);
+        },
+    );
 
     test('the knock-outs show up in the NULLITY of Ã⁻¹A_σ, and κ_excl is blind to one of them', () => {
         // This is what H5 property 1 is FOR, finally measured at the preconditioner level rather
