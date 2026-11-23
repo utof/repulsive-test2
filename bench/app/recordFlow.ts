@@ -107,6 +107,10 @@ const route = resolveSobolevRoute(solver, n, edges, true);
 console.error(`[recordFlow] n=${n} route=${route} E0=${energy.toFixed(4)}`);
 let elapsed = 0;
 let stopped = 'steps';
+// Written every few steps as well as at the end: a tight knot can take a minute per step, and a
+// run stopped early should still leave a trajectory behind.
+const save = () =>
+    writeFileSync(outPath, JSON.stringify({ source: objPath, n, route, solver, stopped, frames }));
 for (let k = 1; k <= steps; k++) {
     const t0 = performance.now();
     const r = dispatchDescentStep({ ...base, vertices: V, energyBefore: energy });
@@ -118,12 +122,13 @@ for (let k = 1; k <= steps; k++) {
     V = r.vertices;
     energy = r.energy;
     frames.push({ step: k, energy, ms: elapsed, tau: r.stats?.tau ?? null, xyz: flat(V) });
-    if (k % 10 === 0)
+    if (k % 5 === 0) save();
+    if (k % 10 === 0 || elapsed / k > 10_000)
         console.error(
             `[recordFlow] step ${k} E=${energy.toFixed(4)} tau=${r.stats?.tau} ${(elapsed / k).toFixed(0)} ms/step`,
         );
 }
-writeFileSync(outPath, JSON.stringify({ source: objPath, n, route, solver, stopped, frames }));
+save();
 console.error(
     `[recordFlow] ${frames.length - 1} steps, stopped: ${stopped}, E ${frames[0].energy.toFixed(3)} -> ${energy.toFixed(3)}, ${(elapsed / 1000).toFixed(1)} s`,
 );
