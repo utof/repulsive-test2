@@ -980,8 +980,24 @@ describe('S = C A_σ⁻¹ Cᵀ and its conditioning, against dense arithmetic (n
 
 describe('knock-outs: each injected defect is caught by the cells the table says (n = 240)', () => {
     const TRIP = 1e-5; // 1e5 × the bar: every "caught" defect below is >= 1.5e-3
-    /** err vs dense LDLᵀ per cell of one set, for one (defect, tol). */
-    function errs(name: SetName, defect?: SchurDefect, tol?: number): Map<string, number> {
+    /**
+     * err vs dense LDLᵀ per cell of one set, for one (defect, tol), memoised on all three.
+     * Why: `table(defect)` and the assertions below asked for the same tuples again (55 calls, 26
+     * distinct), each one a fresh `prepareSchur` + GMRES solves; everything here is deterministic,
+     * so a repeat returned the same numbers. The key MUST include `tol`: `errs('barypin',
+     * undefined, 1e-6)` is a different solver from the default-tol one, and the 'no-symmetrise'
+     * test asserts the two differ. Callers only read the map (test-suite review 2026-11-24).
+     */
+    const errsCache = new Map<string, ReadonlyMap<string, number>>();
+    function errs(name: SetName, defect?: SchurDefect, tol?: number): ReadonlyMap<string, number> {
+        const key = `${name}/${defect ?? 'clean'}/${tol ?? 'default'}`;
+        const hit = errsCache.get(key);
+        if (hit) return hit;
+        const out = errsUncached(name, defect, tol);
+        errsCache.set(key, out);
+        return out;
+    }
+    function errsUncached(name: SetName, defect?: SchurDefect, tol?: number): Map<string, number> {
         const { fx, C, cells } = setup(240, DEFAULT_THETA, name);
         const refs = denseRefs(fx, DEFAULT_THETA, 'op', name, C, cells);
         const solver = prepareSchur(fx.op, fx.P, C, {
