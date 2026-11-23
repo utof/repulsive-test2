@@ -155,6 +155,20 @@ export interface HierarchicalSaddleOptions {
      * deliberately NOT forwarded: see the dispatch comment in {@link makeHierarchicalSaddle}.
      */
     schur?: SchurOptions;
+    /**
+     * Where `‖A_σ‖₂` comes from. `'power'` (default) is `estimateNorm2`, 30 matvecs per build —
+     * measured 2.1 s of a 3.3 s build at n = 30 000 (`bench/results/2026-11-23-h-step-scale.jsonl`).
+     * `'trace'` is the O(1) bound `(n + 1)·σ`: `A_bct` is positive semidefinite with trace `n·σ`,
+     * so `‖A_bct‖₂ ≤ n·σ`, and the shift `(σ/n)·11ᵀ` adds at most `σ`.
+     *
+     * `'trace'` OVERSTATES the norm, so every `η` computed with it UNDERSTATES the backward
+     * error and the `etaAccept` certificate becomes looser — the unsafe direction. Use it only
+     * where that certificate is deliberately not relied on (`schur.etaAccept >= 1`), which is the
+     * app's direction-quality configuration: there the line search is the safeguard.
+     * A caller-supplied `schur.normA2` wins over both.
+     * @see src/core/sobolevRoute.ts (APP_HIERARCHICAL_TOL)
+     */
+    normEstimate?: 'power' | 'trace';
 }
 
 /**
@@ -455,7 +469,11 @@ export function makeHierarchicalSaddle(
     const precond = makePreconditioner(vertices, edges, lowOrder, op.sigma, opts.precond ?? {});
 
     // `‖A_σ‖₂` once for the whole build, not once per `prepare` — see `build.normA2`.
-    const normA2 = estimateNorm2((u, out) => applyAsigma(op, u, out), 3 * n).norm;
+    const normA2 =
+        opts.schur?.normA2 ??
+        (opts.normEstimate === 'trace'
+            ? (n + 1) * op.sigma
+            : estimateNorm2((u, out) => applyAsigma(op, u, out), 3 * n).norm);
 
     const build: HierarchicalSaddleBuild = {
         n,

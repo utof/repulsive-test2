@@ -99,6 +99,27 @@ function createKnot(): GraphState {
     return { vertices, edges };
 }
 
+/**
+ * The same trefoil at a chosen resolution, up to the project's scale target. Why a separate
+ * preset: `createKnot` is pinned at 50 vertices by the golden suites; this one exists to put a
+ * large closed loop in the app, which the hierarchical route (`sobolevRoute.ts`) needs.
+ */
+function createLargeKnot(params?: Record<string, number>): GraphState {
+    const n = Math.max(3, Math.round(params?.vertices ?? 2000));
+    const vertices: Vec3[] = [];
+    const edges: Edge[] = [];
+    for (let i = 0; i < n; i++) {
+        const t = (i / n) * Math.PI * 2;
+        vertices.push([
+            0.4 * (Math.sin(t) + 2 * Math.sin(2 * t)),
+            0.4 * (Math.cos(t) - 2 * Math.cos(2 * t)),
+            0.4 * -Math.sin(3 * t),
+        ]);
+        edges.push([i, (i + 1) % n]);
+    }
+    return { vertices, edges };
+}
+
 // Test 5: Stress test - 200 vertices grid with connections
 function createStressTest(): GraphState {
     const vertices: Vec3[] = [];
@@ -300,6 +321,12 @@ export const testConfigs: TestConfig[] = [
             { name: 'vertices', min: 5, max: 500, default: 30 },
             { name: 'edges', min: 5, max: 1000, default: 50 },
         ],
+    },
+    {
+        id: 'knot-large',
+        name: 'Trefoil Knot (large, configurable)',
+        generate: createLargeKnot,
+        params: [{ name: 'vertices', min: 100, max: 30000, default: 2000 }],
     },
     {
         id: 'chain',

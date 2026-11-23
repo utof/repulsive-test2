@@ -4,6 +4,7 @@ import {
     type SolverWorkerRequest,
     type SolverWorkerResponse,
 } from '../core/dispatch';
+import { pairListFits } from '../core/sobolevRoute';
 import { calculateDisjointPairs } from '../core/tangentPointEnergy';
 import type { Edge } from '../core/testConfigs';
 
@@ -29,7 +30,22 @@ declare var self: Worker;
 // arrays), so per-step messages carry only vertices + dynamic config, never the
 // disjointPairs. Refreshed on init and on every graphVersion change.
 // @see docs/superpowers/plans/2026-07-04-worker-solver.md §D4
-let topology: { graphVersion: number; edges: Edge[]; disjointPairs: number[][] } | null = null;
+let topology: { graphVersion: number; edges: Edge[]; disjointPairs: number[][] | null } | null =
+    null;
+
+/**
+ * The cached pair list for a request on `nVertices` vertices. Built on first use rather than on
+ * the `topology` message, and never built above PAIR_LIST_MAX_N: there it is `[]`, exactly as in
+ * the store, and `dispatchDescentStep` routes such graphs to code that does not read it.
+ * Why lazy: the `topology` message carries edges only, and the size rule needs the vertex count.
+ * @see src/core/sobolevRoute.ts (pairListFits)
+ */
+function pairsFor(nVertices: number): number[][] {
+    if (topology === null) throw new Error('solverWorker: request received before topology');
+    if (!pairListFits(nVertices)) return [];
+    topology.disjointPairs ??= calculateDisjointPairs(topology.edges);
+    return topology.disjointPairs;
+}
 
 self.onmessage = (event: MessageEvent<SolverWorkerRequest>) => {
     const msg = event.data;
@@ -54,7 +70,7 @@ self.onmessage = (event: MessageEvent<SolverWorkerRequest>) => {
             topology = {
                 graphVersion: msg.graphVersion,
                 edges: msg.edges,
-                disjointPairs: calculateDisjointPairs(msg.edges),
+                disjointPairs: null,
             };
             return;
         }
@@ -72,7 +88,7 @@ self.onmessage = (event: MessageEvent<SolverWorkerRequest>) => {
             const field = computeArrowField(
                 msg.args.vertices,
                 topology.edges,
-                topology.disjointPairs,
+                pairsFor(msg.args.vertices.length),
                 msg.args.mode,
                 msg.args.descentMode,
                 msg.args.x0,
@@ -91,7 +107,7 @@ self.onmessage = (event: MessageEvent<SolverWorkerRequest>) => {
         const result = dispatchDescentStep({
             ...msg.args,
             edges: topology.edges,
-            disjointPairs: topology.disjointPairs,
+            disjointPairs: pairsFor(msg.args.vertices.length),
         });
         // Echo the request's graphVersion UNTOUCHED so the main thread can run
         // the §D5 mismatch-drop test against its current store value.

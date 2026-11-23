@@ -1,6 +1,8 @@
+import { barnesHutGradient, prepareBarnesHut } from './barnesHut';
 import type { DescentMode, Mode } from './dispatch';
 import { DEFAULTS } from './optimizer';
 import { solveConstrainedGradient } from './sobolev/gradient';
+import { pairListFits } from './sobolevRoute';
 import { gradientAnalytical, gradientFiniteDiff } from './tangentPointEnergy';
 import type { Edge, Vec3 } from './testConfigs';
 
@@ -29,6 +31,19 @@ export function computeArrowField(
     descentMode: DescentMode,
     x0: Vec3,
 ): Vec3[] | null {
+    if (!pairListFits(vertices.length)) {
+        // Above the pair-list limit there is no all-pairs differential and no dense solve. The
+        // raw field is the Barnes–Hut differential; the Sobolev field is not recomputed here —
+        // a running step already returns its own (`collectField`), and `null` hides the arrows
+        // while paused, as on the singular-solve path below.
+        // @see src/core/sobolevRoute.ts
+        if (descentMode === 'sobolev') return null;
+        return barnesHutGradient(
+            prepareBarnesHut(vertices, edges, DEFAULTS.epsilon),
+            DEFAULTS.alpha,
+            DEFAULTS.beta,
+        );
+    }
     const dE =
         mode === 'analytical'
             ? gradientAnalytical(

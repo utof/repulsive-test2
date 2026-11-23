@@ -1,3 +1,4 @@
+import { resolveSobolevRoute, type SobolevSolver } from '../core/sobolevRoute';
 import { testConfigs } from '../core/testConfigs';
 import {
     type DescentMode,
@@ -38,6 +39,9 @@ export function ControlPanel() {
     const setLengthMode = useSimStore((s) => s.setLengthMode);
     const projectionMode = useSimStore((s) => s.projectionMode);
     const setProjectionMode = useSimStore((s) => s.setProjectionMode);
+    const sobolevSolver = useSimStore((s) => s.sobolevSolver);
+    const setSobolevSolver = useSimStore((s) => s.setSobolevSolver);
+    const graph = useSimStore((s) => s.graph);
     const solverDriver = useSimStore((s) => s.solverDriver);
     const setSolverDriver = useSimStore((s) => s.setSolverDriver);
     // Boot self-test verdict (spec §2.6): 'gpu' is selectable only after it passes;
@@ -223,6 +227,43 @@ export function ControlPanel() {
                         <option value="frozen">Frozen (reuse)</option>
                         <option value="reassemble">Reassemble</option>
                     </select>
+                </label>
+                {/* Which Sobolev machinery the step uses. 'Auto' sends closed loops of
+                    HIERARCHICAL_AUTO_MIN_N vertices or more to the hierarchical route
+                    (matrix-free solve + Barnes–Hut energy and gradient) and everything else to
+                    the dense exact route. The text beside the select is the route this graph
+                    ACTUALLY gets, computed by the same resolveSobolevRoute the step uses — a
+                    preference the graph cannot satisfy falls back, and that must be visible.
+                    Sobolev-only, same disabled treatment as the Projection select.
+                    @see src/core/sobolevRoute.ts */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                    }}
+                >
+                    <span>Sobolev solve:</span>
+                    <select
+                        value={sobolevSolver}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setSobolevSolver(e.target.value as SobolevSolver)}
+                        style={{ padding: 8, fontSize: 14 }}
+                    >
+                        <option value="auto">Auto</option>
+                        <option value="dense">Dense (exact)</option>
+                        <option value="hierarchical">Hierarchical (large N)</option>
+                    </select>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        →{' '}
+                        {resolveSobolevRoute(
+                            sobolevSolver,
+                            graph.vertices.length,
+                            graph.edges,
+                            mode === 'analytical',
+                        ) ?? 'unsupported'}
+                    </span>
                 </label>
                 {/* Solver driver A/B (worker-solver §D6): 'worker' (default) runs
                     the descent step off the main thread so orbit/pin-drag/UI stay
