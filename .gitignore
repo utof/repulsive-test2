@@ -43,3 +43,7 @@ __pycache__/
 # diffs (regenerable from git history, 1.8 MB) and one-off probe scripts stay local
 docs/superpowers/plans/*-review-ledger/*.diff
 docs/superpowers/plans/*-review-ledger/probes/
+
+# the Repulsive Curves knot datasets (Knot128, Trefoil100), 9 MB, from
+# https://www.cs.cmu.edu/~kmcrane/Projects/RepulsiveCurves/index.html — kept local
+oracle/KnotDatasets.zip
