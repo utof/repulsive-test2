@@ -36,6 +36,7 @@ export function Stats() {
     const sobolevConverged = useSimStore((s) => s.sobolevConverged);
     const sobolevTimings = useSimStore((s) => s.sobolevTimings);
     const sobolevL0 = useSimStore((s) => s.sobolevL0);
+    const prePassAlpha = useSimStore((s) => s.prePassAlpha);
     const vertices = useSimStore((s) => s.graph.vertices.length);
     const edges = useSimStore((s) => s.graph.edges.length);
     // Current total length from the LIVE buffer. `live` is mutated in place and
@@ -60,6 +61,13 @@ export function Stats() {
             <span style={{ marginRight: 20, color: mode === 'analytical' ? '#00ff88' : '#ffaa00' }}>
                 Gradient: {mode === 'analytical' ? 'Analytical (green)' : 'Finite Diff (orange)'}
             </span>
+            {/* Force-layout pre-pass in progress: its temperature falls from 1 to 0.001, at
+                which point the descent takes over. @see src/core/forceLayout.ts */}
+            {prePassAlpha !== null && (
+                <span style={{ marginRight: 20, color: '#66ccff' }}>
+                    pre-pass: force layout, cooling {prePassAlpha.toFixed(3)}
+                </span>
+            )}
             {/* Sobolev-only diagnostics of the last step: τ, saddle residual, ‖g̃‖_L²ₕ,
                 projection iterations, and the terminal outcome (converged / reject reason).
                 @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (steps 5, 10) */}

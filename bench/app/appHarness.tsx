@@ -8,6 +8,7 @@
  *
  * Spike name: `run:<vertices>:<steps>[:<driver>]`, e.g. `run:30000:3:worker`. It selects the large
  * trefoil preset, switches to Sobolev descent, presses play, and reports what the frame loop did.
+ * Spike name: `prepass:<nodes>:<edges>:<steps>` — see `prePass` below.
  * @see bench/app/driveApp.ts
  */
 import { createRoot } from 'react-dom/client';
@@ -94,6 +95,95 @@ async function run(vertices: number, steps: number, driver: SolverDriver | undef
     return result;
 }
 
+/**
+ * Spike `prepass:<nodes>:<edges>:<steps>`: the random-graph preset, Sobolev descent, played
+ * twice from the SAME scrambled start — once plainly, once with the force-layout pre-pass — so
+ * the frame loop's handling of the pre-pass phase is exercised in a real browser.
+ * @see src/core/forceLayout.ts
+ */
+async function prePass(nodes: number, edges: number, steps: number) {
+    const store = useSimStore;
+    store.getState().setPreset('random');
+    store.getState().setParam('vertices', nodes);
+    store.getState().setParam('edges', edges);
+    store.getState().regenerate();
+    store.getState().setDescentMode('sobolev');
+    await sleep(1500);
+    const start = store.getState().live.map((p) => [...p] as [number, number, number]);
+    const energyAtLoad = store.getState().energy;
+
+    const arm = async (withPrePass: boolean) => {
+        store.getState().setRunning(false);
+        const live = store.getState().live;
+        start.forEach((p, i) => {
+            live[i][0] = p[0];
+            live[i][1] = p[1];
+            live[i][2] = p[2];
+        });
+        store.getState().setForcePrePass(withPrePass);
+        store.getState().setRunning(false); // commit the restored start
+        await sleep(100);
+        const step0 = store.getState().step;
+        let prePassMs: number | null = null;
+        let prePassFrames = 0;
+        let energyAfterPrePass: number | null = null;
+        let counting = true;
+        const tick = () => {
+            if (store.getState().prePass) prePassFrames++;
+            if (counting) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+        const t0 = performance.now();
+        store.getState().setRunning(true);
+        const sawPrePass = store.getState().prePass !== null;
+        while (performance.now() - t0 < 120_000) {
+            const s = store.getState();
+            if (sawPrePass && prePassMs === null && s.prePassDone) {
+                prePassMs = performance.now() - t0;
+                energyAfterPrePass = s.energy;
+            }
+            if (s.step - step0 >= steps || !s.running) break;
+            await sleep(10);
+        }
+        counting = false;
+        const end = store.getState();
+        const out = {
+            withPrePass,
+            sawPrePass,
+            prePassMs: prePassMs === null ? null : Math.round(prePassMs),
+            prePassFrames,
+            energyAfterPrePass,
+            stepsTaken: end.step - step0,
+            energyAtEnd: end.energy,
+            elapsedMs: Math.round(performance.now() - t0),
+            stillRunning: end.running,
+            reason: end.sobolevStats?.reason ?? null,
+            lengthDrift: Math.abs(
+                end.live.length > 0 && end.sobolevL0 > 0
+                    ? end.graph.edges.reduce(
+                          (sum, [a, b]) =>
+                              sum +
+                              Math.hypot(
+                                  end.live[a][0] - end.live[b][0],
+                                  end.live[a][1] - end.live[b][1],
+                                  end.live[a][2] - end.live[b][2],
+                              ),
+                          0,
+                      ) /
+                          end.sobolevL0 -
+                          1
+                    : 0,
+            ),
+        };
+        end.setRunning(false);
+        return out;
+    };
+    const plain = await arm(false);
+    const withForce = await arm(true);
+    store.getState().setForcePrePass(false);
+    return { nodes, edges, energyAtLoad, plain, withForce };
+}
+
 declare global {
     interface Window {
         __runSpike: (name: string) => Promise<string>;
@@ -101,6 +191,8 @@ declare global {
 }
 window.__runSpike = async (name) => {
     const [kind, n, steps, driver] = name.split(':');
+    if (kind === 'prepass')
+        return JSON.stringify(await prePass(Number(n), Number(steps), Number(driver)));
     if (kind !== 'run') throw new Error(`appHarness: unknown spike '${name}'`);
     return JSON.stringify(await run(Number(n), Number(steps), driver as SolverDriver | undefined));
 };
