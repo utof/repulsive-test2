@@ -15,7 +15,7 @@
  * accuracy claims about other curves.
  * @see src/core/barnesHut.ts
  */
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import {
     type BarnesHutOptions,
     type BarnesHutStats,
@@ -35,6 +35,11 @@ import {
 } from '../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
 import { lazy } from '../tier';
+
+// Why: the n = 960 far-field references are lazy getters (test/tier.ts `lazy`), so the first test
+// of that describe pays for them (~2.7 s isolated, measured 5.1 s at load average 18 in the
+// four-process runner), which bun's 5 s default per-test timeout does not cover.
+setDefaultTimeout(60_000);
 
 const { alpha: ALPHA, beta: BETA, epsilon: EPS } = DEFAULTS;
 
