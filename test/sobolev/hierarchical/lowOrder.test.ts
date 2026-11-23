@@ -4,7 +4,7 @@
  *
  * ORACLE / PROVENANCE. H5's artefacts are
  * `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/e4-closer-0b.json` (property 1, 8 rows) and
- * `e0-closer-0b.json` (properties 2-3, 6 rows). Both were produced by `e4_precond_integrity.py` /
+ * `e0-closer-0b.json` (properties 2-3, 6 rows); the tests read the tracked copies in `corpus/`. Both were produced by `e4_precond_integrity.py` /
  * `e0_sanity.py` on `gmres_lab.py`'s `trefoil`, which is the repo's `src/core/fixtures.ts`
  * `trefoil(n)` VERBATIM (same formula, same `[i, (i+1)%n]` edges) and **UNnormalised** — bbox max
  * extent 5.4716. That is OUTSIDE the SCALE PRECONDITION `bvh.ts:32-38` documents for itself, and
@@ -65,7 +65,15 @@ const U_F32 = 5.96e-8;
  * @issue utof/repulsive-test2#51
  */
 const THETA = 0.25;
-const SCRATCH = `${import.meta.dir}/../../../.superpowers/sdd/2026-09-11-phase2h-queue/scratch`;
+/**
+ * Tracked copy of the H-queue scratch corpus (originals, the historical record:
+ * `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/`, git-ignored, this machine only). The
+ * copy in `corpus/` is the test input; it was copied 2026-11-24 so the file loads in any
+ * checkout, and differs from the original only by biome formatting (whitespace, `e-08` -> `e-8`):
+ * `JSON.parse` of the two is deep-equal. Edit the copy, not the scratch file.
+ * Why: the scratch folder is git-ignored, so in a fresh checkout this module failed to load.
+ */
+const CORPUS = `${import.meta.dir}/corpus`;
 
 const log = (name: string, v: unknown) => console.log(`[task6] ${name} = ${v}`);
 
@@ -80,7 +88,7 @@ interface E4Row {
     rankTolRel: number;
     kappaPrecond: number;
 }
-const e4: E4Row[] = JSON.parse(readFileSync(`${SCRATCH}/e4-closer-0b.json`, 'utf8')).rows;
+const e4: E4Row[] = JSON.parse(readFileSync(`${CORPUS}/e4-closer-0b.json`, 'utf8')).rows;
 const e4row = (n: number, variant: LowOrderVariant): E4Row => {
     const r = e4.find((x) => x.n === n && x.variant === variant);
     if (!r) throw new Error(`no e4-closer-0b row ${n}/${variant}`);
@@ -1004,7 +1012,7 @@ describe('lowOrder: property 2 and 3 oracles (spec §11.2 row 11 — the LAB ope
         // which is, so the same Householder+Sturm instrument reaches it. `precond.test.ts` now
         // measures properties 2 and 3 on the SHIPPED operator (κ_incl 59.0 / 64.6 / 69.7 / 71.9 at
         // n=64/120/240/480, extent 5.4716) and validates the harness against these very rows.
-        const e0 = JSON.parse(readFileSync(`${SCRATCH}/e0-closer-0b.json`, 'utf8'));
+        const e0 = JSON.parse(readFileSync(`${CORPUS}/e0-closer-0b.json`, 'utf8'));
         const kap: number[] = e0.rows.map((r: { kappaPrecond: number }) => r.kappaPrecond);
         const ns: number[] = e0.rows.map((r: { n: number }) => r.n);
         const fit = (idx: number[]) => {

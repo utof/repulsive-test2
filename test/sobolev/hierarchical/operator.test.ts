@@ -2,7 +2,7 @@
  * Spec §11.2 task 5 of Phase 2H: the `SobolevOperator` wrapper of the hierarchical apply, the
  * structural `sigma = tr(A_bct)/n`, and the gates SPD / symmetry / trace ratio (§2.2, §2.3).
  *
- * Oracle: `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/out-64-direction.json` `rows[]`
+ * Oracle: `corpus/out-64-direction.json` `rows[]` (tracked copy of the phase2h-queue scratch file)
  * (@issue utof/repulsive-test2#64), fixture = the repo's `src/core/fixtures.ts trefoil(n)`,
  * UNnormalised (`run-64-dense.ts:50-56`), leaf=8, ALPHA=3, BETA=6, EPS=1e-10, endpoint4 near.
  * Its `sigma` column is `tr(A_exact)/n` (`run64_direction.py:148`), NOT the production sigma.
@@ -30,7 +30,15 @@ const BETA = 6;
 const EPS = 1e-10;
 const LEAF = 8;
 const U_F64 = 2.220446049250313e-16;
-const ORACLE = `${import.meta.dir}/../../../.superpowers/sdd/2026-09-11-phase2h-queue/scratch/out-64-direction.json`;
+/**
+ * Tracked copy of the H-queue scratch corpus (originals, the historical record:
+ * `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/`, git-ignored, this machine only). The
+ * copy in `corpus/` is the test input; it was copied 2026-11-24 so the file loads in any
+ * checkout, and differs from the original only by biome formatting (whitespace, `e-08` -> `e-8`):
+ * `JSON.parse` of the two is deep-equal. Edit the copy, not the scratch file.
+ * Why: the scratch folder is git-ignored, so in a fresh checkout this module failed to load.
+ */
+const ORACLE = `${import.meta.dir}/corpus/out-64-direction.json`;
 
 interface OracleRow {
     n: number;

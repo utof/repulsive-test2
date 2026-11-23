@@ -92,7 +92,15 @@ const U_F64 = 2.220446049250313e-16;
 const U_F32 = 5.96e-8;
 /** The oracle corpus's extent (module TSDoc); every κ test asserts the curve it got matches. */
 const EXTENT = 5.4716;
-const SCRATCH = `${import.meta.dir}/../../../.superpowers/sdd/2026-09-11-phase2h-queue/scratch`;
+/**
+ * Tracked copy of the H-queue scratch corpus (originals, the historical record:
+ * `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/`, git-ignored, this machine only). The
+ * copy in `corpus/` is the test input; it was copied 2026-11-24 so the file loads in any
+ * checkout, and differs from the original only by biome formatting (whitespace, `e-08` -> `e-8`):
+ * `JSON.parse` of the two is deep-equal. Edit the copy, not the scratch file.
+ * Why: the scratch folder is git-ignored, so in a fresh checkout this module failed to load.
+ */
+const CORPUS = `${import.meta.dir}/corpus`;
 
 const log = (name: string, v: unknown) => console.log(`[task6] ${name} = ${v}`);
 
@@ -222,7 +230,7 @@ interface E4Row {
     nullDimLfrac: number;
     kappaPrecond: number;
 }
-const e4: E4Row[] = JSON.parse(readFileSync(`${SCRATCH}/e4-closer-0b.json`, 'utf8')).rows;
+const e4: E4Row[] = JSON.parse(readFileSync(`${CORPUS}/e4-closer-0b.json`, 'utf8')).rows;
 const e4row = (n: number, variant: string): E4Row => {
     const r = e4.find((x) => x.n === n && x.variant === variant);
     if (!r) throw new Error(`e4-closer-0b.json has no row n=${n} variant=${variant}`);
