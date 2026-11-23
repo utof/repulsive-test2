@@ -35,7 +35,7 @@ import {
     shiftSobolev,
     woodburyM,
 } from '../../src/gpu/saddle';
-import { fullTest } from '../tier';
+import { FULL, fullTest } from '../tier';
 
 const U_F64 = 2 ** -53;
 /**
@@ -510,6 +510,23 @@ for (const f of FIXTURES)
             f.timeoutMs,
         );
     }
+
+// BOTH TIERS: the writer's two-sided invariants (a) and (b) (stated in full in the writer test
+// below), on every row THIS run measured. Why: the writer is full-tier because it needs trefoil960,
+// but (b) -- `measure` and `factor()` compute the steps-1–3 vector the same way, bit for bit --
+// holds on every row of every fixture and costs nothing once the rows exist, so demoting it with
+// the writer would have dropped it from the default tier for no saving. (In the default tier no
+// row fires refinement, so (a) has nothing to check there; it is kept for the full tier, where the
+// writer asserts it too.) README.md "Tests".
+test('CR: on every measured row, relErr is the steps-1–3 vector (writer invariants (a), (b))', () => {
+    const registered = FIXTURES.filter((f) => FULL || !f.fullOnly).length;
+    expect(rows.length).toBe(registered * 2 * 13); // every registered fixture test ran first
+    for (const r of rows.filter((q) => q.irRefinements > 0))
+        expect(r.relErr).not.toBe(r.relErrWithIr);
+    const plain = rows.filter((q) => q.irRefinements === 0);
+    expect(plain.length).toBeGreaterThan(0);
+    for (const r of plain) expect(r.relErr).toBe(r.relErrWithIr);
+});
 
 // FULL TIER ONLY (test/tier.ts). Why: its 156-row and 4-firing-gated-row assertions need the
 // trefoil960 fixtures, which are full-tier, and the write dirtied the tracked artifact on every
