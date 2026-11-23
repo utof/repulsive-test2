@@ -49,50 +49,67 @@ describe('n = 480 trefoil: the two routes take the same step', () => {
     const e0 = exact(g.vertices);
     const dense = dispatchDescentStep({ ...base, sobolevSolver: 'dense' });
 
-    test('fixed total length', () => {
-        const hier = dispatchDescentStep({ ...base, sobolevSolver: 'hierarchical' });
-        expect(dense.accepted).toBe(true);
-        expect(hier.accepted).toBe(true);
-        // Same line-search outcome, and the same exact energy. MEASURED 40.5363 (dense) against
-        // 40.5359 (hierarchical) from 41.2401: the two decreases agree to 6e-4 relative.
-        expect(hier.stats?.tau).toBe(dense.stats?.tau);
-        const dDense = e0 - exact(dense.vertices);
-        const dHier = e0 - exact(hier.vertices);
-        expect(dDense).toBeGreaterThan(0);
-        expect(Math.abs(dHier - dDense) / dDense).toBeLessThan(5e-3);
-        // The constraint holds: MEASURED relative length drift 2.6e-5 after the step.
-        const L = totalLength(hier.vertices, g.edges);
-        expect(Math.abs(L - base.sobolevL0) / base.sobolevL0).toBeLessThan(1e-4);
-    });
+    // Both linear solvers of the hierarchical route, forced, against the dense route. The bars
+    // are per solver: tree + GMRES at tolerance 1e-2 agrees to a few 1e-3; the direct
+    // factorization solves exactly and, on this fixture, also sums the differential exactly
+    // (the tree does not engage: 21% of pairs are near-field), so it reproduces the dense step.
+    // MEASURED relative difference of the exact-energy decrease, gmres / direct:
+    //   fixed length 1.7e-3 / 1.7e-12, pinned vertex 4.9e-3 / 9.0e-14, per-edge 5.4e-4 / 6.7e-12.
+    const SOLVERS = [
+        { solver: 'gmres', total: 5e-3, pin: 5e-2, perEdge: 1e-2, pinHeld: 1e-4 },
+        { solver: 'direct', total: 1e-9, pin: 1e-9, perEdge: 1e-9, pinHeld: 1e-12 },
+    ] as const;
+    for (const bar of SOLVERS) {
+        const hierarchical = (extra: Partial<DispatchDescentStepArgs> = {}) =>
+            dispatchDescentStep({
+                ...base,
+                ...extra,
+                sobolevSolver: 'hierarchical',
+                hierarchicalLinearSolver: bar.solver,
+            });
 
-    test('with a pinned vertex', () => {
-        const pins = [{ vertexIndex: 10, target: [...g.vertices[10]] as Vec3, enabled: true }];
-        const d = dispatchDescentStep({ ...base, pins, sobolevSolver: 'dense' });
-        const h = dispatchDescentStep({ ...base, pins, sobolevSolver: 'hierarchical' });
-        expect(h.accepted).toBe(true);
-        const dD = e0 - exact(d.vertices);
-        const dH = e0 - exact(h.vertices);
-        // MEASURED 40.6102 (dense) against 40.6191 (hierarchical): 1.4e-2 relative on the decrease.
-        expect(Math.abs(dH - dD) / dD).toBeLessThan(5e-2);
-        // The pin is held to the projection's tolerance, not exactly: MEASURED 2.0e-5.
-        const p = h.vertices[10];
-        const t = pins[0].target;
-        expect(Math.hypot(p[0] - t[0], p[1] - t[1], p[2] - t[2])).toBeLessThan(1e-4);
-    });
-
-    test('with every edge length fixed', () => {
-        const d = dispatchDescentStep({ ...base, lengthMode: 'perEdge', sobolevSolver: 'dense' });
-        const h = dispatchDescentStep({
-            ...base,
-            lengthMode: 'perEdge',
-            sobolevSolver: 'hierarchical',
+        test(`${bar.solver}: fixed total length`, () => {
+            const hier = hierarchical();
+            expect(dense.accepted).toBe(true);
+            expect(hier.accepted).toBe(true);
+            // Same line-search outcome, and the same exact energy (41.2401 → 40.536).
+            expect(hier.stats?.tau).toBe(dense.stats?.tau);
+            const dDense = e0 - exact(dense.vertices);
+            const dHier = e0 - exact(hier.vertices);
+            expect(dDense).toBeGreaterThan(0);
+            expect(Math.abs(dHier - dDense) / dDense).toBeLessThan(bar.total);
+            // The constraint holds: MEASURED relative length drift 2.5e-5 after the step.
+            const L = totalLength(hier.vertices, g.edges);
+            expect(Math.abs(L - base.sobolevL0) / base.sobolevL0).toBeLessThan(1e-4);
         });
-        expect(h.accepted).toBe(true);
-        const dD = e0 - exact(d.vertices);
-        const dH = e0 - exact(h.vertices);
-        // MEASURED 40.6840 (dense) against 40.6850 (hierarchical): 1.8e-3 relative.
-        expect(Math.abs(dH - dD) / dD).toBeLessThan(1e-2);
-    });
+
+        test(`${bar.solver}: with a pinned vertex`, () => {
+            const pins = [{ vertexIndex: 10, target: [...g.vertices[10]] as Vec3, enabled: true }];
+            const d = dispatchDescentStep({ ...base, pins, sobolevSolver: 'dense' });
+            const h = hierarchical({ pins });
+            expect(h.accepted).toBe(true);
+            const dD = e0 - exact(d.vertices);
+            const dH = e0 - exact(h.vertices);
+            expect(Math.abs(dH - dD) / dD).toBeLessThan(bar.pin);
+            // The pin: MEASURED 1.9e-5 (gmres, the projection's tolerance) / 6.0e-15 (direct).
+            const p = h.vertices[10];
+            const t = pins[0].target;
+            expect(Math.hypot(p[0] - t[0], p[1] - t[1], p[2] - t[2])).toBeLessThan(bar.pinHeld);
+        });
+
+        test(`${bar.solver}: with every edge length fixed`, () => {
+            const d = dispatchDescentStep({
+                ...base,
+                lengthMode: 'perEdge',
+                sobolevSolver: 'dense',
+            });
+            const h = hierarchical({ lengthMode: 'perEdge' });
+            expect(h.accepted).toBe(true);
+            const dD = e0 - exact(d.vertices);
+            const dH = e0 - exact(h.vertices);
+            expect(Math.abs(dH - dD) / dD).toBeLessThan(bar.perEdge);
+        });
+    }
 
     test('no `sobolevSolver` is the dense route, bit for bit', () => {
         const absent = dispatchDescentStep(base);
@@ -100,16 +117,22 @@ describe('n = 480 trefoil: the two routes take the same step', () => {
         expect(absent.vertices).toEqual(dense.vertices);
     });
 
-    test('the hierarchical step reports its tree and build times under dE and assembleA', () => {
-        const h = dispatchDescentStep({
-            ...base,
-            sobolevSolver: 'hierarchical',
-            collectTimings: true,
-        });
-        expect(h.timings?.dE?.ms).toBeGreaterThan(0);
-        expect(h.timings?.assembleA?.ms).toBeGreaterThan(0);
-        // No dense factorization ran on this route.
-        expect(h.timings?.factor).toBeUndefined();
+    test('the step reports its build under dE and assembleA, and `factor` only when direct', () => {
+        const run = (solver: 'gmres' | 'direct' | 'auto') =>
+            dispatchDescentStep({
+                ...base,
+                sobolevSolver: 'hierarchical',
+                hierarchicalLinearSolver: solver,
+                collectTimings: true,
+            }).timings;
+        const tree = run('gmres');
+        expect(tree?.dE?.ms).toBeGreaterThan(0);
+        expect(tree?.assembleA?.ms).toBeGreaterThan(0);
+        expect(tree?.factor).toBeUndefined(); // no factorization on the tree route
+        expect(run('direct')?.factor?.calls).toBe(1);
+        // 'auto' on this fixture is the direct route: 21% of its pairs are near-field, against
+        // a threshold of 9.5% at n = 480 (directIsCheaper).
+        expect(run('auto')?.factor?.calls).toBe(1);
     });
 });
 

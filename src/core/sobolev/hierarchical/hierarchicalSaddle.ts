@@ -66,6 +66,7 @@ import type { HierarchicalPreparedSaddle } from '../linsolve';
 import { type HierarchicalA, prepareA } from './apply';
 import { type Bct, type BctParams, buildBct } from './bct';
 import { type Bvh, buildBvh } from './bvh';
+import { DIRECT_MAX_N, directIsCheaper, makeDirectSolve } from './directSolve';
 import { curveExtent } from './extent';
 import { applyAsigma, estimateNorm2 } from './gmres';
 import { type LowOrderA, prepareLowOrder } from './lowOrder';
@@ -169,6 +170,12 @@ export interface HierarchicalSaddleOptions {
      * @see src/core/sobolevRoute.ts (APP_HIERARCHICAL_TOL)
      */
     normEstimate?: 'power' | 'trace';
+    /**
+     * A tree and block lists already built for THESE vertices and edges with the same `leafSize`,
+     * `epsilon` and `bct` parameters. Why: `makeRingSaddle` builds them first to decide between
+     * this route and the direct one, and must not pay for them twice.
+     */
+    prebuilt?: { bvh: Bvh; bct: Bct };
 }
 
 /**
@@ -386,6 +393,67 @@ function findEdgeLengthsRows(C: number[][], vertices: Vec3[], edges: Edge[]): nu
 }
 
 /**
+ * §8.2's fork, shared by every producer of a `kind: 'hierarchical'` saddle (the tree route above
+ * and the direct route below): which constraint solver a constraint Jacobian `C` gets, given an
+ * operator and a preconditioner for `A_σ`. ONE copy, so the two routes cannot disagree about
+ * where the Schur route ends and the nullspace route begins.
+ */
+function prepareForConstraints(
+    op: HierarchicalOperator,
+    precond: Pick<Preconditioner, 'apply' | 'n' | 'sigma'>,
+    vertices: Vec3[],
+    edges: Edge[],
+    C: number[][],
+    schur: SchurOptions | undefined,
+    normA2: number,
+): SchurSolver | NullspaceSolver {
+    // §8.2's FORK. It routes PER BLOCK — `barycenter`/`point`/`totalLength` (`O(1)` rows)
+    // to the Schur complement, `edgeLengthsBlock`'s `|E|` rows to the nullspace route — so
+    // the dispatch recognises the BLOCK and not a row count. §11.2 row 9b's verification
+    // column is this line ("Dispatch on `k`: Schur for `k=O(1)`, nullspace for
+    // `edgeLengths`' `|E|` rows"), and §8.2 names `{barycenter, edgeLengths, pins}` as one
+    // of exactly two sets that "must actually work".
+    //
+    // §8.2 PINS NO NUMERIC `k` THRESHOLD, and this dispatch does not invent one. The only
+    // cap in play is `maxK`, forwarded unchanged to BOTH routes from the single
+    // `opts.schur.maxK` (default `SCHUR_MAX_K`), so the dispatch and `prepareSchur`'s own
+    // `k > maxK` refusal cannot disagree about where the Schur route ends. An all-`O(1)`
+    // set above the cap is deliberately NOT rerouted: it has no `O(n)` block for a
+    // projection to absorb, so it must still reach `SchurRouteError`, whose message
+    // ("raise maxK only if k really is O(1)") is the one that applies to it.
+    //
+    // `normA2` IS NOT FORWARDED to the nullspace route, on purpose. The cached value is
+    // `‖A_σ‖₂`, and that route certifies against `‖P A_σ P‖₂ ≤ ‖A_σ‖₂`; substituting the
+    // larger norm shrinks `η` and makes the certificate LOOSER, which is the unsafe
+    // direction (`NullspaceOptions.normA2`). It estimates its own, once, on the projected
+    // operator.
+    const rowStart = findEdgeLengthsRows(C, vertices, edges);
+    if (rowStart !== null) {
+        return prepareNullspace(
+            op,
+            precond,
+            { vertices, edges, rowStart },
+            C.filter((_, r) => r < rowStart || r >= rowStart + edges.length),
+            {
+                tol: schur?.tol,
+                maxit: schur?.maxit,
+                maxK: schur?.maxK,
+                etaAccept: schur?.etaAccept,
+                // Forwarded rather than dropped: a knock-out configured on this factory
+                // must reach whichever route the set takes, or a defect injected for a
+                // hybrid set would silently run clean.
+                knockOut: schur?.knockOut,
+                schurDefect: schur?.defect,
+            },
+        );
+    }
+    return prepareSchur(op, precond, C, {
+        ...schur,
+        normA2: schur?.normA2 ?? normA2,
+    });
+}
+
+/**
  * Builds the Phase 2H hierarchical saddle for `vertices` — the object to hand to
  * `sobolevStepSet`'s `opts.saddle` (which also REQUIRES `projectionMode: 'frozen'`, see the module
  * TSDoc). The build happens once, here; `prepare(C)` is called once per step by `gradient.ts:139`
@@ -452,8 +520,8 @@ export function makeHierarchicalSaddle(
     // `prepareA` and `prepareLowOrder` (spec §5.2 — `L^{2−s}` must be assembled over the same tree
     // as `A`, or the preconditioner is not a preconditioner for this operator).
     // @see test/sobolev/hierarchical/precond.test.ts:133-152 (the same sequence, by hand)
-    const bvh = buildBvh(vertices, edges, leafSize, epsilon);
-    const bct = buildBct(bvh, opts.bct ?? {});
+    const bvh = opts.prebuilt?.bvh ?? buildBvh(vertices, edges, leafSize, epsilon);
+    const bct = opts.prebuilt?.bct ?? buildBct(bvh, opts.bct ?? {});
     const source = { kind: 'lists', bct } as const;
     const A = prepareA(bvh, n, source, { alpha, beta, epsilon });
     const op = makeHierarchicalOperator(A);
@@ -500,51 +568,126 @@ export function makeHierarchicalSaddle(
         // number of τ-trials (9b's measured structural cost).
         // A caller-supplied `schur.normA2` still wins; `?? normA2` rather than a spread so that an
         // explicitly-`undefined` field cannot silently discard the cached value.
-        prepare: (C: number[][]): SchurSolver | NullspaceSolver => {
-            // §8.2's FORK. It routes PER BLOCK — `barycenter`/`point`/`totalLength` (`O(1)` rows)
-            // to the Schur complement, `edgeLengthsBlock`'s `|E|` rows to the nullspace route — so
-            // the dispatch recognises the BLOCK and not a row count. §11.2 row 9b's verification
-            // column is this line ("Dispatch on `k`: Schur for `k=O(1)`, nullspace for
-            // `edgeLengths`' `|E|` rows"), and §8.2 names `{barycenter, edgeLengths, pins}` as one
-            // of exactly two sets that "must actually work".
-            //
-            // §8.2 PINS NO NUMERIC `k` THRESHOLD, and this dispatch does not invent one. The only
-            // cap in play is `maxK`, forwarded unchanged to BOTH routes from the single
-            // `opts.schur.maxK` (default `SCHUR_MAX_K`), so the dispatch and `prepareSchur`'s own
-            // `k > maxK` refusal cannot disagree about where the Schur route ends. An all-`O(1)`
-            // set above the cap is deliberately NOT rerouted: it has no `O(n)` block for a
-            // projection to absorb, so it must still reach `SchurRouteError`, whose message
-            // ("raise maxK only if k really is O(1)") is the one that applies to it.
-            //
-            // `normA2` IS NOT FORWARDED to the nullspace route, on purpose. The cached value is
-            // `‖A_σ‖₂`, and that route certifies against `‖P A_σ P‖₂ ≤ ‖A_σ‖₂`; substituting the
-            // larger norm shrinks `η` and makes the certificate LOOSER, which is the unsafe
-            // direction (`NullspaceOptions.normA2`). It estimates its own, once, on the projected
-            // operator.
-            const rowStart = findEdgeLengthsRows(C, vertices, edges);
-            if (rowStart !== null) {
-                return prepareNullspace(
-                    op,
-                    precond,
-                    { vertices, edges, rowStart },
-                    C.filter((_, r) => r < rowStart || r >= rowStart + edges.length),
-                    {
-                        tol: opts.schur?.tol,
-                        maxit: opts.schur?.maxit,
-                        maxK: opts.schur?.maxK,
-                        etaAccept: opts.schur?.etaAccept,
-                        // Forwarded rather than dropped: a knock-out configured on this factory
-                        // must reach whichever route the set takes, or a defect injected for a
-                        // hybrid set would silently run clean.
-                        knockOut: opts.schur?.knockOut,
-                        schurDefect: opts.schur?.defect,
-                    },
-                );
-            }
-            return prepareSchur(op, precond, C, {
-                ...opts.schur,
-                normA2: opts.schur?.normA2 ?? normA2,
-            });
+        prepare: (C: number[][]): SchurSolver | NullspaceSolver =>
+            prepareForConstraints(op, precond, vertices, edges, C, opts.schur, normA2),
+    };
+}
+
+/**
+ * A built DIRECT saddle: the same seam as {@link HierarchicalSaddle} (`kind: 'hierarchical'` is
+ * the name of the "operator + prepare" contract, not of the tree), with an exactly factored
+ * `A_σ` behind it instead of a block cluster tree.
+ * @see src/core/sobolev/hierarchical/directSolve.ts (why and when)
+ */
+export interface DirectSaddle extends HierarchicalPreparedSaddle {
+    op: HierarchicalOperator;
+    prepare(C: number[][]): SchurSolver | NullspaceSolver;
+    build: {
+        n: number;
+        alpha: number;
+        beta: number;
+        epsilon: number;
+        /** `tr(A)/n` of the exact matrix. */
+        sigma: number;
+        /** The trace bound `(n + 1)·σ ≥ ‖A_σ‖₂` (see `HierarchicalSaddleOptions.normEstimate`). */
+        normA2: number;
+        assembleMs: number;
+        factorMs: number;
+    };
+}
+
+/**
+ * GMRES tolerance on the direct route. Why not the caller's: the preconditioner is the exact
+ * inverse, so the first iterate is already accurate to rounding (measured 3e-13 at n = 1 998)
+ * and a loose tolerance would buy nothing; this only bounds the iteration at "one or two".
+ */
+const DIRECT_GMRES_TOL = 1e-10;
+
+/**
+ * Build the direct route for a closed ring. Returns `null` when it does not apply — more than
+ * {@link DIRECT_MAX_N} vertices, or a factorization that met a non-positive pivot — and throws
+ * {@link HierarchicalSaddleUnsupportedError} for a topology the constraint machinery cannot
+ * serve, exactly as {@link makeHierarchicalSaddle} does.
+ *
+ * Only `alpha`, `beta`, `epsilon` and `schur` of the options are read. `schur.tol` is replaced
+ * by {@link DIRECT_GMRES_TOL}; `schur.etaAccept` is kept, and is trivially met.
+ */
+export function makeDirectSaddle(
+    vertices: Vec3[],
+    edges: Edge[],
+    opts: HierarchicalSaddleOptions = {},
+): DirectSaddle | null {
+    const n = vertices.length;
+    assertClosedNaturalRing(vertices, edges);
+    if (n > DIRECT_MAX_N) return null;
+    const alpha = opts.alpha ?? DEFAULTS.alpha;
+    const beta = opts.beta ?? DEFAULTS.beta;
+    const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
+    const direct = makeDirectSolve(vertices, edges, alpha, beta, epsilon);
+    if (!direct) return null;
+    const { op, precond } = direct;
+    // A is positive semidefinite with trace n·σ, and the shift adds at most σ.
+    const normA2 = opts.schur?.normA2 ?? (n + 1) * op.sigma;
+    const schur: SchurOptions = { ...opts.schur, tol: DIRECT_GMRES_TOL };
+    return {
+        kind: 'hierarchical',
+        op,
+        build: {
+            n,
+            alpha,
+            beta,
+            epsilon,
+            sigma: op.sigma,
+            normA2,
+            assembleMs: direct.assembleMs,
+            factorMs: direct.factorMs,
         },
+        prepare: (C: number[][]): SchurSolver | NullspaceSolver =>
+            prepareForConstraints(op, precond, vertices, edges, C, schur, normA2),
+    };
+}
+
+/** Which linear solver a ring saddle uses; `'auto'` decides per build from the block lists. */
+export type RingLinearSolver = 'auto' | 'gmres' | 'direct';
+
+/**
+ * The saddle for one step on a closed ring, with the linear solver chosen for THIS geometry:
+ * build the tree and the block lists (cheap), count the near-field pairs, and take the direct
+ * route when `directIsCheaper` says the tree does not pay; otherwise finish the tree route on
+ * the lists already built.
+ *
+ * `'gmres'` and `'direct'` force a route (benchmarks run both over the same fixtures); a forced
+ * `'direct'` that does not apply falls back to the tree route, and `solver` reports what ran.
+ * @see src/core/sobolev/hierarchical/directSolve.ts (directIsCheaper: the rule and its numbers)
+ */
+export function makeRingSaddle(
+    vertices: Vec3[],
+    edges: Edge[],
+    opts: HierarchicalSaddleOptions & { linearSolver?: RingLinearSolver } = {},
+): {
+    saddle: HierarchicalSaddle | DirectSaddle;
+    solver: 'gmres' | 'direct';
+    /** Near-field edge pairs of the block lists; `null` when the lists were not built. */
+    nearPairs: number | null;
+} {
+    const want = opts.linearSolver ?? 'auto';
+    const n = vertices.length;
+    if (want === 'direct') {
+        const d = makeDirectSaddle(vertices, edges, opts);
+        if (d) return { saddle: d, solver: 'direct', nearPairs: null };
+    }
+    assertClosedNaturalRing(vertices, edges);
+    const epsilon = opts.epsilon ?? DEFAULTS.epsilon;
+    const bvh = buildBvh(vertices, edges, opts.leafSize ?? DEFAULT_LEAF_SIZE, epsilon);
+    const bct = buildBct(bvh, opts.bct ?? {});
+    const nearPairs = bct.stats.nearPairs;
+    if (want === 'auto' && directIsCheaper(n, nearPairs)) {
+        const d = makeDirectSaddle(vertices, edges, opts);
+        if (d) return { saddle: d, solver: 'direct', nearPairs };
+    }
+    return {
+        saddle: makeHierarchicalSaddle(vertices, edges, null, { ...opts, prebuilt: { bvh, bct } }),
+        solver: 'gmres',
+        nearPairs,
     };
 }
