@@ -422,6 +422,14 @@ export interface LineSearchOptions {
      * provenance"); it is NOT an app-facing tuning knob.
      */
     projection?: ProjectConstraintSetOptions;
+    /**
+     * A third acceptance test, next to "projection succeeded" and Armijo: is the motion from
+     * the current vertices to this candidate admissible? A candidate it refuses is backtracked.
+     * Absent (the default) nothing changes, bit for bit. Why: the paper's collision-limited
+     * time step, which is where its isotopy guarantee comes from.
+     * @see src/core/planarCollision.ts
+     */
+    guard?: (from: Vec3[], to: Vec3[]) => boolean;
 }
 
 /** Failure reasons of {@link lineSearchStepSet}, mirroring the oracle's `reason` strings. */
@@ -430,7 +438,10 @@ export type LineSearchFailureReason =
     | 'not_a_descent_direction'
     | 'armijo_failed'
     | 'projection_failed'
-    | 'tau_below_min';
+    | 'tau_below_min'
+    // Set only when `LineSearchOptions.guard` is: the last trial was refused by the guard
+    // (a pass-through on the way to the candidate). @see src/core/planarCollision.ts
+    | 'collision';
 
 /**
  * Result of {@link lineSearchStepSet}. On failure `vertices` echoes the input
@@ -582,7 +593,11 @@ export function lineSearchStepSet(
         const projFinite = proj.vertices.every(
             (p) => Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]),
         );
-        if (proj.ok && projFinite) {
+        // The guard runs BEFORE the energy (a refused candidate needs no evaluation) and on the
+        // PROJECTED candidate, i.e. on the motion that would actually be applied.
+        if (proj.ok && projFinite && opts?.guard && !opts.guard(vertices, proj.vertices)) {
+            lastReason = 'collision';
+        } else if (proj.ok && projFinite) {
             const e1 = objectiveEnergy(proj.vertices);
             if (Number.isFinite(e1) && e1 <= e0 - c1 * tau * slope) {
                 return {

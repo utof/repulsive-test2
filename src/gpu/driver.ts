@@ -22,9 +22,17 @@ import { packTopology } from './topology';
  * @see docs/superpowers/specs/2026-08-13-webgpu-solver-design.md §1
  */
 export function gpuStepSupported(
-    s: Pick<StepArgsSource, 'descentMode' | 'mode' | 'penalties'>,
+    s: Pick<StepArgsSource, 'descentMode' | 'mode' | 'penalties' | 'preventCrossings'>,
 ): boolean {
-    return s.descentMode === 'sobolev' && s.mode === 'analytical' && !penaltiesActive(s.penalties);
+    // `preventCrossings`: the crossing guard lives in the CPU step's line search
+    // (`dispatch.ts` crossingGuard); this driver's own step does not carry it, so such a
+    // step is routed to the worker like every other config the GPU path does not serve.
+    return (
+        s.descentMode === 'sobolev' &&
+        s.mode === 'analytical' &&
+        !penaltiesActive(s.penalties) &&
+        !s.preventCrossings
+    );
 }
 
 /**

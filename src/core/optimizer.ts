@@ -210,6 +210,12 @@ export interface SobolevStepOptions {
      */
     tpeEnergy?: (V: Vec3[]) => number;
     /**
+     * Forwarded to the line search (`LineSearchOptions.guard`): refuse a candidate whose motion
+     * from the current vertices is inadmissible (a pass-through). Spread only when set.
+     * @see src/core/planarCollision.ts
+     */
+    guard?: (from: Vec3[], to: Vec3[]) => boolean;
+    /**
      * A saddle solve prepared OUTSIDE this step for THESE vertices (WebGPU Phase 2a
      * seam). Selects the SOURCE of A and of the factorization, never the arithmetic;
      * absent ⇒ every path below is bit-identical (the golden suites are the backstop),
@@ -546,6 +552,7 @@ export function sobolevStepSet(
                         // Spread only when set, like the two above: the default-path options
                         // object must stay IDENTICAL to the pre-option build.
                         ...(opts.tpeEnergy ? { tpeEnergy: opts.tpeEnergy } : {}),
+                        ...(opts.guard ? { guard: opts.guard } : {}),
                     },
                 ),
             );

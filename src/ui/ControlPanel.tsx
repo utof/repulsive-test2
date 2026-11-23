@@ -41,6 +41,10 @@ export function ControlPanel() {
     const setProjectionMode = useSimStore((s) => s.setProjectionMode);
     const sobolevSolver = useSimStore((s) => s.sobolevSolver);
     const forcePrePass = useSimStore((s) => s.forcePrePass);
+    const edgeSubdivision = useSimStore((s) => s.edgeSubdivision);
+    const setEdgeSubdivision = useSimStore((s) => s.setEdgeSubdivision);
+    const preventCrossings = useSimStore((s) => s.preventCrossings);
+    const setPreventCrossings = useSimStore((s) => s.setPreventCrossings);
     const setForcePrePass = useSimStore((s) => s.setForcePrePass);
     const setSobolevSolver = useSimStore((s) => s.setSobolevSolver);
     const graph = useSimStore((s) => s.graph);
@@ -332,6 +336,37 @@ export function ControlPanel() {
                         onChange={(e) => setForcePrePass(e.target.checked)}
                     />
                     <span>Force-layout pre-pass (graphs; may cross edges)</span>
+                </label>
+                {/* Segments per edge (rebuilds the graph) and the crossing guard. The guard is
+                    the paper's collision-limited step: it holds the drawing's crossings fixed,
+                    on flat graphs. @see src/core/subdivide.ts, src/core/planarCollision.ts */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>Points per edge:</span>
+                    <input
+                        type="number"
+                        min={1}
+                        max={16}
+                        value={edgeSubdivision}
+                        onChange={(e) => setEdgeSubdivision(Number.parseInt(e.target.value, 10))}
+                        style={{ width: 60 }}
+                    />
+                </label>
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: descentMode === 'sobolev' ? 1 : 0.4,
+                    }}
+                    title="Refuses any step in which a point would pass through an edge. Flat graphs only."
+                >
+                    <input
+                        type="checkbox"
+                        checked={preventCrossings}
+                        disabled={descentMode !== 'sobolev'}
+                        onChange={(e) => setPreventCrossings(e.target.checked)}
+                    />
+                    <span>No new crossings (flat graphs)</span>
                 </label>
                 {/* Descent-direction arrows toggle — visible in BOTH paused and running
                     states (see GradientArrows), not just on pause. */}

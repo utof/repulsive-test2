@@ -20,6 +20,7 @@ import { barycenterTarget } from './core/sobolev/constraints';
 import type { PenaltyConfig } from './core/sobolev/penalties';
 import type { SobolevStepTimings } from './core/sobolev/phaseTimings';
 import { pairListFits, type SobolevSolver } from './core/sobolevRoute';
+import { subdivideGraph } from './core/subdivide';
 import { calculateDisjointPairs } from './core/tangentPointEnergy';
 import { type GraphState, type TestConfig, testConfigs, type Vec3 } from './core/testConfigs';
 
@@ -82,11 +83,22 @@ export interface GraphBuild {
     graph: GraphState;
     disjointPairs: number[][];
     energy: number;
+    /** Vertices that are nodes of the preset; the rest are interior points of subdivided edges. */
+    nodeCount: number;
 }
 
 // Pure: build a graph from a preset + params, its disjoint pairs, and its energy.
-export function buildGraphState(test: TestConfig, params: Record<string, number>): GraphBuild {
-    const graph = test.generate(params);
+export function buildGraphState(
+    test: TestConfig,
+    params: Record<string, number>,
+    pieces = 1,
+): GraphBuild {
+    // `pieces > 1` cuts every edge of the preset into that many segments (the original
+    // vertices keep their indices). @see src/core/subdivide.ts
+    const generated = test.generate(params);
+    const sub = subdivideGraph(generated.vertices, generated.edges, pieces);
+    const graph: GraphState = { vertices: sub.vertices, edges: sub.edges };
+    const nodeCount = sub.nodeCount;
     // The pair list is n rows of ~n entries; above PAIR_LIST_MAX_N it is not built at all and
     // stays `[]`. Every consumer either switches on the same `pairListFits` (the step, the energy,
     // the arrows, the worker) or is unreachable at that size (the GPU driver).
@@ -95,7 +107,7 @@ export function buildGraphState(test: TestConfig, params: Record<string, number>
         ? calculateDisjointPairs(graph.edges)
         : [];
     const energy = graphEnergy(graph.vertices, graph.edges, disjointPairs);
-    return { graph, disjointPairs, energy };
+    return { graph, disjointPairs, energy, nodeCount };
 }
 
 function defaultParams(test: TestConfig): Record<string, number> {
@@ -262,6 +274,16 @@ export interface SimStore {
     // run's starting geometry. Pinned vertices do not move during the pre-pass.
     // `prePassAlpha` is the layout's temperature (1 → 0.001), published for the stats line.
     // @see src/core/forceLayout.ts
+    // Segments per edge of the preset (1 = as generated). More segments put vertices ALONG
+    // each edge, which is where the energy is evaluated: edges then repel along their whole
+    // length and can bend. `nodeCount` is how many leading vertices are nodes of the preset.
+    // Changing it rebuilds the graph. @see src/core/subdivide.ts
+    edgeSubdivision: number;
+    nodeCount: number;
+    // Refuse any Sobolev step on the way to which a vertex passes through an edge (flat graphs
+    // only; a no-op in 3-D). Default off: with it off the step is bit-identical to before.
+    // @see src/core/planarCollision.ts
+    preventCrossings: boolean;
     forcePrePass: boolean;
     prePass: ForceLayout | null;
     prePassDone: boolean;
@@ -297,6 +319,8 @@ export interface SimStore {
     // frame loop while `prePass` is non-null; it advances the layout by at most `maxTicks`
     // ticks or `budgetMs` milliseconds, and ends the phase when the layout has settled.
     setForcePrePass(b: boolean): void;
+    setEdgeSubdivision(pieces: number): void;
+    setPreventCrossings(b: boolean): void;
     tickPrePass(maxTicks?: number, budgetMs?: number): void;
     // Pin actions (briefing §5B). addPin snapshots the vertex's CURRENT live
     // position as the frozen target (idempotent by vertexIndex); setPinTarget is
@@ -346,11 +370,12 @@ export const useSimStore = create<SimStore>()((set, get) => {
     // Rebuild the graph from (id, params): resets live buffer, stats, running; bumps graphVersion.
     const rebuild = (id: string, nextParams: Record<string, number>) => {
         const t = testConfigs.find((x) => x.id === id) ?? testConfigs[0];
-        const b = buildGraphState(t, nextParams);
+        const b = buildGraphState(t, nextParams, get().edgeSubdivision);
         set((s) => ({
             selectedTestId: id,
             testParams: nextParams,
             graph: b.graph,
+            nodeCount: b.nodeCount,
             disjointPairs: b.disjointPairs,
             live: cloneVerts(b.graph.vertices),
             step: 0,
@@ -424,6 +449,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
         lengthConstraint: true,
         projectionMode: 'frozen',
         sobolevSolver: 'auto',
+        edgeSubdivision: 1,
+        nodeCount: built.nodeCount,
+        preventCrossings: false,
         forcePrePass: false,
         prePass: null,
         prePassDone: false,
@@ -503,6 +531,15 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 penaltyEpoch: s.penaltyEpoch + 1,
                 sobolevConverged: false,
             })),
+        // A different number of segments per edge is a different graph: rebuild (clamped 1–16).
+        setEdgeSubdivision: (pieces) => {
+            const k = Math.max(1, Math.min(16, Math.floor(pieces) || 1));
+            if (k === get().edgeSubdivision) return;
+            set({ edgeSubdivision: k });
+            rebuild(get().selectedTestId, get().testParams);
+        },
+        // Per-configuration verdicts are cleared, as for the other step-shaping switches.
+        setPreventCrossings: (b) => set({ preventCrossings: b, sobolevConverged: false }),
         // Toggling the switch re-arms the pre-pass for this graph (so turning it on after a
         // run still does something on the next play). Turning it off mid-pre-pass abandons
         // the layout where it is and re-anchors the targets there, exactly as a settled
