@@ -398,23 +398,28 @@ function findEdgeLengthsRows(C: number[][], vertices: Vec3[], edges: Edge[]): nu
 export function makeHierarchicalSaddle(
     vertices: Vec3[],
     edges: Edge[],
-    disjointPairs: number[][],
+    disjointPairs: number[][] | null,
     opts: HierarchicalSaddleOptions = {},
 ): HierarchicalSaddle {
     const n = vertices.length;
     assertClosedNaturalRing(vertices, edges);
+    // `null` skips the consistency check below. Why it is allowed: the build never READS the
+    // list (it works from the BVH), and at the sizes this path exists for the list cannot be
+    // built at all — n rows of n − 3 entries, ~0.5 GB at n = 4 000. A caller that has no list
+    // (Barnes–Hut energy and differential, `src/core/barnesHut.ts`) passes `null`.
+    // @see bench/results/2026-11-23-h-step-scale.jsonl
     // O(m) consistency check, NOT the O(m²) re-derivation: on a closed ring every edge is adjacent
     // to exactly its two neighbours, so `calculateDisjointPairs` gives m rows of length m − 3
     // (0 at m = 3, 1 at m = 4). A list built for another curve or another n fails this.
     // @see src/core/tangentPointEnergy.ts (calculateDisjointPairs)
     const expectedRow = n - 3;
-    if (disjointPairs.length !== n) {
+    if (disjointPairs !== null && disjointPairs.length !== n) {
         throw new RangeError(
             `makeHierarchicalSaddle: disjointPairs has ${disjointPairs.length} rows, expected one ` +
                 `per edge (${n}); it was not built from these edges (calculateDisjointPairs(edges))`,
         );
     }
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; disjointPairs !== null && i < n; i++) {
         if (disjointPairs[i]?.length !== expectedRow) {
             throw new RangeError(
                 `makeHierarchicalSaddle: disjointPairs[${i}] has ${disjointPairs[i]?.length} ` +

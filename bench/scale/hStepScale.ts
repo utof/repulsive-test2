@@ -9,6 +9,13 @@
  *   bun bench/scale/hStepScale.ts <n> solve [tol]   build phases + prepare(C) + one solve; O(n) memory
  *   bun bench/scale/hStepScale.ts <n> step  [tol]   one full sobolevStepSet on the hierarchical route
  *   bun bench/scale/hStepScale.ts <n> dense         the same step on the dense route (reference)
+ *   bun bench/scale/hStepScale.ts <n> bh [tol] [theta] [steps]
+ *                                                   hierarchical solve + Barnes–Hut energy and
+ *                                                   differential; no `disjointPairs`, O(n) memory
+ *
+ * `bh` reports the energy two ways: `energy` is what the step itself saw (Barnes–Hut), and for
+ * n <= BH_EXACT_MAX_N `exactEnergyBefore/After` re-evaluate the true all-pairs energy at the same
+ * vertices, which is the only honest measure of whether the step went downhill.
  *
  * `solve` never builds `disjointPairs` (n rows of n-3 entries, the O(n²) object the energy and its
  * gradient still need), so it is the only mode that reaches n = 30 000 on a 16 GB machine. Its rhs
@@ -19,6 +26,12 @@
  * @issue utof/repulsive-test2#51
  */
 import { loadavg } from 'node:os';
+import {
+    type BarnesHutContext,
+    barnesHutEnergy,
+    barnesHutGradient,
+    prepareBarnesHut,
+} from '../../src/core/barnesHut';
 import { trefoil } from '../../src/core/fixtures';
 import { DEFAULTS, sobolevStepSet } from '../../src/core/optimizer';
 import { barycenterBlock, type ConstraintSet } from '../../src/core/sobolev/constraintSet';
@@ -38,10 +51,12 @@ import { prepareSchur } from '../../src/core/sobolev/hierarchical/schur';
 import { calculateDisjointPairs, calculateEnergy } from '../../src/core/tangentPointEnergy';
 
 const n = Number(process.argv[2]);
-const mode = process.argv[3] as 'solve' | 'step' | 'dense';
+const mode = process.argv[3] as 'solve' | 'step' | 'dense' | 'bh';
 const tol = process.argv[4] === undefined ? undefined : Number(process.argv[4]);
-if (!Number.isInteger(n) || n < 8 || !['solve', 'step', 'dense'].includes(mode)) {
-    console.error('usage: bun bench/scale/hStepScale.ts <n> solve|step|dense [tol]');
+if (!Number.isInteger(n) || n < 8 || !['solve', 'step', 'dense', 'bh'].includes(mode)) {
+    console.error(
+        'usage: bun bench/scale/hStepScale.ts <n> solve|step|dense|bh [tol] [theta] [steps]',
+    );
     process.exit(2);
 }
 
@@ -120,6 +135,69 @@ if (mode === 'solve') {
     out.solveStop = res.gmres.stop;
     out.solveEta = res.gmres.eta;
     out.residual = res.residual;
+} else if (mode === 'bh') {
+    // Above this the exact all-pairs check (θ = 0, O(n²) time but O(n) memory) costs minutes.
+    // Override with BH_EXACT_MAX_N=<n> for a one-off check at a larger size.
+    const BH_EXACT_MAX_N = Number(process.env.BH_EXACT_MAX_N ?? 8000);
+    const theta = process.argv[5] === undefined ? undefined : Number(process.argv[5]);
+    const steps = process.argv[6] === undefined ? 1 : Number(process.argv[6]);
+    // BH_TRAVERSAL=edge selects the paper's per-edge differential, kept for comparison.
+    const traversal = process.env.BH_TRAVERSAL === 'edge' ? ('edge' as const) : ('vertex' as const);
+    const bhOpts = { traversal, ...(theta === undefined ? {} : { theta }) };
+    out.traversal = traversal;
+    // One tree per geometry, shared by the energy and the differential evaluated there.
+    let cached: { V: unknown; ctx: BarnesHutContext } | null = null;
+    const ctxFor = (V: typeof vertices): BarnesHutContext => {
+        if (cached?.V !== V) cached = { V, ctx: prepareBarnesHut(V, edges, epsilon, bhOpts) };
+        return cached.ctx;
+    };
+    const tpeEnergy = (V: typeof vertices): number => barnesHutEnergy(ctxFor(V), alpha, beta);
+    const exactEnergy = (V: typeof vertices): number =>
+        barnesHutEnergy(prepareBarnesHut(V, edges, epsilon, { theta: 0 }), alpha, beta);
+    const set: ConstraintSet = [barycenterBlock(barycenterTarget(vertices, edges))];
+    out.theta = theta ?? 'default';
+    if (n <= BH_EXACT_MAX_N) out.exactEnergyBefore = exactEnergy(vertices);
+
+    let V = vertices;
+    const perStep: Record<string, unknown>[] = [];
+    for (let k = 0; k < steps; k++) {
+        const t0 = performance.now();
+        const saddle = makeHierarchicalSaddle(
+            V,
+            edges,
+            null,
+            tol === undefined ? {} : { schur: { tol, etaAccept: 1 } },
+        );
+        const tBuild = performance.now();
+        const dE = barnesHutGradient(ctxFor(V), alpha, beta);
+        const tGrad = performance.now();
+        const r = sobolevStepSet(V, edges, [], set, {
+            mode: 'analytical',
+            projectionMode: 'frozen',
+            collectTimings: true,
+            saddle,
+            dE,
+            tpeEnergy,
+        });
+        const tEnd = performance.now();
+        perStep.push({
+            k,
+            accepted: r.accepted,
+            energy: r.energy,
+            tau: r.stats.tau,
+            ms: {
+                build: Math.round(tBuild - t0),
+                treeAndGradient: Math.round(tGrad - tBuild),
+                step: Math.round(tEnd - tGrad),
+                total: Math.round(tEnd - t0),
+            },
+            timings: r.timings,
+        });
+        if (!r.accepted) break;
+        V = r.vertices;
+    }
+    out.steps = perStep;
+    if (n <= BH_EXACT_MAX_N) out.exactEnergyAfter = exactEnergy(V);
 } else {
     const dp = timed('disjointPairs', () => calculateDisjointPairs(edges));
     const set: ConstraintSet = [barycenterBlock(barycenterTarget(vertices, edges))];

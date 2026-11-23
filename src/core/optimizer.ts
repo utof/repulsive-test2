@@ -201,6 +201,15 @@ export interface SobolevStepOptions {
      */
     dE?: Vec3[];
     /**
+     * Source of the tangent-point energy for E₀, the Armijo trials and the echo paths; forwarded
+     * to the line search (`LineSearchOptions.tpeEnergy`, which states the accuracy invariant).
+     * Absent ⇒ the exact all-pairs `calculateEnergy`, bit-identical to before.
+     * Why: with `dE`, a hierarchical `saddle` and this set, a step never reads `disjointPairs`,
+     * which is what lets it run above the size where that O(n²) list fits in memory.
+     * @see src/core/barnesHut.ts
+     */
+    tpeEnergy?: (V: Vec3[]) => number;
+    /**
      * A saddle solve prepared OUTSIDE this step for THESE vertices (WebGPU Phase 2a
      * seam). Selects the SOURCE of A and of the factorization, never the arithmetic;
      * absent ⇒ every path below is bit-identical (the golden suites are the backstop),
@@ -395,8 +404,11 @@ export function sobolevStepSet(
             // E_tpe plus active penalties — same composition as the line
             // search's Armijo energy (plan §2.4).
             const echoEnergy = (): number => {
+                const tpe = opts.tpeEnergy;
                 const e = timed('energy', () =>
-                    calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
+                    tpe
+                        ? tpe(vertices)
+                        : calculateEnergy(vertices, edges, disjointPairs, alpha, beta, epsilon),
                 );
                 return pen ? e + penaltyEnergy(vertices, edges, pen) : e;
             };
@@ -521,6 +533,9 @@ export function sobolevStepSet(
                               }
                             : {}),
                         ...(pen ? { penalties: pen } : {}),
+                        // Spread only when set, like the two above: the default-path options
+                        // object must stay IDENTICAL to the pre-option build.
+                        ...(opts.tpeEnergy ? { tpeEnergy: opts.tpeEnergy } : {}),
                     },
                 ),
             );
