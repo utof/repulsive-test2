@@ -112,7 +112,7 @@ for (let k = 1; k <= steps; k++) {
     const r = dispatchDescentStep({ ...base, vertices: V, energyBefore: energy });
     elapsed += performance.now() - t0;
     if (!r.accepted) {
-        stopped = r.converged ? 'converged' : 'rejected';
+        stopped = r.converged ? 'converged' : (r.stats?.reason ?? 'rejected');
         break;
     }
     V = r.vertices;

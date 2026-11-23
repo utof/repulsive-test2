@@ -153,3 +153,55 @@ describe(`above PAIR_LIST_MAX_N (${PAIR_LIST_MAX_N}): no pair list anywhere`, ()
         expect(r.energy).toBe(1);
     });
 });
+
+describe('a whole flow on the hierarchical route ends on a verdict, not on a stall', () => {
+    // A 5-turn coil around a ring: an unknot that relaxes to a round circle of the same length.
+    const n = 300;
+    const vertices: Vec3[] = [];
+    const edges: Edge[] = [];
+    for (let i = 0; i < n; i++) {
+        const t = (2 * Math.PI * i) / n;
+        const r = 1 + 0.33 * Math.cos(5 * t);
+        vertices.push([r * Math.cos(t), r * Math.sin(t), 0.33 * Math.sin(5 * t)]);
+        edges.push([i, (i + 1) % n]);
+    }
+    const dp = calculateDisjointPairs(edges);
+    const exact = (V: Vec3[]) => calculateEnergy(V, edges, dp, ALPHA, BETA, EPS);
+    const coarseBh = (V: Vec3[]) =>
+        barnesHutEnergy(prepareBarnesHut(V, edges, EPS, { theta: 0.25 }), ALPHA, BETA);
+
+    test('it converges, uses the refined setting on the way, and keeps the energy contract', () => {
+        const base = argsFor(vertices, edges, dp);
+        let V = vertices;
+        let energy: number | undefined;
+        let refinedSteps = 0;
+        let steps = 0;
+        let last = dispatchDescentStep({ ...base, sobolevSolver: 'hierarchical' });
+        for (; steps < 80; steps++) {
+            last = dispatchDescentStep({
+                ...base,
+                vertices: V,
+                sobolevSolver: 'hierarchical',
+                collectTimings: true,
+                ...(energy === undefined ? {} : { energyBefore: energy }),
+            });
+            if (last.timings?.dE?.calls === 2) refinedSteps++;
+            if (!last.accepted) break;
+            // The contract the frame loop relies on: the returned energy is the COARSE
+            // Barnes–Hut energy of the returned vertices, whichever attempt produced them —
+            // bit for bit, since it is the same deterministic evaluation.
+            expect(last.energy).toBe(coarseBh(last.vertices));
+            V = last.vertices;
+            energy = last.energy;
+        }
+        // MEASURED: converged after 35 steps, coarse energy 53.275 -> 1.704.
+        expect(last.converged).toBe(true);
+        expect(steps).toBeLessThan(60);
+        expect(refinedSteps).toBeGreaterThan(0);
+        const e = exact(V);
+        expect(e).toBeLessThan(exact(vertices) / 20);
+        // The dense route agrees that this is the minimum: it converges from here too.
+        const dense = dispatchDescentStep({ ...base, vertices: V, sobolevSolver: 'dense' });
+        expect(dense.converged).toBe(true);
+    });
+});

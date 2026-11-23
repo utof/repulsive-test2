@@ -88,10 +88,19 @@ export function Stats() {
                     <span style={{ marginRight: 20 }}>
                         proj iters: {sobolevStats.projectionIterations ?? '—'}
                     </span>
-                    {sobolevStats.reason && (
-                        <span style={{ marginRight: 20, color: '#ff4444' }}>
-                            rejected: {sobolevStats.reason}
+                    {sobolevStats.reason === 'accuracy_floor' ? (
+                        // Not an error: the hierarchical route stopped within a decade of the
+                        // convergence tolerance, where its approximate energy can no longer
+                        // tell a descent step from noise. @see src/core/sobolevRoute.ts
+                        <span style={{ marginRight: 20, color: '#ffcc66' }}>
+                            stopped: accuracy limit of the hierarchical route
                         </span>
+                    ) : (
+                        sobolevStats.reason && (
+                            <span style={{ marginRight: 20, color: '#ff4444' }}>
+                                rejected: {sobolevStats.reason}
+                            </span>
+                        )
                     )}
                 </>
             )}

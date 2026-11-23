@@ -234,8 +234,18 @@ export interface SobolevStepOptions {
  * frame loop never sees an exception.
  * @see local_files/2026-07-02-sobolev-gradient-rsrch-results.md §C (step 10)
  * @see src/core/sobolev/linsolve.ts (luSolve singularity throw)
+ *
+ * 'accuracy_floor' is set by the hierarchical route only (`dispatch.ts`): its refined attempt
+ * found no descent step while ‖g̃‖ was already within a decade of the convergence tolerance.
+ * Why a reason of its own: measured, the exact dense step gains about 1e-6 of energy per step
+ * in that band, which is below what the Barnes–Hut energy can certify — so this is "as far as
+ * the approximation can tell", not a failed line search, and the UI should say so.
+ * @see src/core/sobolevRoute.ts (HIERARCHICAL_ACCURACY)
  */
-export type SobolevStepFailureReason = LineSearchFailureReason | 'singular_system';
+export type SobolevStepFailureReason =
+    | LineSearchFailureReason
+    | 'singular_system'
+    | 'accuracy_floor';
 
 /**
  * Per-step diagnostics of {@link sobolevStep}, surfaced to the UI. `tau` is 0

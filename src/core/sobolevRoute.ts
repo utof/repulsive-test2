@@ -49,6 +49,55 @@ export const HIERARCHICAL_AUTO_MIN_N = 240;
  */
 export const APP_HIERARCHICAL_TOL = 1e-2;
 
+/**
+ * One accuracy setting of the hierarchical route: the Barnes–Hut opening parameter used for the
+ * energy and the differential, and the GMRES tolerance of the solve.
+ */
+export interface HierarchicalAccuracy {
+    theta: number;
+    tol: number;
+}
+
+/**
+ * The two settings a hierarchical step may use. A step starts at `[0]` and is redone at `[1]`
+ * only when {@link needsRefinement} says the coarse result cannot be trusted.
+ *
+ * Why two and not one. Near a constrained minimum the differential is almost entirely
+ * constraint force (dE ≈ Cᵀλ), so the projected gradient g̃ is a small difference of large
+ * terms, and BOTH coarse errors are relative to the large terms: the solve's (1e-2) and the
+ * Barnes–Hut one (~1e-2 at θ = 0.25). Measured on two flows that had stalled at the coarse
+ * setting (`bench/app/recordFlow.ts`, 2026-11-23; the exact dense step is the reference):
+ *  - a 900-vertex coil at its minimum: dense says converged, ‖g̃‖ = 5.0e-5. Coarse reads
+ *    2.9e-4 and keeps taking τ ≈ 1e-3 steps; with tol 1e-4 it reads 3.5e-5 and converges.
+ *    There the SOLVE tolerance was the limit.
+ *  - a 600-vertex random loop: dense takes τ = 2.0e-3 and lowers the energy by 2.1e-5. Coarse
+ *    takes τ = 1.9e-6 and lowers it by 3.7e-7 at ANY solve tolerance; at θ = 0.1 it takes
+ *    τ = 2.0e-3 and lowers it by 2.6e-5. There the OPENING PARAMETER was the limit.
+ * `[1]` is the cheapest setting that matched dense in both. Mid-flow the coarse setting loses
+ * nothing (8.0e-3 against dense's 2.4e-3 on the same loop at step 20), so it stays the default.
+ */
+export const HIERARCHICAL_ACCURACY: readonly [HierarchicalAccuracy, HierarchicalAccuracy] = [
+    { theta: 0.25, tol: APP_HIERARCHICAL_TOL },
+    { theta: 0.1, tol: 1e-4 },
+];
+
+/**
+ * Should a coarse hierarchical step be redone at the refined setting?
+ * Yes when the coarse line search failed outright; when ‖g̃‖ is within a decade of the
+ * convergence tolerance, which is where the coarse errors are no longer small against it (this
+ * also covers a coarse "converged", so that verdict always comes from the refined setting); or
+ * when the accepted step length is so small that the step did nothing.
+ * `convergenceTol` is passed in, not imported, to keep this module free of the optimizer.
+ */
+export function needsRefinement(
+    coarse: { accepted: boolean; converged: boolean; gradientL2Norm: number; tau: number },
+    convergenceTol: number,
+): boolean {
+    if (!coarse.accepted && !coarse.converged) return true;
+    if (coarse.gradientL2Norm < 10 * convergenceTol) return true;
+    return coarse.accepted && coarse.tau < 1e-4;
+}
+
 /** Does the O(n²) pair list exist for a graph with this many vertices? */
 export function pairListFits(nVertices: number): boolean {
     return nVertices <= PAIR_LIST_MAX_N;

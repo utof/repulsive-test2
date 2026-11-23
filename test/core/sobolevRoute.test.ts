@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import {
     HIERARCHICAL_AUTO_MIN_N,
     isClosedNaturalRing,
+    needsRefinement,
     PAIR_LIST_MAX_N,
     pairListFits,
     resolveSobolevRoute,
@@ -76,5 +77,28 @@ describe('resolveSobolevRoute', () => {
     test('above the pair-list limit anything else has no route', () => {
         expect(resolveSobolevRoute('auto', big, chain(big), true)).toBeNull();
         expect(resolveSobolevRoute('hierarchical', big, ring(big), false)).toBeNull();
+    });
+});
+
+describe('needsRefinement', () => {
+    const TOL = 1e-4;
+    const ok = { accepted: true, converged: false, gradientL2Norm: 5e-2, tau: 0.25 };
+
+    test('an ordinary accepted step is kept', () => {
+        expect(needsRefinement(ok, TOL)).toBe(false);
+    });
+    test('a failed line search is redone', () => {
+        expect(needsRefinement({ ...ok, accepted: false, tau: 0 }, TOL)).toBe(true);
+    });
+    test('within a decade of the tolerance the step is redone, either side of the line', () => {
+        expect(needsRefinement({ ...ok, gradientL2Norm: 9.9e-4 }, TOL)).toBe(true);
+        expect(needsRefinement({ ...ok, gradientL2Norm: 1.01e-3 }, TOL)).toBe(false);
+    });
+    test('a coarse "converged" is never trusted: its norm is below the tolerance', () => {
+        const converged = { accepted: false, converged: true, gradientL2Norm: 5e-5, tau: 0 };
+        expect(needsRefinement(converged, TOL)).toBe(true);
+    });
+    test('an accepted step that barely moved is redone', () => {
+        expect(needsRefinement({ ...ok, tau: 5e-5 }, TOL)).toBe(true);
     });
 });
