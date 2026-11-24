@@ -690,11 +690,56 @@ torque, or a search over some twenty candidate angles scored on link length, cro
 overlap. The search is the next step for both open points above; for a tree branch, the wedge
 of free directions at the new parent.
 
+## A step costs what is awake (2026-11-24, afternoon)
+
+With sleeping nodes the probes and the motion limits already cost only what is awake; the rest
+of a step still ran over every node. A profile of a drag in a 42,960-node grid with 13 % awake
+(240 ms a step) put 103 ms in the linear solve, 30 ms in the spring and bending passes and
+30 ms in cutting and indexing every segment for the two neighbour searches.
+
+| Part | Before | Change | After |
+|---|---|---|---|
+| Solve | over all nodes, held ones as identity rows | over the free nodes only (`slot`, `freeNode`, couplings between two free nodes) | 103 → 18 ms |
+| Springs, bending | every segment | skipped between two held nodes | 30 → 9 ms |
+| Neighbour searches | every segment cut into pieces and put in a grid, twice a step | the cut is made once and shared; with sleepers, only the segments near something that can move, probe or wake get pieces (`relevantSegments`) | about 30 ms less |
+
+**All three give the same numbers as before, bit for bit**, which is the check that was used:
+positions after four scenarios (plain, pinned and dragged, sleeping drag with a hand edit, group
+move with a turn — also a drawing with a long link and a hub) hash the same on main and here.
+Two things make that possible and are easy to lose:
+
+- A held node's unknown and right-hand side are exactly 0, so every term its row and column
+  would add to a sum is an exact 0; free nodes and segments keep their order.
+- A grid over SOME of the pieces has the same cells as the grid over all of them
+  (`SegmentPieces.origin`: the least midpoint over all segments, kept or not). Without it the
+  restricted search found the same neighbours in another ORDER, and the result differed in
+  the last bits (which then moved sleep decisions: 0.8 % more nodes awake). No needed segment
+  was ever missing — checked at every step of the scenario — it was only the order.
+
+`relevantSegments` is a superset by construction (a coarse mask of cells 2·reach wide, the 3×3
+cells around every sample of every segment that may be awake) and has a brute-force test; with
+the marks reduced to one cell the test fails.
+
+### Measured (alternating main / this, least time of 20–30 steps; the machine was under other load)
+
+| Drawing | Awake | main | now |
+|---|---|---|---|
+| 10,680 nodes, one node dragged | 12 % | 45–54 ms | 22–32 ms |
+| 42,960 nodes, one node dragged | 2 % | 134–183 ms | 58–74 ms |
+| 10,680 nodes, everything awake | 100 % | 112–127 ms | 107–118 ms |
+| 42,960 nodes, everything awake | 100 % | 512–519 ms | 521–533 ms |
+
+**Still not flat in the size of the drawing.** At 2 % awake a step of the 42,960-node drawing
+costs 60–70 ms where 10 would be in proportion: what is left are plain passes over all nodes
+and segments (lengths, the pull's per-node set-up, position copies, the mask itself). Next:
+profile at 2 % awake and give those passes the awake list; beyond that, neighbour lists kept
+from step to step (a skin distance, rebuilt when something has moved half of it).
+
 ## What is next
 
 | # | Step | Why |
 |---|---|---|
-| 1 | Make the rest of the step local too | with sleeping nodes the probes and motion limits cost only what is awake, but the linear passes and the solve still cover every node: 252 ms per step at 43,000 nodes with 16 % awake |
+| 1 | The remaining whole-drawing passes of a step | solve, springs and neighbour index are awake-only now; at 2 % awake a 43,000-node step is still 60–70 ms where 10 would be in proportion |
 | 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
 | 3 | Route a moved group's links around what lies between | open item 2 |
 | 4 | Turn by scored candidates (crossings and overlap, not link length alone); a guard for groups linked on all sides | the two cases above where turning does not help |

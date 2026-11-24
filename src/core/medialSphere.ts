@@ -100,15 +100,24 @@ export function curveLength(c: ClosedCurve): number {
  * Why a grid and not the repo's BVH: every query here has the same small radius, which is the
  * case a grid answers in O(1) per neighbour with no tree to build or walk.
  */
-export function makeGrid(x: Float64Array, n: number, cell: number) {
-    let minX = Infinity;
-    let minY = Infinity;
-    let minZ = Infinity;
-    for (let i = 0; i < n; i++) {
-        minX = Math.min(minX, x[3 * i]);
-        minY = Math.min(minY, x[3 * i + 1]);
-        minZ = Math.min(minZ, x[3 * i + 2]);
-    }
+export function makeGrid(
+    x: Float64Array,
+    n: number,
+    cell: number,
+    origin?: readonly [number, number, number],
+) {
+    // `origin`: where cell (0,0,0) starts, if not at the points' own minimum. Why: a grid over
+    // SOME of a set of points then has the same cells as the grid over all of them, so a
+    // search visits what it finds in the same order (`SegmentPieces.origin`).
+    let minX = origin ? origin[0] : Infinity;
+    let minY = origin ? origin[1] : Infinity;
+    let minZ = origin ? origin[2] : Infinity;
+    if (!origin)
+        for (let i = 0; i < n; i++) {
+            minX = Math.min(minX, x[3 * i]);
+            minY = Math.min(minY, x[3 * i + 1]);
+            minZ = Math.min(minZ, x[3 * i + 2]);
+        }
     const key = (cx: number, cy: number, cz: number): number =>
         ((cx * 73856093) ^ (cy * 19349663) ^ (cz * 83492791)) >>> 0;
     const buckets = new Map<number, number[]>();
@@ -658,6 +667,7 @@ export function nodeMotionCaps(
     skip?: (k1: number, k2: number) => boolean,
     close?: { below: number; rel: number; k1: number[]; k2: number[]; d: number[] },
     active?: Uint8Array,
+    pieces?: SegmentPieces,
 ): Float64Array {
     const m = segs.a.length;
     const cap = new Float64Array(nNodes).fill(frac * within);
@@ -697,8 +707,23 @@ export function nodeMotionCaps(
             if (c < cap[b2]) cap[b2] = c;
         },
         active,
+        pieces,
     );
     return cap;
+}
+
+/** What `segmentPieces` returns: per piece its midpoint, half length and segment; per
+ *  segment where its pieces start (`start[k] … start[k+1]`); the longest half length. */
+export interface SegmentPieces {
+    count: number;
+    mid: Float64Array;
+    half: Float64Array;
+    seg: Int32Array;
+    start: Int32Array;
+    maxHalf: number;
+    /** The least midpoint coordinates over the pieces of ALL segments (also of those left
+     *  out by `only`): the origin for a grid of the pieces, the same whichever are kept. */
+    origin: [number, number, number];
 }
 
 /**
@@ -728,14 +753,8 @@ export function segmentPieces(
     x: Float64Array,
     segs: SegmentList,
     within: number,
-): {
-    count: number;
-    mid: Float64Array;
-    half: Float64Array;
-    seg: Int32Array;
-    start: Int32Array;
-    maxHalf: number;
-} {
+    only?: (maxHalf: number) => Uint8Array | undefined,
+): SegmentPieces {
     const m = segs.a.length;
     const len = new Float64Array(m);
     let mean = 0;
@@ -756,13 +775,34 @@ export function segmentPieces(
     typical /= nTypical || 1;
     const scale = within >= 1e-3 * mean ? Math.max(within, Math.sqrt(mean * within)) : typical;
     const maxPiece = Math.min(2 * typical, Math.max(scale, mean / 16)) || Infinity;
+    // `only`: asked — once the longest piece is known, which is what a search's reach depends
+    // on — for the segments that get pieces at all (1 per segment; the rest get none and are
+    // found by no search). The piece length and `maxHalf` are those of ALL segments either
+    // way, so a search over fewer segments has the same reach and cells of the same size.
+    // Why: with most of a drawing asleep, cutting and indexing every segment each step was
+    // most of what a step still cost per node (`relevantSegments` in medialSphereGraph.ts).
+    let maxHalf = 0;
+    const origin: [number, number, number] = [Infinity, Infinity, Infinity];
+    for (let k = 0; k < m; k++) {
+        const pieces = Math.max(1, Math.ceil(len[k] / maxPiece));
+        maxHalf = Math.max(maxHalf, (0.5 * len[k]) / pieces);
+        // A segment's extreme midpoints are its first and last pieces' (same expressions as
+        // where the pieces are made, below).
+        const a = segs.a[k];
+        const b = segs.b[k];
+        for (const w of [0.5 / pieces, (pieces - 1 + 0.5) / pieces])
+            for (let c = 0; c < 3; c++)
+                origin[c] = Math.min(origin[c], x[3 * a + c] + w * (x[3 * b + c] - x[3 * a + c]));
+    }
+    const keep = only?.(maxHalf);
     const start = new Int32Array(m + 1);
-    for (let k = 0; k < m; k++) start[k + 1] = start[k] + Math.max(1, Math.ceil(len[k] / maxPiece));
+    for (let k = 0; k < m; k++)
+        start[k + 1] =
+            start[k] + (keep && !keep[k] ? 0 : Math.max(1, Math.ceil(len[k] / maxPiece)));
     const count = start[m];
     const mid = new Float64Array(3 * count);
     const half = new Float64Array(count);
     const seg = new Int32Array(count);
-    let maxHalf = 0;
     for (let k = 0; k < m; k++) {
         const a = segs.a[k];
         const b = segs.b[k];
@@ -776,9 +816,8 @@ export function segmentPieces(
             half[p] = (0.5 * len[k]) / pieces;
             seg[p] = k;
         }
-        maxHalf = Math.max(maxHalf, (0.5 * len[k]) / pieces);
     }
-    return { count, mid, half, seg, start, maxHalf };
+    return { count, mid, half, seg, start, maxHalf, origin };
 }
 
 /**
@@ -809,9 +848,13 @@ export function forNearSegmentPairs(
     within: number,
     visit: (k1: number, k2: number) => void,
     active?: Uint8Array,
+    pieces?: SegmentPieces,
 ): void {
     const m = segs.a.length;
-    const { count, mid, half, seg, start, maxHalf } = segmentPieces(x, segs, within);
+    // `pieces`: the caller's own `segmentPieces(x, segs, within, …)` — the same cut, made once
+    // for several searches, possibly of some of the segments only.
+    const { count, mid, half, seg, start, maxHalf, origin } =
+        pieces ?? segmentPieces(x, segs, within);
     if (count === 0) return;
     const reach = within + 2 * maxHalf;
     // Home of a segment: its end with the higher degree.
@@ -824,16 +867,14 @@ export function forNearSegmentPairs(
     for (let k = 0; k < m; k++)
         home[k] = degree[segs.a[k]] >= degree[segs.b[k]] ? segs.a[k] : segs.b[k];
     // The grid: cells of side `reach`, pieces listed per occupied cell, sorted by home.
-    let minX = Infinity;
-    let minY = Infinity;
-    let minZ = Infinity;
+    // Cells start at the pieces' origin (that of ALL segments' pieces: see `SegmentPieces`).
+    const minX = origin[0];
+    const minY = origin[1];
+    const minZ = origin[2];
     let maxX = -Infinity;
     let maxY = -Infinity;
     let maxZ = -Infinity;
     for (let p = 0; p < count; p++) {
-        minX = Math.min(minX, mid[3 * p]);
-        minY = Math.min(minY, mid[3 * p + 1]);
-        minZ = Math.min(minZ, mid[3 * p + 2]);
         maxX = Math.max(maxX, mid[3 * p]);
         maxY = Math.max(maxY, mid[3 * p + 1]);
         maxZ = Math.max(maxZ, mid[3 * p + 2]);
