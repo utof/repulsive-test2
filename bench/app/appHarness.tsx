@@ -14,6 +14,7 @@
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/App';
 import { resolveSobolevRoute } from '../../src/core/sobolevRoute';
+import { countPlanarCrossings } from '../../src/core/subdivide';
 import { type SolverDriver, useSimStore } from '../../src/store';
 
 const root = document.getElementById('root');
@@ -184,6 +185,115 @@ async function prePass(nodes: number, edges: number, steps: number) {
     return { nodes, edges, energyAtLoad, plain, withForce };
 }
 
+/**
+ * Spike `untangle:<vertices>:<steps>`: the large trefoil preset with "untangle first" on, played
+ * in the real frame loop — the pass must run instead of stepping, end with the knot-type audit
+ * `kept`, and hand over to the descent, which then takes `steps` steps.
+ * @see src/core/untanglePass.ts
+ */
+async function untangle(vertices: number, steps: number) {
+    const store = useSimStore;
+    store.getState().setPreset('knot-large');
+    store.getState().setParam('vertices', vertices);
+    store.getState().regenerate();
+    store.getState().setDescentMode('sobolev');
+    store.getState().setUntangleFirst(true);
+    await sleep(1500);
+    const energyAtLoad = store.getState().energy;
+    let passFrames = 0;
+    let counting = true;
+    const tick = () => {
+        if (store.getState().untangle) passFrames++;
+        if (counting) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    const t0 = performance.now();
+    store.getState().setRunning(true);
+    const sawPass = store.getState().untangle !== null;
+    let passMs: number | null = null;
+    let stepAtHandoff = 0;
+    while (performance.now() - t0 < 120_000) {
+        const s = store.getState();
+        if (passMs === null && s.untangleDone) {
+            passMs = performance.now() - t0;
+            stepAtHandoff = s.step;
+        }
+        if ((passMs !== null && s.step - stepAtHandoff >= steps) || !s.running) break;
+        await sleep(10);
+    }
+    counting = false;
+    const end = store.getState();
+    const out = {
+        vertices,
+        sawPass,
+        passFrames,
+        passMs: passMs === null ? null : Math.round(passMs),
+        info: end.untangleInfo,
+        energyAtLoad,
+        descentSteps: end.step - stepAtHandoff,
+        energyAtEnd: end.energy,
+        stillRunning: end.running,
+        reason: end.sobolevStats?.reason ?? null,
+        allFinite: end.live.every((p) => p.every(Number.isFinite)),
+    };
+    end.setRunning(false);
+    store.getState().setUntangleFirst(false);
+    return out;
+}
+
+/**
+ * Spike `graphflow:<size>:<ms>`: the flat-grid preset at 2 points per edge with the graph flow
+ * as the engine; a corner node is pinned and its target put at the centre (a drag), and the
+ * frame loop runs for `ms` milliseconds. The flow must tick instead of the descent, the node
+ * must travel, and no crossing may appear.
+ * @see src/core/medialSphereGraph.ts
+ */
+async function graphFlow(size: number, ms: number) {
+    const store = useSimStore;
+    store.getState().setPreset('flat-grid');
+    store.getState().setParam('size', size);
+    store.getState().setEdgeSubdivision(2);
+    store.getState().regenerate();
+    store.getState().setGraphFlow(true);
+    await sleep(1500);
+    const start = store.getState().live.map((p) => [...p] as [number, number, number]);
+    const step0 = store.getState().step;
+    store.getState().addPin(0);
+    store.getState().setRunning(true);
+    store.getState().setPinTarget(0, [0, 0, 0]);
+    let worstCrossings = 0;
+    const t0 = performance.now();
+    while (performance.now() - t0 < ms) {
+        const s = store.getState();
+        worstCrossings = Math.max(
+            worstCrossings,
+            countPlanarCrossings(s.live, s.graph.edges, s.edgeSubdivision),
+        );
+        if (!s.running) break;
+        await sleep(50);
+    }
+    const end = store.getState();
+    const out = {
+        size,
+        vertices: end.live.length,
+        segments: end.graph.edges.length,
+        flowSteps: end.step - step0,
+        info: end.graphFlowInfo,
+        skipped: end.graphFlowSkipped,
+        node0Start: Math.hypot(start[0][0], start[0][1]),
+        node0End: Math.hypot(end.live[0][0], end.live[0][1]),
+        othersMoved: end.live.filter(
+            (p, i) => i > 0 && Math.hypot(p[0] - start[i][0], p[1] - start[i][1]) > 0.02,
+        ).length,
+        worstCrossings,
+        stillRunning: end.running,
+        allFinite: end.live.every((p) => p.every(Number.isFinite)),
+    };
+    end.setRunning(false);
+    store.getState().setGraphFlow(false);
+    return out;
+}
+
 declare global {
     interface Window {
         __runSpike: (name: string) => Promise<string>;
@@ -193,6 +303,8 @@ window.__runSpike = async (name) => {
     const [kind, n, steps, driver] = name.split(':');
     if (kind === 'prepass')
         return JSON.stringify(await prePass(Number(n), Number(steps), Number(driver)));
+    if (kind === 'untangle') return JSON.stringify(await untangle(Number(n), Number(steps)));
+    if (kind === 'graphflow') return JSON.stringify(await graphFlow(Number(n), Number(steps)));
     if (kind !== 'run') throw new Error(`appHarness: unknown spike '${name}'`);
     return JSON.stringify(await run(Number(n), Number(steps), driver as SolverDriver | undefined));
 };
