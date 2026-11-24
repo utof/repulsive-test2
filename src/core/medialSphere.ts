@@ -692,20 +692,85 @@ export function nodeMotionCaps(
 }
 
 /**
+ * Sample points for neighbour searches over segments: every segment is cut into equal pieces
+ * no longer than twice the typical segment length ("typical" = the mean of the segments not
+ * over twice the plain mean, so a few long ones do not hide themselves). Piece `p` has
+ * midpoint `mid[3p..]`, half-length `half[p]` and belongs to segment `seg[p]`; the pieces of
+ * segment `k` are `start[k] … start[k+1]−1`.
+ * Why pieces: a grid's reach has to cover the longest thing in it. One edge drawn across the
+ * whole map (a hub's link to a far child, a link of a moved group) made the reach the size of
+ * the map and the search all pairs. The first remedy tested such "long" segments against
+ * everything directly; on a real mind map drawn as a tidy tree a third of the segments are
+ * long, and that was 10× the time per segment of a grid. Cut into pieces, a long segment
+ * costs in proportion to its length and nothing else changes.
+ * @see docs/plans/2026-11-24-medial-sphere-method.md
+ */
+export function segmentPieces(
+    x: Float64Array,
+    segs: SegmentList,
+): {
+    count: number;
+    mid: Float64Array;
+    half: Float64Array;
+    seg: Int32Array;
+    start: Int32Array;
+    maxHalf: number;
+} {
+    const m = segs.a.length;
+    const len = new Float64Array(m);
+    let mean = 0;
+    for (let k = 0; k < m; k++) {
+        const dx = x[3 * segs.b[k]] - x[3 * segs.a[k]];
+        const dy = x[3 * segs.b[k] + 1] - x[3 * segs.a[k] + 1];
+        const dz = x[3 * segs.b[k] + 2] - x[3 * segs.a[k] + 2];
+        len[k] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        mean += len[k] / m;
+    }
+    let typical = 0;
+    let nTypical = 0;
+    for (let k = 0; k < m; k++)
+        if (len[k] <= 2 * mean) {
+            typical += len[k];
+            nTypical++;
+        }
+    typical /= nTypical || 1;
+    const maxPiece = 2 * typical || Infinity;
+    const start = new Int32Array(m + 1);
+    for (let k = 0; k < m; k++) start[k + 1] = start[k] + Math.max(1, Math.ceil(len[k] / maxPiece));
+    const count = start[m];
+    const mid = new Float64Array(3 * count);
+    const half = new Float64Array(count);
+    const seg = new Int32Array(count);
+    let maxHalf = 0;
+    for (let k = 0; k < m; k++) {
+        const a = segs.a[k];
+        const b = segs.b[k];
+        const pieces = start[k + 1] - start[k];
+        for (let q = 0; q < pieces; q++) {
+            const p = start[k] + q;
+            const w = (q + 0.5) / pieces;
+            mid[3 * p] = x[3 * a] + w * (x[3 * b] - x[3 * a]);
+            mid[3 * p + 1] = x[3 * a + 1] + w * (x[3 * b + 1] - x[3 * a + 1]);
+            mid[3 * p + 2] = x[3 * a + 2] + w * (x[3 * b + 2] - x[3 * a + 2]);
+            half[p] = (0.5 * len[k]) / pieces;
+            seg[p] = k;
+        }
+        maxHalf = Math.max(maxHalf, (0.5 * len[k]) / pieces);
+    }
+    return { count, mid, half, seg, start, maxHalf };
+}
+
+/**
  * Visit every pair of segments (sharing no node, each pair once) that can be within `within`
  * of each other; the visitor does the exact test. A superset: a visited pair may be farther
  * apart.
  * Why one helper: every caller needs the same search (motion limits, clearance, crossing
- * count, crossing pairs), and the same trap applies to all of them — the grid's reach must
- * cover the longest segment it serves, so one edge drawn across the whole map turns the
- * search into all pairs (a crossing count of 5,040 segments with four such edges took
- * seconds). Segments over 3× the typical length ("typical" = the mean of the segments not
- * over twice the plain mean, so a few long ones do not hide themselves) are therefore paired
- * with everything directly, with a cheap distance test, and kept out of the grid.
- * The grid holds segment MIDPOINTS: two segments can be within `within` only if their
- * midpoints are within `within` + their two half-lengths. Why midpoints and not first
- * endpoints (the first version): the reach is one segment length shorter and the test is per
- * pair, which halved the candidates — the search was half of a graph-flow step in a profile.
+ * count, crossing pairs, making room for a group).
+ * How: a grid of the midpoints of the segments' pieces (`segmentPieces`); two segments can be
+ * within `within` only if two of their pieces have midpoints within `within` + their two
+ * half-lengths. Why midpoints and not first endpoints (the first version): the reach is one
+ * segment length shorter and the test is per pair, which halved the candidates — the search
+ * was half of a graph-flow step in a profile.
  * @see docs/plans/2026-11-24-medial-sphere-method.md
  */
 export function forNearSegmentPairs(
@@ -716,64 +781,31 @@ export function forNearSegmentPairs(
     visit: (k1: number, k2: number) => void,
 ): void {
     const m = segs.a.length;
-    const mid = new Float64Array(3 * m);
-    const half = new Float64Array(m);
-    let mean = 0;
-    for (let k = 0; k < m; k++) {
-        const a = segs.a[k];
-        const b = segs.b[k];
-        const dx = x[3 * b] - x[3 * a];
-        const dy = x[3 * b + 1] - x[3 * a + 1];
-        const dz = x[3 * b + 2] - x[3 * a + 2];
-        half[k] = 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz);
-        mid[3 * k] = x[3 * a] + 0.5 * dx;
-        mid[3 * k + 1] = x[3 * a + 1] + 0.5 * dy;
-        mid[3 * k + 2] = x[3 * a + 2] + 0.5 * dz;
-        mean += half[k] / m;
-    }
-    let typical = 0;
-    let nTypical = 0;
-    for (let k = 0; k < m; k++)
-        if (half[k] <= 2 * mean) {
-            typical += half[k];
-            nTypical++;
-        }
-    typical /= nTypical || 1;
-    const isLong = new Uint8Array(m);
-    const longSegs: number[] = [];
-    let maxHalf = 0;
-    for (let k = 0; k < m; k++)
-        if (half[k] > 3 * typical) {
-            isLong[k] = 1;
-            longSegs.push(k);
-        } else maxHalf = Math.max(maxHalf, half[k]);
-    const shares = (e: number, f: number): boolean =>
-        segs.a[e] === segs.a[f] ||
-        segs.a[e] === segs.b[f] ||
-        segs.b[e] === segs.a[f] ||
-        segs.b[e] === segs.b[f];
-    const near = (e: number, f: number): boolean => {
-        const dx = mid[3 * e] - mid[3 * f];
-        const dy = mid[3 * e + 1] - mid[3 * f + 1];
-        const dz = mid[3 * e + 2] - mid[3 * f + 2];
-        const lim = within + half[e] + half[f];
-        return dx * dx + dy * dy + dz * dz < lim * lim;
-    };
+    const { count, mid, half, seg, start, maxHalf } = segmentPieces(x, segs);
     const reach = within + 2 * maxHalf;
-    const grid = makeGrid(mid, m, reach);
-    for (let e = 0; e < m; e++) {
-        if (isLong[e]) continue;
-        grid.forNear(e, reach, (f) => {
-            if (f <= e || isLong[f] || shares(e, f) || !near(e, f)) return;
-            visit(e, f);
-        });
-    }
-    // Long segments against everything (each long–long pair once).
-    for (const e of longSegs)
-        for (let f = 0; f < m; f++) {
-            if (f === e || (isLong[f] && f < e) || shares(e, f) || !near(e, f)) continue;
-            visit(e, f);
-        }
+    const grid = makeGrid(mid, count, reach);
+    // seen[f] = e: the pair (e, f) has been visited (a long segment is found once per piece).
+    const seen = new Int32Array(m).fill(-1);
+    for (let e = 0; e < m; e++)
+        for (let p = start[e]; p < start[e + 1]; p++)
+            grid.forNear(p, reach, (q) => {
+                const f = seg[q];
+                if (f <= e || seen[f] === e) return;
+                const dx = mid[3 * p] - mid[3 * q];
+                const dy = mid[3 * p + 1] - mid[3 * q + 1];
+                const dz = mid[3 * p + 2] - mid[3 * q + 2];
+                const lim = within + half[p] + half[q];
+                if (dx * dx + dy * dy + dz * dz >= lim * lim) return;
+                seen[f] = e;
+                if (
+                    segs.a[e] === segs.a[f] ||
+                    segs.a[e] === segs.b[f] ||
+                    segs.b[e] === segs.a[f] ||
+                    segs.b[e] === segs.b[f]
+                )
+                    return;
+                visit(e, f);
+            });
 }
 
 /** Is the motion `x → x − step·d` of a closed curve provably free of strand crossings? */

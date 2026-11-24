@@ -28,7 +28,13 @@
  * @see docs/plans/2026-11-24-medial-sphere-method.md (the flat-graph spike and its bar)
  * @see src/core/medialSphere.ts (the closed-curve method this is derived from)
  */
-import { forNearSegmentPairs, makeGrid, nodeMotionCaps, type SegmentList } from './medialSphere';
+import {
+    forNearSegmentPairs,
+    makeGrid,
+    nodeMotionCaps,
+    type SegmentList,
+    segmentPieces,
+} from './medialSphere';
 import { subdivideGraph } from './subdivide';
 import type { Edge, Vec3 } from './testConfigs';
 
@@ -311,12 +317,10 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
 
     // --- the pull: one circle per angular sector of every node --------------------------------
     const G = new Float64Array(3 * n);
-    // LONG segments (over 3× the typical length) are kept out of the grid search and tested
-    // against every node instead. Why: the search radius has to cover the longest segment it
-    // serves, and one edge drawn across the whole map (a moved group's link) would make every
-    // node search the whole drawing — measured 3.4× slower per step on a 12×12 grid with four
-    // such edges. With no long segment this is exactly the old search. "Typical" = the mean
-    // of the segments not over twice the plain mean, so a few long ones do not hide themselves.
+    // LONG segments (over 3× the typical length; "typical" = the mean of the segments not
+    // over twice the plain mean, so a few long ones do not hide themselves): the contacts
+    // that get the reaction force by default (see there). The neighbour search no longer
+    // treats them specially — it cuts them into pieces (`segmentPieces`).
     let meanAll = 0;
     for (let k = 0; k < m; k++) meanAll += len[k] / m;
     let typical = 0;
@@ -328,10 +332,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         }
     typical /= nTypical || 1;
     const longSegs: number[] = [];
-    let maxSeg = 0;
-    for (let k = 0; k < m; k++)
-        if (len[k] > 3 * typical) longSegs.push(k);
-        else maxSeg = Math.max(maxSeg, len[k]);
+    for (let k = 0; k < m; k++) if (len[k] > 3 * typical) longSegs.push(k);
     const isLong = longSegs.length > 0 ? new Uint8Array(m) : undefined;
     for (const k of longSegs) (isLong as Uint8Array)[k] = 1;
     // Nodes at the ends of a long segment: their contacts get the reaction force (see there).
@@ -340,17 +341,17 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         (onLong as Uint8Array)[segs.a[k]] = 1;
         (onLong as Uint8Array)[segs.b[k]] = 1;
     }
-    // The probes' search: a grid of segment MIDPOINTS. A segment can cut a node's capped circle
-    // only if its midpoint is within 2·rMax + half its length of the node. Why midpoints and
-    // not "segments starting at a node within reach" (the first version): the reach is half a
-    // segment shorter and the test is per segment; the search was a third of a step.
-    const segMid = new Float64Array(3 * m);
-    for (let k = 0; k < m; k++) {
-        segMid[3 * k] = 0.5 * (x[3 * segs.a[k]] + x[3 * segs.b[k]]);
-        segMid[3 * k + 1] = 0.5 * (x[3 * segs.a[k] + 1] + x[3 * segs.b[k] + 1]);
-    }
-    const segReach = 2 * rMax + 0.5 * maxSeg;
-    const grid = makeGrid(segMid, m, segReach);
+    // The probes' search: a grid of the midpoints of the segments' pieces (`segmentPieces`;
+    // a long segment is several pieces). A segment can cut a node's capped circle only if one
+    // of its pieces has its midpoint within 2·rMax + half the piece's length of the node.
+    // Why midpoints and not "segments starting at a node within reach" (the first version):
+    // the reach is half a segment shorter and the test is per piece; the search was a third
+    // of a step.
+    const pcs = segmentPieces(x, segs);
+    const segReach = 2 * rMax + pcs.maxHalf;
+    const grid = makeGrid(pcs.mid, pcs.count, segReach);
+    // tested[k] = i: segment k has already been tested for node i (found once per piece).
+    const tested = new Int32Array(m).fill(-1);
     const reach2 = (2 * rMax) ** 2;
     const maxDir = maxDirections(t, n);
     const dirX = new Float64Array(maxDir);
@@ -412,15 +413,17 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         }
         const ownI = t.own[i];
         const hopI = ownI >= 0 ? hopIndex(i) : -1;
-        // Every segment whose midpoint is within 2·rMax + half its length (see `segMid`).
-        grid.forNearPoint(xi, yi, 0, segReach, (k) => {
-            if (isLong?.[k]) return;
-            const mx = segMid[3 * k] - xi;
-            const my = segMid[3 * k + 1] - yi;
-            const lim = 2 * rMax + 0.5 * len[k];
-            if (mx * mx + my * my < lim * lim) testSegment(k);
+        // Every segment with a piece whose midpoint is within 2·rMax + half the piece (see `pcs`).
+        grid.forNearPoint(xi, yi, 0, segReach, (q) => {
+            const k = pcs.seg[q];
+            if (tested[k] === i) return;
+            const mx = pcs.mid[3 * q] - xi;
+            const my = pcs.mid[3 * q + 1] - yi;
+            const lim = 2 * rMax + pcs.half[q];
+            if (mx * mx + my * my >= lim * lim) return;
+            tested[k] = i;
+            testSegment(k);
         });
-        for (const k of longSegs) testSegment(k);
         // forNear skips the node itself: segments starting AT node i contain it and are
         // skipped by the rule below anyway.
         function testSegment(k: number): void {
