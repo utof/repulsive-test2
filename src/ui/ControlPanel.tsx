@@ -46,6 +46,8 @@ export function ControlPanel() {
     const setGraphFlowMoveThrough = useSimStore((s) => s.setGraphFlowMoveThrough);
     const graphFlowTurn = useSimStore((s) => s.graphFlowTurn);
     const setGraphFlowTurn = useSimStore((s) => s.setGraphFlowTurn);
+    const graphFlowHang = useSimStore((s) => s.graphFlowHang);
+    const setGraphFlowHang = useSimStore((s) => s.setGraphFlowHang);
     const setGraphFlow = useSimStore((s) => s.setGraphFlow);
     const graphFlowClearance = useSimStore((s) => s.graphFlowClearance);
     const setGraphFlowClearance = useSimStore((s) => s.setGraphFlowClearance);
@@ -407,6 +409,25 @@ export function ControlPanel() {
                         onChange={(e) => setGraphFlowTurn(e.target.checked)}
                     />
                     <span>Turn the carried group to face its links</span>
+                </label>
+                {/* Why: moved far, a branch that keeps its parent keeps a link across the map.
+                    @see src/core/medialGraphMove.ts (`hangGroupOn`) */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        cursor: 'pointer',
+                        opacity: graphFlow && graphFlowMoveThrough ? 1 : 0.4,
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={graphFlowHang}
+                        disabled={!graphFlow || !graphFlowMoveThrough}
+                        onChange={(e) => setGraphFlowHang(e.target.checked)}
+                    />
+                    <span>On release, hang a one-link group on the nearest node</span>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ opacity: graphFlow ? 1 : 0.4 }}>Clearance (× edge length):</span>

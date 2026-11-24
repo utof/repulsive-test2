@@ -288,6 +288,63 @@ function createRandomChain(params?: Record<string, number>): GraphState {
 }
 
 /**
+ * A flat (z = 0) tree drawn radially: six main branches, one to three children per node,
+ * each subtree in a wedge as wide as its share of the leaves — a mind map without crossings.
+ * Why it exists: moving a BRANCH (turning it, hanging it on another node) is the mind-map
+ * gesture, and the grid has no branch: every block of it has links on several sides.
+ * Deterministic (same tree for the same size); overall extent about 4, like the others.
+ * @see src/core/medialGraphMove.ts
+ */
+function createFlatTree(params?: Record<string, number>): GraphState {
+    const target = Math.max(8, Math.floor(params?.nodes ?? 150));
+    let seed = 11;
+    const rnd = (): number => {
+        seed = (1664525 * seed + 1013904223) % 4294967296;
+        return seed / 4294967296;
+    };
+    const parent = [-1];
+    const kids: number[][] = [[]];
+    const depth = [0];
+    let frontier = [0];
+    while (parent.length < target && frontier.length > 0) {
+        const next: number[] = [];
+        for (const p of frontier) {
+            const c = p === 0 ? 6 : 1 + Math.floor(rnd() * 2.4);
+            for (let k = 0; k < c && parent.length < target; k++) {
+                parent.push(p);
+                kids.push([]);
+                depth.push(depth[p] + 1);
+                kids[p].push(parent.length - 1);
+                next.push(parent.length - 1);
+            }
+        }
+        frontier = next;
+    }
+    const n = parent.length;
+    const leaves = new Array<number>(n).fill(0);
+    for (let i = n - 1; i >= 0; i--) {
+        if (kids[i].length === 0) leaves[i] = 1;
+        if (parent[i] >= 0) leaves[parent[i]] += leaves[i];
+    }
+    const ring = 2 / Math.max(...depth); // outermost ring at radius 2
+    const vertices: Vec3[] = new Array(n);
+    const edges: Edge[] = [];
+    const lay = (i: number, a0: number, a1: number): void => {
+        const a = 0.5 * (a0 + a1);
+        vertices[i] = [depth[i] * ring * Math.cos(a), depth[i] * ring * Math.sin(a), 0];
+        let at = a0;
+        for (const c of kids[i]) {
+            const span = ((a1 - a0) * leaves[c]) / leaves[i];
+            edges.push([i, c]);
+            lay(c, at, at + span);
+            at += span;
+        }
+    };
+    lay(0, 0, 2 * Math.PI);
+    return { vertices, edges };
+}
+
+/**
  * A flat (z = 0) jittered grid: a planar graph with junctions, the stand-in for a mind map.
  * Why it exists: the local graph flow and the crossing guard work in the plane only, and no
  * other preset is flat. The jitter is deterministic (same graph for the same size).
@@ -364,6 +421,12 @@ export const testConfigs: TestConfig[] = [
         name: 'Flat Grid (planar graph, configurable)',
         generate: createFlatGrid,
         params: [{ name: 'size', min: 2, max: 40, default: 8 }],
+    },
+    {
+        id: 'flat-tree',
+        name: 'Flat Tree (planar mind map, configurable)',
+        generate: createFlatTree,
+        params: [{ name: 'nodes', min: 8, max: 3000, default: 150 }],
     },
     {
         id: 'chain',
