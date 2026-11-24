@@ -140,6 +140,9 @@ describe('graph flow (store)', () => {
         st().setEdgeSubdivision(2);
         st().setGraphFlow(true);
         st().setGraphFlowMoveThrough(true);
+        // Without turning: this test is about WHERE the group is put (to the last digits);
+        // turning, which moves it about its centroid, has its own test below.
+        st().setGraphFlowTurn(false);
         const blob = [0, 1, 8, 9]; // the corner square
         for (const i of blob) st().addPin(i);
         st().setRunning(true);

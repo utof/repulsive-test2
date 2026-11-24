@@ -305,6 +305,203 @@ function turnHolding(g: MedialGraph, move: GroupMove, k: number, dx: number, dy:
 }
 
 /**
+ * Choose the carried group's angle for SETTING DOWN where it is held: among the angle it has,
+ * the angle it was picked up with, and `around` angles spaced evenly round the circle from
+ * the one it has, the one at which the group at full size and its straight links cross the
+ * rest of the drawing least; among equals, the one nearest to the angle it has. Sets
+ * `move.angle`, places the group, and returns the crossings at the chosen angle.
+ * Why: the angle of `facingAngle` is chosen for the links alone. It is what a branch wants in
+ * the open, but it does not look at what is in the way: a block inside a grid was tilted off
+ * the grid's axes (3 more crossings), and one branch of a real map was turned into a place
+ * too tight to grow in (`docs/plans/2026-11-24-medial-sphere-method.md`, "Turning"). Crossings
+ * are not a smooth function of the angle, so they are counted for a handful of candidates —
+ * what layout systems that orient components do (the research note beside the plan).
+ * Why "nearest to the angle it has" and not "fewest, then shortest links": in the open every
+ * angle has no crossings, and the group must then stay as it was carried.
+ * The score: crossings of the group's body with the rest (temporary: the rest makes room, but
+ * each costs growing time) + `linkWeight` × crossings of its links with the rest AND with the
+ * group's own body (permanent once the links land). Measured on 14 real-map moves: steps to
+ * full size 888 → 191 and crossings added −11 → −20 against the links-only angle; weights 1
+ * and 8 differ on one move (8 better), 3 / 8 / 1000 not at all before own-body crossings were
+ * counted. Worse on one fixture (a 600-node tree: 162 steps and 1 crossing against 124 and 0):
+ * crossings where it is SET DOWN only predict those where it LANDS.
+ * Cost: (segments of the group + links) × (segments of the rest near where it is held), per
+ * candidate; once, at the moment of setting down.
+ */
+export function settleTurn(g: MedialGraph, move: GroupMove, around = 16, linkWeight = 8): number {
+    const { x, segs, pieces } = g;
+    const ghost = g.ghost;
+    if (!ghost) throw new Error('medialGraphMove: no group is being moved');
+    const np = move.points.length;
+    const index = new Map<number, number>();
+    for (let k = 0; k < np; k++) index.set(move.points[k], k);
+    // The group's own segments, as pairs of its points; its links, as (its point, outside node).
+    const own: number[] = [];
+    for (const e of move.internal)
+        for (let q = 0; q < pieces; q++) {
+            const k = e * pieces + q;
+            own.push(index.get(segs.a[k]) as number, index.get(segs.b[k]) as number);
+        }
+    const links: number[] = [];
+    for (const e of move.connecting) {
+        const ka = index.get(g.edgeA[e]);
+        links.push(
+            ka ?? (index.get(g.edgeB[e]) as number),
+            ka === undefined ? g.edgeA[e] : g.edgeB[e],
+        );
+    }
+    // The rest's segments that the group or a link can meet at any angle: within the group's
+    // radius of where it is held, or in the box that also holds the links' other ends.
+    const cx = move.cx + move.dx;
+    const cy = move.cy + move.dy;
+    let radius = 0;
+    for (let k = 0; k < np; k++)
+        radius = Math.max(
+            radius,
+            Math.hypot(move.home[2 * k] - move.cx, move.home[2 * k + 1] - move.cy),
+        );
+    let x0 = cx - radius;
+    let x1 = cx + radius;
+    let y0 = cy - radius;
+    let y1 = cy + radius;
+    for (let l = 0; l < links.length; l += 2) {
+        x0 = Math.min(x0, x[3 * links[l + 1]]);
+        x1 = Math.max(x1, x[3 * links[l + 1]]);
+        y0 = Math.min(y0, x[3 * links[l + 1] + 1]);
+        y1 = Math.max(y1, x[3 * links[l + 1] + 1]);
+    }
+    const rest: number[] = []; // ax, ay, bx, by, nearBody (1/0), a, b
+    for (let k = 0; k < segs.a.length; k++) {
+        if (ghost.edge[Math.floor(k / pieces)]) continue;
+        const ax = x[3 * segs.a[k]];
+        const ay = x[3 * segs.a[k] + 1];
+        const bx = x[3 * segs.b[k]];
+        const by = x[3 * segs.b[k] + 1];
+        if (Math.max(ax, bx) < x0 || Math.min(ax, bx) > x1) continue;
+        if (Math.max(ay, by) < y0 || Math.min(ay, by) > y1) continue;
+        // Distance from where the group is held to the segment: can the body reach it?
+        const L2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1;
+        const t = Math.max(0, Math.min(1, ((cx - ax) * (bx - ax) + (cy - ay) * (by - ay)) / L2));
+        const near = Math.hypot(cx - ax - t * (bx - ax), cy - ay - t * (by - ay)) <= radius ? 1 : 0;
+        rest.push(ax, ay, bx, by, near, segs.a[k], segs.b[k]);
+    }
+    /** Do the open segments p–q and r–s cross (properly: not merely touch)? */
+    const cross = (
+        px: number,
+        py: number,
+        qx: number,
+        qy: number,
+        rx: number,
+        ry: number,
+        sx: number,
+        sy: number,
+    ): boolean => {
+        const d1 = (qx - px) * (ry - py) - (qy - py) * (rx - px);
+        const d2 = (qx - px) * (sy - py) - (qy - py) * (sx - px);
+        if (d1 * d2 >= 0) return false;
+        const d3 = (sx - rx) * (py - ry) - (sy - ry) * (px - rx);
+        const d4 = (sx - rx) * (qy - ry) - (sy - ry) * (qx - rx);
+        return d3 * d4 < 0;
+    };
+    const at = new Float64Array(2 * np);
+    const count = (angle: number): number => {
+        const c = Math.cos(angle);
+        const s = Math.sin(angle);
+        for (let k = 0; k < np; k++) {
+            const qx = move.home[2 * k] - move.cx;
+            const qy = move.home[2 * k + 1] - move.cy;
+            at[2 * k] = cx + c * qx - s * qy;
+            at[2 * k + 1] = cy + s * qx + c * qy;
+        }
+        let n = 0;
+        let viaLinks = 0;
+        for (let r = 0; r < rest.length; r += 7) {
+            if (rest[r + 4])
+                for (let o = 0; o < own.length; o += 2)
+                    if (
+                        cross(
+                            at[2 * own[o]],
+                            at[2 * own[o] + 1],
+                            at[2 * own[o + 1]],
+                            at[2 * own[o + 1] + 1],
+                            rest[r],
+                            rest[r + 1],
+                            rest[r + 2],
+                            rest[r + 3],
+                        )
+                    )
+                        n++;
+            for (let l = 0; l < links.length; l += 2) {
+                const out = links[l + 1];
+                if (rest[r + 5] === out || rest[r + 6] === out) continue; // shares the link's end
+                if (
+                    cross(
+                        at[2 * links[l]],
+                        at[2 * links[l] + 1],
+                        x[3 * out],
+                        x[3 * out + 1],
+                        rest[r],
+                        rest[r + 1],
+                        rest[r + 2],
+                        rest[r + 3],
+                    )
+                )
+                    viaLinks++;
+            }
+        }
+        // A link through the group's OWN body: what a branch does that was carried past its
+        // parent and not turned. (Left out at first: the unturned angle then scored best on
+        // exactly the moves where it is worst — 10 crossings on a real map against 1.)
+        for (let l = 0; l < links.length; l += 2) {
+            const k = links[l];
+            const out = links[l + 1];
+            for (let o = 0; o < own.length; o += 2) {
+                if (own[o] === k || own[o + 1] === k) continue;
+                if (
+                    cross(
+                        at[2 * k],
+                        at[2 * k + 1],
+                        x[3 * out],
+                        x[3 * out + 1],
+                        at[2 * own[o]],
+                        at[2 * own[o] + 1],
+                        at[2 * own[o + 1]],
+                        at[2 * own[o + 1] + 1],
+                    )
+                )
+                    viaLinks++;
+            }
+        }
+        return n + linkWeight * viaLinks;
+    };
+    const wrap = (a: number): number => a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+    const has = move.angle;
+    let best = has;
+    let bestCount = count(has);
+    let bestFar = 0;
+    const candidates = [0];
+    for (let j = 1; j < around; j++) candidates.push(has + (2 * Math.PI * j) / around);
+    for (const a of candidates) {
+        if (bestCount === 0) break; // nothing in the way as it is
+        const n = count(a);
+        const far = Math.abs(wrap(a - has));
+        if (n < bestCount || (n === bestCount && far < bestFar)) {
+            best = a;
+            bestCount = n;
+            bestFar = far;
+        }
+    }
+    move.angle = best;
+    for (let k = 0; k < np; k++) {
+        const [px, py] = placed(move, k);
+        x[3 * move.points[k]] = px;
+        x[3 * move.points[k] + 1] = py;
+    }
+    for (const e of move.connecting) straighten(g, e);
+    return bestCount;
+}
+
+/**
  * RE-ATTACH a carried group: its link `edge` (one of `move.connecting`) leaves the node it
  * went to and goes to `to` instead — "take this branch off its parent and hang it on that
  * node". The graph itself changes (`edgeA`/`edgeB` and the segment list).

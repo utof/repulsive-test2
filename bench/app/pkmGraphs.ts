@@ -1,4 +1,4 @@
-// bench/app/pkmGraphs.ts — bun bench/app/pkmGraphs.ts [dir] [steps=400] [maxNodes=5000] [out] [makeRoom=warp|flow] [turn=none|links|hang]
+// bench/app/pkmGraphs.ts — bun bench/app/pkmGraphs.ts [dir] [steps=400] [maxNodes=5000] [out] [makeRoom=warp|flow] [turn=none|links|hang|scored]
 // The graph flow and the group move on REAL note collections: mind maps (FreeMind / Freeplane
 // files) and note vaults (Obsidian-style links), as extracted by scripts/pkmExtract.ts into
 // local_files/pkm-graphs/graphs/ (git-ignored; see its README for where they come from).
@@ -28,6 +28,7 @@ import {
     nearestOutsideNode,
     prunePassPairs,
     setGroupOffset,
+    settleTurn,
 } from '../../src/core/medialGraphMove';
 import { medialGraphFrom, medialGraphStep, minClearance } from '../../src/core/medialSphereGraph';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
@@ -42,7 +43,7 @@ const MAKE_ROOM = (process.argv[6] ?? 'warp') as 'warp' | 'flow';
 // How the carried group is oriented: 'none' = as picked up; 'links' = turned to face what it is
 // linked to; 'hang' = also re-attached to the node nearest to where it is held (only a group
 // with exactly one link; otherwise as 'links').
-const TURN = (process.argv[7] ?? 'none') as 'none' | 'links' | 'hang';
+const TURN = (process.argv[7] ?? 'none') as 'none' | 'links' | 'hang' | 'scored';
 const DUMP = process.env.DUMP;
 // FRAMES=<prefix>: also write every step of each group move as
 // `<prefix>-<graph>-<layout>-<makeRoom>.json`, a panel for bench/app/renderGraphFlow.py.
@@ -257,6 +258,8 @@ function runTree(
         medialGraphStep(g, { r: R });
         frame('picked up: carried over the map');
     }
+    // 'scored': carried turned to its links, then set down at the angle with fewest crossings.
+    if (TURN === 'scored') settleTurn(g, grab);
     if (TURN === 'hang' && grab.connecting.length === 1)
         hangGroupOn(g, grab, nearestOutsideNode(g, grab, grab.cx + grab.dx, grab.cy + grab.dy));
     const drop = dropGroupMove(g, grab, { r: R });

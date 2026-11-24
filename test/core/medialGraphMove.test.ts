@@ -16,6 +16,7 @@ import {
     reattachGroup,
     roomRadius,
     setGroupOffset,
+    settleTurn,
 } from '../../src/core/medialGraphMove';
 import { medialGraphFrom, medialGraphStep, minClearance } from '../../src/core/medialSphereGraph';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
@@ -505,6 +506,46 @@ describe('group move', () => {
             g.x[3 * root + 1] = g.x[1] + 3 * before * (cy / Math.hypot(cx, cy));
             medialGraphStep(g, { r: 0.25 });
             expect(restOf()).toBeCloseTo(before, 9);
+        });
+        test('set down by score: in the open nothing turns; carried past its parent unturned, it is turned round', () => {
+            // In the open: straight out from the root, nothing in the way at any angle.
+            {
+                const { g, branch } = settled();
+                const [cx, cy] = centroid(g, branch);
+                const move = beginGroupMove(g, branch);
+                setGroupOffset(g, move, 2 * cx, 2 * cy);
+                const x0 = Float64Array.from(g.x);
+                expect(settleTurn(g, move)).toBe(0);
+                expect(move.angle).toBe(0);
+                for (const i of branch) expect(g.x[3 * i]).toBe(x0[3 * i]);
+            }
+            // To the far side of the root, NOT turned: its link runs back through its own body.
+            const { g, branch } = settled();
+            const root = branch[0];
+            const [cx, cy] = centroid(g, branch);
+            const move = beginGroupMove(g, branch);
+            // (A little to one side: straight across, the link would lie ON the branch's own
+            // trunk, which touches it and does not cross it.)
+            setGroupOffset(g, move, -2.6 * cx - 0.5 * cy, -2.6 * cy + 0.5 * cx);
+            const far = (): number =>
+                Math.hypot(g.x[3 * root] - g.x[0], g.x[3 * root + 1] - g.x[1]);
+            const unturned = far();
+            const left = settleTurn(g, move);
+            expect(Math.abs(move.angle)).toBeGreaterThan(1); // turned well round
+            expect(far()).toBeLessThan(unturned); // its root is now on the parent's side
+            // Asking again changes nothing: the angle it has is the best one.
+            const angle = move.angle;
+            expect(settleTurn(g, move)).toBe(left);
+            expect(move.angle).toBe(angle);
+            // And set down like this it lands without its link through its own branch.
+            const drop = dropGroupMove(g, move, { r: 0.25 });
+            let steps = 0;
+            while (drop.growth && drop.growth.scale < 1 && steps++ < 300) {
+                growGroup(g, drop.growth, 0.25);
+                medialGraphStep(g, { r: 0.25 });
+            }
+            expect(drop.growth === null || drop.growth.scale === 1).toBe(true);
+            expect(countCrossings(g)).toBeLessThanOrEqual(left);
         });
         test('re-attaching refuses what would not be a graph', () => {
             const { g, branch } = settled();
