@@ -396,7 +396,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     // Why midpoints and not "segments starting at a node within reach" (the first version):
     // the reach is half a segment shorter and the test is per piece; the search was a third
     // of a step.
-    const pcs = segmentPieces(x, segs);
+    const pcs = segmentPieces(x, segs, 2 * rMax);
     const segReach = 2 * rMax + pcs.maxHalf;
     const grid = makeGrid(pcs.mid, pcs.count, segReach);
     // tested[k] = i: segment k has already been tested for node i (found once per piece).

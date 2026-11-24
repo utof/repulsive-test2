@@ -592,6 +592,38 @@ Reading it:
 - A larger threshold buys little and costs accuracy: at 5e-3 the 60×60 drag takes 57 ms but
   ends 1.3 r away from the all-awake result.
 
+## A hub with 2,900 children: the pair search again (2026-11-24, midday)
+
+The 6,576-note vault drawn as a tidy tree (one index note has 2,900 children) kept its 0
+crossings but took **2.2 s per step**, 15× a grid's cost per segment. A profile put 78 % of
+it in the pair search behind the motion limits. Three causes, three changes
+(`forNearSegmentPairs`, `segmentPieces`):
+
+| Cause | Change |
+|---|---|
+| Every pair of the hub's 2,900 edges was found and then thrown away (they share the hub, so they are never a pair): 8 million a step | each piece has a "home", the end of its segment with the most segments at it; a grid cell lists its pieces sorted by home, and a search skips the block with its own home (99 million candidates skipped per search) |
+| Nearly EVERY segment of that drawing is long, so "pieces no longer than twice the typical length" meant pieces 156 units long and the whole drawing in 98 grid cells | the piece length follows the SEARCH radius: `sqrt(mean length · radius)`, at least the radius |
+| Per candidate, data read from all over memory; per piece and cell, a map lookup and two binary searches | the pieces' data copied in cell order, distance rejected first; neighbour cells and big runs in per-cell tables (typed arrays: with plain arrays the same loop was 5× slower) |
+
+| Drawing | Before | After |
+|---|---|---|
+| vault as a tidy tree, 6,576 notes, per step | 2,232 ms | about 750 ms |
+| the same during a group move | 2,119 ms | about 610 ms |
+| cli mind map, tidy tree, 944 nodes | 44 ms | 20 ms |
+| python mind map, tidy tree, 1,237 nodes | 47 ms | 29 ms |
+| os mind map, 3,975 nodes (tidy / force) | 96 / 94 ms | 71 / 76 ms |
+| layout benchmark, 36×36 at 2 points | 56 ms | 52 ms |
+
+Same results everywhere (steps, clearances, crossings, steps to full size). The "before"
+column of the real maps was measured with four processes running, the "after" with two, so
+part of their gain is the quieter machine; the vault's 3× is not.
+
+**What is left is inherent to a grid search on this drawing:** 23 million candidate checks to
+find 230 thousand pairs, because 2,900 edges fanning out of one point stay within reach of
+their neighbours along most of their length. A search that knows about fans (edges of one
+hub sorted by angle: only angular neighbours can be near) would be output-sized; so would not
+drawing 2,900 children as one fan. Not done.
+
 ## What is next
 
 | # | Step | Why |
