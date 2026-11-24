@@ -1,4 +1,5 @@
 // bench/app/driveApp.ts — bun bench/app/driveApp.ts run:<vertices>:<steps>[:<driver>]
+//   also: prepass:<nodes>:<edges>:<steps> | untangle:<vertices>:<steps> | graphflow:<size>:<ms>
 // Opens the real app in a headless browser (the same host layer the GPU gates use), presses
 // play on the large trefoil preset, and prints what the frame loop did as one JSON line.
 // Needs the dev server: `PORT=3111 bun server.ts`, then DEV_SERVER_URL=http://localhost:3111.
