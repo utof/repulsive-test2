@@ -762,8 +762,24 @@ the marks reduced to one cell the test fails.
 | 10,680 nodes, everything awake | 100 % | 112–127 ms | 107–118 ms |
 | 42,960 nodes, everything awake | 100 % | 512–519 ms | 521–533 ms |
 
+**The mask had to be written without small arrays** (same day, later). A statement-level
+profile at 2 % awake showed `relevantSegments` and the origin loop themselves taking 50 of
+120 ms: both made a two-element array per node or per segment (`for (const w of [a, b])`).
+Written out, 6 ms; same results. Alternating with the first version: 42,960 nodes at 2 %
+awake 73–79 → 46–47 ms (least of 20 steps), 10,680 nodes unchanged.
+
+**Seen in the same profile, not yet settled:** the plain loops inside `medialGraphStep` look
+several times slower than they should (segment lengths: 9 ms for 57,120 segments; 2 ms as a
+function of its own, `segmentLengths`). The suspicion is that the engine's optimising tiers
+do not take a function of that size, which would also slow the probes — the largest part of
+a step with everything awake. Raising JavaScriptCore's size limit by environment variable
+changed nothing, and the statement timers disturb what they measure, so this needs a clean
+experiment: move the probes' loop into its own function and time it without timers.
+`Math.hypot` is NOT the cause (replaced by a square root everywhere in both files: 2 ms of
+79, and the results change in the last bits; reverted).
+
 **Still not flat in the size of the drawing.** At 2 % awake a step of the 42,960-node drawing
-costs 60–70 ms where 10 would be in proportion: what is left are plain passes over all nodes
+costs about 46 ms where 10 would be in proportion: what is left are plain passes over all nodes
 and segments (lengths, the pull's per-node set-up, position copies, the mask itself). Next:
 profile at 2 % awake and give those passes the awake list; beyond that, neighbour lists kept
 from step to step (a skin distance, rebuilt when something has moved half of it).
@@ -772,7 +788,7 @@ from step to step (a skin distance, rebuilt when something has moved half of it)
 
 | # | Step | Why |
 |---|---|---|
-| 1 | The remaining whole-drawing passes of a step | solve, springs and neighbour index are awake-only now; at 2 % awake a 43,000-node step is still 60–70 ms where 10 would be in proportion |
+| 1 | The remaining whole-drawing passes of a step | solve, springs and neighbour index are awake-only now; at 2 % awake a 43,000-node step is still 46 ms where 10 would be in proportion; first the experiment on the step function's size (probes in a function of their own) |
 | 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
 | 3 | Route a moved group's links around what lies between | open item 2 |
 | 4 | The move that never reaches full size (os map, 135 nodes); a score that predicts where links LAND | what set-down by score leaves open |

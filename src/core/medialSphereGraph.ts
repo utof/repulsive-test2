@@ -312,6 +312,28 @@ function maxDirections(t: Topology, n: number): number {
 }
 
 /**
+ * Every segment's length, and per node half the length of the segments at it.
+ * Why a function of its own (as the other plain passes of `medialGraphStep`): inside that
+ * very large function the same loop ran several times slower — the engine's optimising tiers
+ * do not take a function of that size.
+ */
+function segmentLengths(
+    x: Float64Array,
+    segs: SegmentList,
+    len: Float64Array,
+    w: Float64Array,
+): void {
+    const m = segs.a.length;
+    for (let k = 0; k < m; k++) {
+        const a = segs.a[k];
+        const b = segs.b[k];
+        len[k] = Math.hypot(x[3 * b] - x[3 * a], x[3 * b + 1] - x[3 * a + 1]) || 1e-300;
+        w[a] += 0.5 * len[k];
+        w[b] += 0.5 * len[k];
+    }
+}
+
+/**
  * One step of the flat-graph flow, in place on `g.x`.
  * @see docs/plans/2026-11-24-medial-sphere-method.md
  */
@@ -387,13 +409,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
 
     const len = new Float64Array(m);
     const w = new Float64Array(n);
-    for (let k = 0; k < m; k++) {
-        const a = segs.a[k];
-        const b = segs.b[k];
-        len[k] = Math.hypot(x[3 * b] - x[3 * a], x[3 * b + 1] - x[3 * a + 1]) || 1e-300;
-        w[a] += 0.5 * len[k];
-        w[b] += 0.5 * len[k];
-    }
+    segmentLengths(x, segs, len, w);
 
     // --- the pull: one circle per angular sector of every node --------------------------------
     const G = new Float64Array(3 * n);
@@ -1091,13 +1107,20 @@ export function relevantSegments(
     let maxY = -Infinity;
     for (let i = 0; i < n; i++) {
         if (!sl.asleep[i] || fixed[i]) may[i] = 1;
-        for (const px of [x[3 * i], sl.last[3 * i]]) {
-            if (px < minX) minX = px;
-            if (px > maxX) maxX = px;
-        }
-        for (const py of [x[3 * i + 1], sl.last[3 * i + 1]]) {
-            if (py < minY) minY = py;
-            if (py > maxY) maxY = py;
+        // Where it is, and where it was at the last step (the same for all but moved nodes).
+        const px = x[3 * i];
+        const py = x[3 * i + 1];
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+        const lx = sl.last[3 * i];
+        const ly = sl.last[3 * i + 1];
+        if (lx !== px || ly !== py) {
+            if (lx < minX) minX = lx;
+            if (lx > maxX) maxX = lx;
+            if (ly < minY) minY = ly;
+            if (ly > maxY) maxY = ly;
         }
     }
     if (pinTargets) for (const i of pinTargets.keys()) if (i < n) may[i] = 1;
@@ -1158,8 +1181,39 @@ export function relevantSegments(
         for (let j = 0; j <= steps; j++)
             mark(ax + (j / steps) * (bx - ax), ay + (j / steps) * (by - ay));
     }
+    // (The test of `hits`, written out: this loop is over every segment of the drawing.)
     const only = new Uint8Array(m);
-    for (let k = 0; k < m; k++) if (may[segs.a[k]] || may[segs.b[k]] || hits(k)) only[k] = 1;
+    const inv = 1 / C;
+    for (let k = 0; k < m; k++) {
+        const a = segs.a[k];
+        const b = segs.b[k];
+        if (may[a] || may[b]) {
+            only[k] = 1;
+            continue;
+        }
+        const ax = x[3 * a];
+        const ay = x[3 * a + 1];
+        const bx = x[3 * b];
+        const by = x[3 * b + 1];
+        const u0 = Math.floor(((ax < bx ? ax : bx) - minX) * inv);
+        const u1 = Math.floor(((ax < bx ? bx : ax) - minX) * inv);
+        const v0 = Math.floor(((ay < by ? ay : by) - minY) * inv);
+        const v1 = Math.floor(((ay < by ? by : ay) - minY) * inv);
+        if (u0 === u1 && v0 === v1) {
+            only[k] = mask[u0 + nx * v0];
+            continue;
+        }
+        if ((u1 - u0 + 1) * (v1 - v0 + 1) > 256) {
+            only[k] = 1;
+            continue;
+        }
+        for (let v = v0; v <= v1 && !only[k]; v++)
+            for (let u = u0; u <= u1; u++)
+                if (mask[u + nx * v]) {
+                    only[k] = 1;
+                    break;
+                }
+    }
     return only;
 }
 
