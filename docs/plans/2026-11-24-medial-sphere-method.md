@@ -305,3 +305,263 @@ needs one more piece, and it is a choice of semantics:
    (an edge-routing problem), re-attach. Planar when the graph allows it; much more work.
 Recommended: 1 first (it is what "move it there" means in every note-taking tool), then
 look at the crossings it leaves and decide whether 2 is worth building.
+
+## The group move, and real graphs (2026-11-24, evening)
+
+Code: `src/core/medialGraphMove.ts`; step changes in `src/core/medialSphereGraph.ts`;
+benchmarks `bench/app/medialGroupMove.ts` and `bench/app/pkmGraphs.ts`.
+
+### The move in four phases
+
+1. **Pick up.** The group's nodes and every edge touching them become *carried*: the step
+   neither moves them nor lets anything see them (`MedialGraph.ghost`).
+2. **Carry.** The group translates rigidly with the pointer; its links to the rest are drawn
+   straight.
+3. **Set down.** The group is shrunk about one anchor until it fits inside the face it was
+   dropped in (full size if it fits, else halved until it does). The links stay carried.
+4. **Grow back.** Before every flow step the group is scaled up rigidly as far as the gap to
+   its surroundings allows (`growGroup`: a point may move at most `0.45·gap·min(1, gap/0.5r)`,
+   the scale at most 25 % per step), and the flow makes room — or, where that is too slow,
+   the rest is moved out of the way directly (see "Making room directly" below). At full
+   size the group is released, its links are laid straight and the crossings that exist at
+   that moment become *allowed*.
+
+What was tried and dropped, with the reason measured:
+- Inflating the group with springs from 1/8 size: the edges buckle.
+- Landing the links at set-down: a tight fan of links eats the room the group needs to grow
+  into (0.09 → 0.02 of a clearance on the grid) and growth never starts.
+
+### Allowed crossings are counted, not exempted
+
+`MedialGraph.passPairs` maps a pair of original edges to the number of times they may cross.
+Such a pair is left out of the motion limits, and the interior points of the two edges do
+not repel each other. After every step the crossings of each pair are counted; if a pair has
+more than its allowance, both edges' moves of that step are undone. The allowance only ever
+goes down, and a pair that no longer crosses and has moved apart is dropped.
+
+Two simpler rules were measured first and both fail:
+- *Exempt the pair of edges altogether:* the two edges weave through each other, 3 → 7
+  crossings on the tree fixture.
+- *Exempt the pair of segments that cross:* the crossing cannot slide past a node, so it
+  jams against one and the gap goes to 1e-16.
+
+### Three changes to the step itself
+
+- **Reaction force.** A probe circle cut by a segment used to push only the probing node.
+  The segment now gets the opposite push, shared between its two ends — at every contact
+  between two UNRELATED edges, where the probing node is held (pinned: it cannot give way),
+  and where a long segment is involved. Without it: a long link lying across a group's side
+  closes on it geometrically (halving every step, never touching, never leaving); an edge
+  pressed against a pinned group's corner stays at the gap floor (clearance 0.008 after a
+  move, 0.17 with it); a real 88-node map settles with two strands 0.007 apart (0.34 with
+  it). NOT applied to the two rules about an edge's own shape (the fold rule, the minimum
+  angle at a junction), which are one-sided by design: reacting to those as well
+  (`reaction: 'all'`) cost half the opening speed of a finely divided grid (18×18 at 8
+  points per edge, 600 steps: clearance 0.28 against 0.68). That regression was caught by
+  re-running the layout benchmark before merging; with the final rule the benchmark is as
+  good or better everywhere (8×8 converges in 285 steps instead of 334).
+- **Long segments** no longer set the reach of the neighbour search for everything: first
+  by testing them against everything directly, in the end by cutting them into pieces for
+  the search (see "Where a step's time goes").
+- **A floor under every gap.** Two segments already nearer than 2 % of the clearance, and
+  nearer than 2 % of the shorter of the two, may not get nearer; the step holds their nodes.
+  Found on real data: see below. The second condition was added after the first version
+  jammed the 18×18 grid at 8 points per edge (clearance stuck at 0.20 where it reaches 0.68):
+  on a finely divided drawing two edges of one junction lie a fraction of a short segment
+  apart by construction, and that is not a dangerous gap.
+
+### Real mind maps and vaults
+
+Data: public repositories of FreeMind maps and Obsidian vaults, link structure only, kept in
+`local_files/pkm-graphs/` (git-ignored, no licence on any of them; see its README).
+`scripts/pkmExtract.ts` turns a vault or a `.mm` file into a node/edge list;
+`bench/app/pkmGraphs.ts` runs the flow and a group move on each, drawn twice: as mind-map
+programs draw it (a tidy tree) and as a graph view would (a force layout).
+
+What real maps have that the synthetic ones did not:
+- **Hubs with 70–203 children.** A fan of 200 nearly parallel edges starts with gaps of a few
+  thousandths of a clearance. On the 1,237-node map one such gap went 4e-3 → 6e-15 in 60
+  steps and the crossing counter reported 44–208 false crossings. The gap floor fixes it: 0
+  crossings, smallest gap unchanged at 3.2e-3.
+- **Very long edges.** A hub's links to its far children are a hundred times the typical
+  length. They made the neighbour search 10× slower per segment (fixed, see below) and,
+  having only 2 points, they cannot bend out of a growing group's way (open, see the end).
+- **A vault's link graph is nowhere near planar.** 180 notes with 883 links, force layout:
+  14,803 crossings. 6,576 notes with 34,832 links: 54 million. The same 180 notes as a
+  spanning tree: 0. A readable vault drawing therefore needs a tree (or other sparse)
+  skeleton that the flow keeps planar, with the remaining links drawn on top and ignored by
+  the flow. That is a product decision, not a solver one.
+
+(The result tables are at the end, under "Results on the final code".)
+
+## Where a step's time goes, and a faster step (2026-11-24, night)
+
+The plan above named "the solve" as the next lever (a sparse factorisation instead of
+Jacobi-CG). Measured before building it, on the 36×36 grid at 2 points per edge (5,040
+segments):
+
+- A 100× softer mass term (`lambda` 0.02 → 0.0002) changes the opening by almost nothing
+  (clearance after 400 steps 0.62 → 0.65) and triples the CG iterations (43 → 117) at the SAME
+  time per step. So neither the number of steps nor the time per step is the solve's.
+- A CPU profile of the step: the solve (`applyP` + CG) is 3 %. `Math.hypot` alone was 22 %,
+  the neighbour grid 13 %, the pair search of the motion limits 16 %, the probes 19 %.
+- A big group's grow-back is not limited by the solve either: the same softer mass term left
+  the 134-node branch at 0.44 of its size after 400 steps (0.45 with the default).
+
+**So no sparse solver was built.** Instead the hot loops were made cheaper, with the
+trajectory unchanged to the printed digits:
+
+1. the neighbour grid looks only at occupied cells (a flat drawing has one layer in z: 9
+   bucket lookups per query instead of 27);
+2. the pair search works on segment MIDPOINTS with a per-pair test, and the motion limits use
+   it instead of their own copy;
+3. the probes use the same midpoint grid, and reject by distance before the per-edge rules;
+4. no `Math.hypot` in the hot loops.
+
+Layout benchmark, same fixtures (`bench/results/2026-11-24-medial-graph-layout.jsonl`, the
+last four graph-flow rows; "before" are the rows recorded earlier the same day; the "after"
+run shared the machine with one other benchmark, so if anything it is pessimistic):
+
+| Grid | Points per edge | Segments | Before | After | Result |
+|---|---|---|---|---|---|
+| 8×8 | 8 | 896 | 28 ms/step | 19 ms/step | converged in 285 steps (334), clearance 0.70 |
+| 18×18 | 8 | 4,896 | 197 ms | 122 ms | 0.687 after 600 steps (0.679) |
+| 18×18 | 2 | 1,224 | 21 ms | 12 ms | converged in 1,066 steps at 0.660 (0.650 after 1,500) |
+| 36×36 | 2 | 5,040 | 106 ms | 56 ms | 0.655 after 1,500 steps (0.648) |
+
+So 1.5–1.9× per step. (The step counts and clearances differ slightly from the recorded
+rows because of the reaction rule described above, not because of the speed-up, which left
+the trajectory unchanged to the printed digits.)
+
+5. (found on the real maps) long segments are no longer tested against everything: every
+   segment is cut into pieces no longer than twice the typical length for the searches
+   (`segmentPieces`). A mind map drawn as a tidy tree has a third of its segments "long" (a
+   hub's links to its far children) and cost 10× a grid's time per segment: the 944-node map
+   went from 119 ms to 26 ms per step, 187 → 39 ms during a group move.
+
+That is about 11 µs per segment per step. At the 30,000-vertex target (about 60,000 segments
+at 2 per edge) a step would still take 0.7 s: constant factors will not get there. What will
+is not stepping the whole drawing — only the part that is moving (see "What is next").
+
+## Making room directly (2026-11-24, night)
+
+**The failure.** A group set down shrunk grows back as the flow's contact forces push the rest
+away. That grows it only as fast as the TIGHTEST gap around it opens, and a big group has a
+long boundary: the 134-node branch of the 600-node tree went from 0.25 to about half its size
+and stalled; 3 of the 14 real-map moves did not finish either. A softer mass term changes
+nothing (measured above), so it is not the solver.
+
+**The idea.** The room a group needs is known in advance: a disc around its anchor has to
+become `k` times bigger. So the rest of the drawing can be moved there in one smooth motion,
+instead of being pushed one gap at a time (`makeRoom` in `src/core/medialGraphMove.ts`,
+default; `makeRoom: 'flow'` keeps the old behaviour as the comparison):
+
+- inside the disc (the group's radius + 2r) everything is enlarged with the group, so the
+  group and whatever lies between its branches keep their shape exactly;
+- far outside every ring keeps its AREA and only moves outwards — nothing far away is
+  squeezed, and the shift dies off like 1/distance;
+- in between, a band where the area magnification falls from k² to 1, so the map has no
+  crease (`roomRadius`).
+
+**Why it cannot create a crossing.** The moved positions are accepted only if, moving every
+node in a straight line from its old place to its new one, no node meets a segment — an exact
+test for that motion (the signed area of node and segment is a quadratic in time), run over
+every pair of segments within reach of each other. On top of that no small gap may lose more
+than 30 %, and pairs that are allowed to cross may not cross more often. A trial that fails
+is halved; if none passes, the group grows by what the gaps allow, as before.
+Why an exact test and not the flow's "nobody moves more than 0.45 of the gap": making room
+moves neighbours TOGETHER by many times the gap between them.
+
+Two things found while building it:
+- The disc must reach beyond the group (the 2r). With the group's farthest point exactly on
+  the rim, a segment of the rest lying across the rim lagged behind it at every call; the gap
+  between them closed geometrically (5e-7 after 40 calls) and the group stopped at 0.998.
+- Clearing a region of the group's own OUTLINE instead of a disc (so that a group that is not
+  round moves less of the drawing) was tried and dropped: a little less distortion of the
+  rest, but the sheared band along the outline's flanks made the test refuse (the grid block
+  stopped at 0.61 of its size) and the tree kept a tenth of the clearance.
+
+## Results on the final code (2026-11-24, night)
+
+"Waiting" = the rest is pushed away by the flow's contact forces only (`makeRoom: 'flow'`);
+"making room" = the default. Same fixtures, same code otherwise.
+
+### Group moves on grids and trees (`bench/results/2026-11-24-group-move.jsonl`, 800 steps)
+
+| Fixture | Group | Set down at | Full size: waiting | Full size: making room | Crossings (held) | ms/step |
+|---|---|---|---|---|---|---|
+| 12×12 grid | 2×2 corner block to the middle | 1/8 | 36 steps | **10 steps** | 40 / 40 | 7 |
+| 36×36 grid | same | 1/4 | 36 steps | **7 steps** | 132 / 132 | 64 |
+| tree, 150 nodes | 40-node branch a third of a turn | 1/8 | 289 steps | **37 steps** | 4 / 2 | 6 |
+| tree, 600 nodes | 134-node branch | 1/4 | not reached (0.64 after 800) | **138 steps** | — / 0 | 16 |
+
+The crossings never grow after release, in any run. The grid numbers are the honest cost of
+the request: a block moved into the middle of a grid keeps 4 links to the corner, and each
+crosses everything in between. What making room costs the rest: its mean length error
+(|length / rest length − 1|) is 0.04–0.14 at the moment of release against 0.05–0.12 when
+waiting, and 0.05–0.10 by the end either way.
+
+### Real mind maps and a vault (`bench/results/2026-11-24-pkm-graphs.jsonl`, 200 steps to settle, up to 600 for the move)
+
+| Graph | Layout | Nodes | Crossings start → settled | Clearance start → settled | ms/step | Branch moved | Full size: waiting | Full size: making room | Crossings after |
+|---|---|---|---|---|---|---|---|---|---|
+| cli map | tidy tree | 944 | 0 → 0 | 0.56 → 0.57 | 44 | 42 | not reached (0.85) | 575 steps | 3 |
+| cli map | force | 944 | 24 → 24 | 0.004 → 0.37 | 33 | 42 | fits at once | fits at once | 24 |
+| linux map | tidy tree | 693 | 0 → 0 | 0.56 → 0.60 | 14 | 28 | fits at once | fits at once | 9 |
+| linux map | force | 693 | 10 → 10 | 0.05 → 0.40 | 18 | 28 | 74 steps | **45 steps** | 13 |
+| os map | tidy tree | 3,975 | 347 → 347 | 0.01 → 0.02 | 96 | 135 | fits at once | fits at once | 348 |
+| os map | force | 3,975 | 582 → 580 | 0.001 → 0.006 | 94 | 135 | not reached (0.90) | **230 steps** | 579 |
+| python map | tidy tree | 1,237 | 0 → 0 | 0.58 → 0.60 | 47 | 124 | fits at once | fits at once | 5 |
+| python map | force | 1,237 | 54 → 54 | 0.008 → 0.24 | 62 | 124 | not reached (0.72) | **45 steps** | 53 |
+| react-fiber map | tidy tree | 88 | 21 → 21 | 0.22 → 0.50 | 1.2 | 9 | 75 steps | 75 steps | 17 |
+| react-fiber map | force | 88 | 7 → 7 | 0.11 → 0.34 | 1.2 | 9 | 74 steps | 74 steps | 10 |
+| react map | tidy tree | 123 | 0 → 0 | 0.56 → 0.60 | 1.9 | 11 | fits at once | fits at once | 0 |
+| react map | force | 123 | 2 → 2 | 0.007 → 0.42 | 1.8 | 11 | fits at once | fits at once | 2 |
+| help vault as a tree | tidy tree | 180 | 0 → 0 | 0.60 → 0.59 | 4.2 | 18 | 401 steps | **28 steps** | 1 |
+| help vault as a tree | force | 180 | 0 → 0 | 0.10 → 0.56 | 5.8 | 18 | fits at once | fits at once | 0 |
+
+(Clearance is in units of the target clearance. Crossings at the start come from the layout
+that made the drawing, not from the flow; the flow holds whatever it is given. ms/step was
+measured with four benchmark processes running side by side.)
+
+Reading it:
+- Every move now ends at full size; three did not before.
+- The flow never adds a crossing, on any real map, in either mode.
+- The four maps of 700–4,000 nodes took 34–819 ms per step in the first run of this
+  benchmark and take 14–96 ms now (the os map: 819 → 96 ms), from the search changes above.
+- Two rows are identical in both modes (the react-fiber map): there every room-making trial
+  is refused and the group grows by what the gaps allow. Not yet looked into.
+
+### In the browser (`bench/results/2026-11-24-app-in-browser.jsonl`, headless Firefox)
+
+| Check | Result |
+|---|---|
+| 8×8 grid, one node dragged 2.8 away | 0.14 from its target after 8 s, 0.007 after 20 s; 0 crossings; 2.5 ms/step |
+| 8×8 grid, 2×2 block moved through | carried, back at full size 43 ms after release, 16 crossings held, on target |
+| 12×12 grid, same | full size 130 ms after release, 40 crossings held, on target; 8 ms/step |
+
+(The drag is slower over its last tenth than before the reaction rule: 0.02 from the target
+after 8 s then. It still arrives.)
+
+### What is still open
+
+1. **An edge much longer than the group, passing right beside it, cannot get out of the
+   way.** The cli map as a tidy tree: one 121-unit straight link (a hub with 200 children in
+   a column) lies 0.2 from the group; its ends are far away and hardly move, the edge has 2
+   points and cannot bend, so the exact test refuses every larger step and the move takes 575
+   steps. Edges need more points where they are long (points in proportion to length, not a
+   fixed number per edge).
+2. **The crossings a move leaves are mostly avoidable on trees**: a branch of a tree can
+   always be re-attached without crossings, the links just have to go around instead of
+   straight. That is the case for routing.
+3. **A drawing that starts with hundreds of crossings stays cramped** (the os map: clearance
+   0.02 after settling): allowed crossings pin the strands that cross. Untangling such a
+   drawing is a different job from keeping a clean one clean.
+
+## What is next
+
+| # | Step | Why |
+|---|---|---|
+| 1 | Only step what moves (sleeping nodes) | a step costs about 11 µs per segment whatever is happening; at 30,000 nodes that is 0.7 s. First version built on its own branch: 1.3 ms instead of 167 ms per step for a 10,680-node drawing at rest. |
+| 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
+| 3 | Route a moved group's links around what lies between | open item 2 |

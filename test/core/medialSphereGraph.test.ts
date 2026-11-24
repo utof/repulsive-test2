@@ -190,4 +190,25 @@ describe('medialGraphStep', () => {
         expect(countPlanarCrossings(vec(g), segs(g), 4 * PIECES)).toBe(0);
         expect(minClearance(g, 2)).toBeGreaterThan(0.05);
     });
+    test('a gap that is already tiny cannot close further, however hard it is pressed', () => {
+        // Two bars 0.002 apart (under 0.02·r = 0.008 and under 0.02 of a segment = 0.0025);
+        // the middle of the upper one is pulled down through the lower one with a force
+        // nothing in the flow can match.
+        const { V, E } = bars(0.002);
+        const g = medialGraphFrom(V, E, 4 * PIECES);
+        const mid = 4 + 31 + 15; // interior point 16 of bar 2
+        const target = new Map<number, [number, number]>([[mid, [g.x[3 * mid], -2]]]);
+        const gap0 = minClearance(g, 1);
+        let least = gap0;
+        for (let k = 0; k < 200; k++) {
+            medialGraphStep(g, { r: R, pinTargets: target, pinForceMax: 1e9, pinStiffness: 1e6 });
+            least = Math.min(least, minClearance(g, 1));
+        }
+        expect(least).toBeGreaterThanOrEqual(gap0 - 1e-12); // not one step nearer
+        expect(countPlanarCrossings(vec(g), segs(g), 4 * PIECES)).toBe(0);
+        // Left alone, the same bars move apart: the floor holds nothing back that way.
+        const free = medialGraphFrom(V, E, 4 * PIECES);
+        for (let k = 0; k < 60; k++) medialGraphStep(free, { r: R });
+        expect(minClearance(free, 1)).toBeGreaterThan(10 * gap0);
+    });
 });

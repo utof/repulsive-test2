@@ -126,6 +126,7 @@ export function PinControls() {
         }
         if (e.instanceId === dragIndex.current) {
             dragIndex.current = null;
+            useSimStore.getState().endPinDrag();
             if (controls) controls.enabled = true;
             setCursor('');
         }
@@ -144,6 +145,9 @@ export function PinControls() {
         // Create the pin if new — snapshots the vertex's current position as the
         // frozen target so it initially just holds the vertex where it is (D3).
         if (!store.pins.some((p) => p.vertexIndex === i)) store.addPin(i);
+        // Tell the store a drag of this node has begun (the graph flow's move-through mode
+        // picks the pinned group up on it). @see src/core/medialGraphMove.ts
+        store.beginPinDrag(i);
 
         // Camera-facing drag plane through the grabbed vertex (Decision D4).
         const live = store.live;
@@ -184,6 +188,8 @@ export function PinControls() {
             (e.target as unknown as PointerCapturer).releasePointerCapture(e.pointerId);
         } catch {}
         dragIndex.current = null;
+        // The drag is over: a carried group is set down here.
+        useSimStore.getState().endPinDrag();
         if (controls) controls.enabled = true;
         // Cursor reflects ACTUAL hover at release (Decision D10): R3F's hover
         // bookkeeping is unusable here — the captured intersection pins the
