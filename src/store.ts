@@ -396,6 +396,13 @@ export interface SimStore {
     // growing group survives a pause — dropping it would leave the group small for good.
     // @see src/core/medialGraphMove.ts
     graphFlowMoveThrough: boolean;
+    /** While a group is carried (move-through), turn it so that it keeps facing what it is
+     *  linked to — a branch moved to the other side of its parent arrives pointing away from
+     *  it, not back into the map. Default on.
+     *  Why on: over 14 moves on real mind maps it took 888 steps to full size instead of 1,629
+     *  and left 11 crossings fewer instead of 6 more; on grids it is neutral.
+     *  @see docs/plans/2026-11-24-medial-sphere-method.md ("Turning and re-attaching") */
+    graphFlowTurn: boolean;
     pinDrag: number | null;
     graphFlowRun: {
         g: MedialGraph;
@@ -447,6 +454,7 @@ export interface SimStore {
     setGraphFlow(b: boolean): void;
     setGraphFlowClearance(v: number): void;
     setGraphFlowMoveThrough(b: boolean): void;
+    setGraphFlowTurn(b: boolean): void;
     // Called by the scene when a drag of pinned node `i` starts and when it ends (pointer
     // released or lost). Ending a drag sets a carried group down.
     beginPinDrag(i: number): void;
@@ -637,6 +645,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         graphFlow: false,
         graphFlowClearance: 0.4,
         graphFlowMoveThrough: false,
+        graphFlowTurn: true,
         pinDrag: null,
         graphFlowRun: null,
         graphFlowSkipped: false,
@@ -810,6 +819,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
             if (!b) get().endPinDrag(); // a group in the air is set down first
             set({ graphFlowMoveThrough: b });
         },
+        setGraphFlowTurn: (b) => set({ graphFlowTurn: b }),
         beginPinDrag: (i) => set({ pinDrag: i }),
         endPinDrag: () => {
             const s = get();
@@ -897,6 +907,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     run.move,
                     dragPin.target[0] - run.moveBase[0],
                     dragPin.target[1] - run.moveBase[1],
+                    // The dragged node stays under the pointer while the group turns.
+                    s.graphFlowTurn ? { turn: 'links', hold: dragPin.vertexIndex } : {},
                 );
             // Pins: an enabled pin whose target is where its node already is HOLDS the node;
             // one whose target is elsewhere (the user is dragging it, or dropped it where the

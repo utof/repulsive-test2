@@ -1,4 +1,4 @@
-// bench/app/medialGroupMove.ts — bun bench/app/medialGroupMove.ts [fixtures=grid12,grid36,tree150,tree600] [steps=600] [out] [makeRoom=warp|flow]
+// bench/app/medialGroupMove.ts — bun bench/app/medialGroupMove.ts [fixtures=grid12,grid36,tree150,tree600] [steps=600] [out] [makeRoom=warp|flow] [turn=none|links|hang]
 // The mind-map move: carry a group of nodes across a flat drawing, set it down, let the flow
 // make room. One JSON line per fixture: how many crossings the move leaves (and that the
 // number never grows afterwards), how many steps the group needs to grow back to full size
@@ -14,6 +14,8 @@ import {
     countCrossings,
     dropGroupMove,
     growGroup,
+    hangGroupOn,
+    nearestOutsideNode,
     prunePassPairs,
     setGroupOffset,
 } from '../../src/core/medialGraphMove';
@@ -31,6 +33,10 @@ const OUT = process.argv[4] ?? 'bench/results/2026-11-24-group-move.jsonl';
 // How the rest makes room while the group grows back (see `growGroup`): both are kept so the
 // two can be compared on the same fixtures.
 const MAKE_ROOM = (process.argv[5] ?? 'warp') as 'warp' | 'flow';
+// How the carried group is oriented: 'none' = as picked up; 'links' = turned to face what it is
+// linked to; 'hang' = also re-attached to the node nearest to where it is held (only a group
+// with exactly one link; otherwise as 'links').
+const TURN = (process.argv[6] ?? 'none') as 'none' | 'links' | 'hang';
 // DUMP=<prefix> writes <prefix>-<fixture>-{0,1,2}.json (before, at the set-down, at the end):
 // {x, a, b, nodeCount, hi} for a drawing script.
 const DUMP = process.env.DUMP;
@@ -187,9 +193,13 @@ for (const name of fixtures) {
     const strainBefore = restStrain();
     let strainAtRelease: number | null = null;
     for (let k = 1; k <= 20; k++) {
-        setGroupOffset(g, move, (fx.offset[0] * k) / 20, (fx.offset[1] * k) / 20);
+        setGroupOffset(g, move, (fx.offset[0] * k) / 20, (fx.offset[1] * k) / 20, {
+            turn: TURN === 'none' ? 'none' : 'links',
+        });
         medialGraphStep(g, { r });
     }
+    if (TURN === 'hang' && move.connecting.length === 1)
+        hangGroupOn(g, move, nearestOutsideNode(g, move, move.cx + move.dx, move.cy + move.dy));
     const drop = dropGroupMove(g, move, { r });
     dump(1);
     let crossingsAtRelease: number | null = drop.growth ? null : countCrossings(g);
@@ -242,6 +252,7 @@ for (const name of fixtures) {
         groupNodes: blob.length,
         links: move.connecting.length,
         makeRoom: MAKE_ROOM,
+        turn: TURN,
         restStrainBefore: Number(strainBefore.toFixed(3)),
         restStrainAtRelease: strainAtRelease === null ? null : Number(strainAtRelease.toFixed(3)),
         restStrainEnd: Number(restStrain().toFixed(3)),

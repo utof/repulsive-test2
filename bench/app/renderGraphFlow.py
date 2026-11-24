@@ -64,7 +64,12 @@ for k in range(total + FPS * 2):                 # hold the last frame for two s
         if j > 0:
             dr.line([(left, top - 30 * SS), (left, (H + HEAD + FOOT) * SS)], fill=(200, 200, 200), width=SS)
         dr.text((left + 14 * SS, top - 28 * SS), p['title'], fill=(60, 60, 60), font=F_TITLE)
-        for a, b in zip(p['a'], p['b']):
+        seg_a, seg_b = p['a'], p['b']
+        if fr.get('patch'):                       # a re-attached link: its ends in this frame
+            seg_a, seg_b = list(seg_a), list(seg_b)
+            for which, seg, node in fr["patch"]:
+                (seg_a if which == 0 else seg_b)[seg] = node
+        for a, b in zip(seg_a, seg_b):
             dr.line([at(a), at(b)], fill=(45, 80, 170), width=line)
         hi = set(p['hi'])
         asleep = set(fr['asleep']) if 'asleep' in fr else None

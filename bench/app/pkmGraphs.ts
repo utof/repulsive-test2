@@ -1,4 +1,4 @@
-// bench/app/pkmGraphs.ts — bun bench/app/pkmGraphs.ts [dir] [steps=400] [maxNodes=5000] [out] [makeRoom=warp|flow]
+// bench/app/pkmGraphs.ts — bun bench/app/pkmGraphs.ts [dir] [steps=400] [maxNodes=5000] [out] [makeRoom=warp|flow] [turn=none|links|hang]
 // The graph flow and the group move on REAL note collections: mind maps (FreeMind / Freeplane
 // files) and note vaults (Obsidian-style links), as extracted by scripts/pkmExtract.ts into
 // local_files/pkm-graphs/graphs/ (git-ignored; see its README for where they come from).
@@ -24,6 +24,8 @@ import {
     crossingPairs,
     dropGroupMove,
     growGroup,
+    hangGroupOn,
+    nearestOutsideNode,
     prunePassPairs,
     setGroupOffset,
 } from '../../src/core/medialGraphMove';
@@ -37,6 +39,10 @@ const OUT = process.argv[5] ?? 'bench/results/2026-11-24-pkm-graphs.jsonl';
 // How the rest makes room for a group growing back (see `growGroup`). 'flow' is the
 // comparison run: it repeats the moves only, not the hairball count.
 const MAKE_ROOM = (process.argv[6] ?? 'warp') as 'warp' | 'flow';
+// How the carried group is oriented: 'none' = as picked up; 'links' = turned to face what it is
+// linked to; 'hang' = also re-attached to the node nearest to where it is held (only a group
+// with exactly one link; otherwise as 'links').
+const TURN = (process.argv[7] ?? 'none') as 'none' | 'links' | 'hang';
 const DUMP = process.env.DUMP;
 // FRAMES=<prefix>: also write every step of each group move as
 // `<prefix>-<graph>-<layout>-<makeRoom>.json`, a panel for bench/app/renderGraphFlow.py.
@@ -245,10 +251,14 @@ function runTree(
     };
     const grab = beginGroupMove(g, blob);
     for (let k = 1; k <= 10; k++) {
-        setGroupOffset(g, grab, (-2 * cx * k) / 10, 0); // to the mirror place across the root
+        setGroupOffset(g, grab, (-2 * cx * k) / 10, 0, {
+            turn: TURN === 'none' ? 'none' : 'links',
+        }); // to the mirror place across the root
         medialGraphStep(g, { r: R });
         frame('picked up: carried over the map');
     }
+    if (TURN === 'hang' && grab.connecting.length === 1)
+        hangGroupOn(g, grab, nearestOutsideNode(g, grab, grab.cx + grab.dx, grab.cy + grab.dy));
     const drop = dropGroupMove(g, grab, { r: R });
     dump(1, blob);
     let stepsToFullSize: number | null = drop.growth ? null : 0;
@@ -323,6 +333,7 @@ function runTree(
         limitedSettled: limited,
         moveGroupNodes: blob.length,
         makeRoom: MAKE_ROOM,
+        turn: TURN,
         moveSetDownScale: Number(drop.scale.toFixed(3)),
         moveScaleEnd: Number(scale.toFixed(3)),
         moveStepsToFullSize: stepsToFullSize,

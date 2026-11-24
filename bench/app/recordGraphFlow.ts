@@ -8,6 +8,11 @@
 //   waiting-vs-room   radial tree of 150 nodes, a 40-node branch moved a third of a turn.
 //                     left: the rest is pushed away by the flow's contact forces only;
 //                     right: the rest is moved out of the way directly (`makeRoom`).
+//   keep-vs-turn      the same tree and branch (rest moved out of the way in both).
+//                     left: the branch keeps its direction; right: it turns while carried
+//                     so that its root faces its parent.
+//   keep-vs-hang      left: as before (it keeps its parent: a link across the map);
+//                     right: it is HUNG on the node it is dropped next to and turned to face it.
 //   sleeping          60×60 grid at rest, its middle node dragged 1 unit and then held.
 //                     left: every node is stepped; right: only the nodes that are awake
 //                     (the waking spreads from the drag and dies away again).
@@ -22,6 +27,8 @@ import {
     dropGroupMove,
     type GroupGrowth,
     growGroup,
+    hangGroupOn,
+    nearestOutsideNode,
     prunePassPairs,
     setGroupOffset,
 } from '../../src/core/medialGraphMove';
@@ -39,6 +46,9 @@ interface Frame {
     label: string;
     /** Indices of the nodes that are asleep (the `sleeping` scene only). */
     asleep?: number[];
+    /** Segment ends that differ from the panel's lists in this frame (a re-attached link):
+     *  [0 = `a` / 1 = `b`, segment index, node]. */
+    patch?: [number, number, number][];
 }
 interface Panel {
     title: string;
@@ -160,13 +170,30 @@ function recordMove(
     offset: [number, number],
     makeRoom: 'warp' | 'flow',
     frames: number,
+    how: { turn?: 'none' | 'links'; hang?: boolean } = {},
 ): void {
     const move = beginGroupMove(g, blob);
     for (let k = 1; k <= 20; k++) {
-        setGroupOffset(g, move, (offset[0] * k) / 20, (offset[1] * k) / 20);
+        setGroupOffset(g, move, (offset[0] * k) / 20, (offset[1] * k) / 20, { turn: how.turn });
         medialGraphStep(g, { r });
         panel.frames.push({ x: snap(g), label: 'picked up: carried over the map' });
     }
+    if (how.hang) {
+        // Hung on the node nearest to where it is held.
+        const to = nearestOutsideNode(g, move, move.cx + move.dx, move.cy + move.dy);
+        hangGroupOn(g, move, to);
+    }
+    // The re-attached link's two ends, as they are now (they change once more when it lands).
+    const hungEnds = (): [number, number, number][] | undefined => {
+        const e = move.hung;
+        if (e === undefined) return undefined;
+        const first = e * g.pieces;
+        const last = first + g.pieces - 1;
+        return [
+            [0, first, g.segs.a[first]],
+            [1, last, g.segs.b[last]],
+        ];
+    };
     const drop = dropGroupMove(g, move, { r });
     let growth: GroupGrowth | null = drop.growth;
     let landedAt: number | null = growth ? null : 0;
@@ -187,7 +214,7 @@ function recordMove(
         const label = growth
             ? `step ${k}: set down small, growing back, ${Math.round(100 * growth.scale)}% of its size`
             : `full size after ${landedAt} steps; links landed, ${crossings} crossings, held`;
-        panel.frames.push({ x: snap(g), label });
+        panel.frames.push({ x: snap(g), label, patch: hungEnds() });
     }
 }
 
@@ -253,6 +280,25 @@ if (scene === 'drag-vs-move') {
         recordMove(p, g, r, blob, offset, mode, FRAMES);
         panels.push(p);
     }
+} else if (scene === 'keep-vs-turn' || scene === 'keep-vs-hang') {
+    const r = 0.25;
+    const FRAMES = 240;
+    const hang = scene === 'keep-vs-hang';
+    for (const changed of [false, true]) {
+        const { g, blob, offset } = tree(150);
+        for (let k = 0; k < 100; k++) medialGraphStep(g, { r });
+        const p = panelOf(
+            !changed
+                ? 'as before: it keeps its direction and its parent'
+                : hang
+                  ? 'hung on the node it is dropped next to, turned to face it'
+                  : 'turned while carried, to face its parent',
+            g,
+            blob,
+        );
+        recordMove(p, g, r, blob, offset, 'warp', FRAMES, changed ? { turn: 'links', hang } : {});
+        panels.push(p);
+    }
 } else if (scene === 'sleeping') {
     const r = 0.4;
     const size = 60;
@@ -315,7 +361,7 @@ if (scene === 'drag-vs-move') {
     panels.push(p);
 } else {
     console.error(
-        'usage: bun bench/app/recordGraphFlow.ts <drag-vs-move|waiting-vs-room|sleeping|squeezed> <out.json>',
+        'usage: bun bench/app/recordGraphFlow.ts <drag-vs-move|waiting-vs-room|keep-vs-turn|keep-vs-hang|sleeping|squeezed> <out.json>',
     );
     process.exit(2);
 }

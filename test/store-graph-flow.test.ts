@@ -20,6 +20,7 @@ describe('graph flow (store)', () => {
     afterAll(() => {
         st().setRunning(false);
         st().setGraphFlowMoveThrough(false);
+        st().setGraphFlowTurn(true);
         st().setGraphFlow(false);
         st().setEdgeSubdivision(1);
         st().setPreset('random');
@@ -99,6 +100,40 @@ describe('graph flow (store)', () => {
         expect(st().graphFlowInfo).toEqual({ phase: 'skipped', reason: 'not a flat graph' });
         st().setRunning(false);
         expect(st().graphFlowSkipped).toBe(false); // re-evaluated by the next run
+    });
+
+    test('move-through: the carried group turns to face its links unless told not to, the dragged node under the pointer', () => {
+        const carry = (turn: boolean): { tilt: number; off: number } => {
+            st().setRunning(false);
+            st().setPreset('flat-grid');
+            st().setEdgeSubdivision(2);
+            st().setGraphFlow(true);
+            st().setGraphFlowMoveThrough(true);
+            st().setGraphFlowTurn(turn);
+            for (const i of [0, 1, 8, 9]) st().addPin(i); // the corner square
+            st().setRunning(true);
+            const base = [...st().live[0]];
+            const side = [st().live[1][0] - base[0], st().live[1][1] - base[1]];
+            st().beginPinDrag(0);
+            st().setPinTarget(0, [base[0] + 3, base[1] + 1, 0]);
+            for (let k = 0; k < 3; k++) st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+            const now = [st().live[1][0] - st().live[0][0], st().live[1][1] - st().live[0][1]];
+            const out = {
+                tilt: Math.atan2(
+                    side[0] * now[1] - side[1] * now[0],
+                    side[0] * now[0] + side[1] * now[1],
+                ),
+                off: Math.hypot(st().live[0][0] - base[0] - 3, st().live[0][1] - base[1] - 1),
+            };
+            st().endPinDrag();
+            return out;
+        };
+        const kept = carry(false);
+        expect(kept.tilt).toBe(0);
+        expect(kept.off).toBeLessThan(1e-12);
+        const turned = carry(true);
+        expect(Math.abs(turned.tilt)).toBeGreaterThan(0.05);
+        expect(turned.off).toBeLessThan(1e-9);
     });
 
     test('move-through: the pinned group is carried over the grid, set down, and crossings never grow', () => {
