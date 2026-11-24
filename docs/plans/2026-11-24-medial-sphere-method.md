@@ -792,6 +792,55 @@ and segments (lengths, the pull's per-node set-up, position copies, the mask its
 profile at 2 % awake and give those passes the awake list; beyond that, neighbour lists kept
 from step to step (a skin distance, rebuilt when something has moved half of it).
 
+## What to cut: a crossing-free skeleton and an overlay (2026-11-24, evening)
+
+A note vault cannot be drawn without crossings (180 notes and 883 links: 14,803 crossings in a
+force layout; 6,576 notes: 54 million), and by Euler's bound (at most 3n − 6 links in a planar
+drawing) at least 40 % of its links have to go whatever is done. So: which links form the
+drawing that is kept crossing-free, and which are drawn on top of it?
+
+`src/core/planarSkeleton.ts`, in the order of use:
+
+1. `linkScores`: per link, the number of neighbours its two ends share. A link inside a tight
+   group of notes is structure; one between notes that share nothing else is a jump.
+2. `spanningTreeBy`: a spanning tree from the most linked note — plain breadth-first (`bfs`),
+   breadth-first with the best-scored link to the level above (`bfs-best`), or the tree with
+   the highest total score whatever its depth (`max-weight`).
+3. `orderSiblings`: children that link to each other are put next to each other (chains,
+   best links first): two children of one note can only be joined if nothing stands between.
+4. The tree is drawn (any tree drawing without crossings).
+5. `readmitLinks`: the other links come back in, best first, each only if drawn straight it
+   stays a clearance away from everything already kept. The rest is the overlay.
+
+No planarity test, no new embedding: the drawing is kept, which is what the flow needs.
+
+### Measured (`bench/app/planarSkeleton.ts`; tidy tree drawing, siblings ordered)
+
+| Vault | Links | Bound 3n − 6 | Tree | bfs | bfs-best | max-weight |
+|---|---|---|---|---|---|---|
+| 180 notes | 883 | 534 | 179 | 269 kept | 280 | **291** (33 % of the links, 54 % of the bound) |
+| 6,576 notes | 34,832 | 19,722 | 6,575 | 6,639 | **7,173** (21 %, 36 % of the bound) | 6,789 |
+
+- Every kept drawing has 0 crossings and still has 0 after the flow has run on it.
+- Ordering the siblings is worth 35–46 links on the small vault and up to 381 on the large one
+  (`bfs-best`: 217 → 598 taken back in).
+- The force layout of the tree takes back fewer (small vault: 64 against 112) but looks like a
+  graph, not a list.
+- `max-weight` keeps most of the SCORE in the tree (66 % against 10–19 %) but its tree is 20
+  levels deep on the large vault instead of 5, and a step of the flow on it is 4× slower.
+
+**Why the large vault gains so little.** Of its 28,257 links outside the tree, only 107 join two
+children of the same note (82 of them end up next to each other, and all 82 are kept). 25,942
+join a note to a note one level up that is not its parent: a note linked from several index
+notes. No ordering can draw those in a tree; they are what the overlay is for — or what copies
+of a note under each of its parents would turn into tree links (the research's suggestion for
+index notes; not built).
+
+**What this settles for "untangle first, then move":** for a vault the crossing-free part IS
+essentially a tree plus a few per cent; four fifths of the links are overlay whatever the
+method. So the flow keeps the skeleton planar, a move acts on the skeleton, and the overlay is
+display. Not built yet: showing the overlay in the app, and choosing the skeleton there.
+
 ## What is next
 
 | # | Step | Why |
@@ -799,4 +848,5 @@ from step to step (a skin distance, rebuilt when something has moved half of it)
 | 1 | The remaining whole-drawing passes of a step | solve, springs and neighbour index are awake-only now; at 2 % awake a 43,000-node step is still 46 ms where 10 would be in proportion; first the experiment on the step function's size (probes in a function of their own) |
 | 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
 | 3 | Route a moved group's links around what lies between | open item 2 |
+| 3b | The skeleton in the app: choose it for a loaded graph, draw the overlay on top (faint, on demand) | "What to cut" is core + benchmark only |
 | 4 | The move that never reaches full size (os map, 135 nodes); a score that predicts where links LAND | what set-down by score leaves open |
