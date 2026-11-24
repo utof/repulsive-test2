@@ -782,18 +782,33 @@ export function segmentPieces(
     // Why: with most of a drawing asleep, cutting and indexing every segment each step was
     // most of what a step still cost per node (`relevantSegments` in medialSphereGraph.ts).
     let maxHalf = 0;
-    const origin: [number, number, number] = [Infinity, Infinity, Infinity];
+    let ox = Infinity;
+    let oy = Infinity;
+    let oz = Infinity;
     for (let k = 0; k < m; k++) {
         const pieces = Math.max(1, Math.ceil(len[k] / maxPiece));
         maxHalf = Math.max(maxHalf, (0.5 * len[k]) / pieces);
         // A segment's extreme midpoints are its first and last pieces' (same expressions as
         // where the pieces are made, below).
-        const a = segs.a[k];
-        const b = segs.b[k];
-        for (const w of [0.5 / pieces, (pieces - 1 + 0.5) / pieces])
-            for (let c = 0; c < 3; c++)
-                origin[c] = Math.min(origin[c], x[3 * a + c] + w * (x[3 * b + c] - x[3 * a + c]));
+        // (Written out, no small arrays: this runs for every segment of the drawing each step.)
+        const a = 3 * segs.a[k];
+        const b = 3 * segs.b[k];
+        const w0 = 0.5 / pieces;
+        const w1 = (pieces - 1 + 0.5) / pieces;
+        let v = x[a] + w0 * (x[b] - x[a]);
+        if (v < ox) ox = v;
+        v = x[a] + w1 * (x[b] - x[a]);
+        if (v < ox) ox = v;
+        v = x[a + 1] + w0 * (x[b + 1] - x[a + 1]);
+        if (v < oy) oy = v;
+        v = x[a + 1] + w1 * (x[b + 1] - x[a + 1]);
+        if (v < oy) oy = v;
+        v = x[a + 2] + w0 * (x[b + 2] - x[a + 2]);
+        if (v < oz) oz = v;
+        v = x[a + 2] + w1 * (x[b + 2] - x[a + 2]);
+        if (v < oz) oz = v;
     }
+    const origin: [number, number, number] = [ox, oy, oz];
     const keep = only?.(maxHalf);
     const start = new Int32Array(m + 1);
     for (let k = 0; k < m; k++)
