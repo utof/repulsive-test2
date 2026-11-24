@@ -1,4 +1,4 @@
-// bench/app/medialGroupMove.ts — bun bench/app/medialGroupMove.ts [fixtures=grid12,grid36,tree150,tree600] [steps=600] [out] [makeRoom=warp|flow] [turn=none|links|hang]
+// bench/app/medialGroupMove.ts — bun bench/app/medialGroupMove.ts [fixtures=grid12,grid36,tree150,tree600] [steps=600] [out] [makeRoom=warp|flow] [turn=none|links|hang|scored]
 // The mind-map move: carry a group of nodes across a flat drawing, set it down, let the flow
 // make room. One JSON line per fixture: how many crossings the move leaves (and that the
 // number never grows afterwards), how many steps the group needs to grow back to full size
@@ -18,6 +18,7 @@ import {
     nearestOutsideNode,
     prunePassPairs,
     setGroupOffset,
+    settleTurn,
 } from '../../src/core/medialGraphMove';
 import {
     type MedialGraph,
@@ -36,7 +37,7 @@ const MAKE_ROOM = (process.argv[5] ?? 'warp') as 'warp' | 'flow';
 // How the carried group is oriented: 'none' = as picked up; 'links' = turned to face what it is
 // linked to; 'hang' = also re-attached to the node nearest to where it is held (only a group
 // with exactly one link; otherwise as 'links').
-const TURN = (process.argv[6] ?? 'none') as 'none' | 'links' | 'hang';
+const TURN = (process.argv[6] ?? 'none') as 'none' | 'links' | 'hang' | 'scored';
 // DUMP=<prefix> writes <prefix>-<fixture>-{0,1,2}.json (before, at the set-down, at the end):
 // {x, a, b, nodeCount, hi} for a drawing script.
 const DUMP = process.env.DUMP;
@@ -198,6 +199,8 @@ for (const name of fixtures) {
         });
         medialGraphStep(g, { r });
     }
+    // 'scored': carried turned to its links, then set down at the angle with fewest crossings.
+    if (TURN === 'scored') settleTurn(g, move);
     if (TURN === 'hang' && move.connecting.length === 1)
         hangGroupOn(g, move, nearestOutsideNode(g, move, move.cx + move.dx, move.cy + move.dy));
     const drop = dropGroupMove(g, move, { r });

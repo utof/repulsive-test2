@@ -24,6 +24,7 @@ import {
     growGroup,
     prunePassPairs,
     setGroupOffset,
+    settleTurn,
 } from './core/medialGraphMove';
 import {
     type MedialGraph,
@@ -830,6 +831,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
             }
             // Set the group down where it is. Its pins now aim at the full-size positions,
             // which is where it will be once it has grown back.
+            // Turned for the links while carried; set down at the angle that crosses least.
+            if (s.graphFlowTurn) settleTurn(run.g, run.move);
             const drop = dropGroupMove(run.g, run.move, { r: run.r });
             for (let i = 0; i < run.g.n; i++) {
                 s.live[i][0] = run.g.x[3 * i];

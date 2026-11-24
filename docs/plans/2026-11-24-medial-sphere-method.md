@@ -684,6 +684,39 @@ group in).
 - Hanging is not in the app yet: it changes the graph, and the app's edge list is shared with
   the other solver.
 
+### Set down by score (`settleTurn`, same day)
+
+The angle above is chosen for the links alone. At the moment of setting down, `settleTurn`
+counts crossings for 17 candidate angles (the one the group has, the one it was picked up
+with, 15 more round the circle) and takes the least; among equals, the nearest to the angle it
+has, so in the open nothing changes. The score is crossings of the group's body with the rest
+(temporary, but each costs growing time) + 8 × crossings of its links with the rest and with
+the group's OWN body (permanent). The app does this on release when turning is on.
+
+| 14 moves on real maps | keep direction | turn | turn, then set down by score |
+|---|---|---|---|
+| steps to full size, summed | 1,629 | 888 | 191 |
+| crossings added by the moves, summed | +8 | −11 | −20 |
+| moves at full size within 400 steps | 14 | 13 | 13 |
+
+| Fixture: steps / crossings / tightest gap | keep direction | turn | by score |
+|---|---|---|---|
+| 12×12 grid, 2×2 block | 10 / 40 / 0.06 | 7 / 43 / 0.01 | 7 / 38 / 0.31 |
+| 36×36 grid | 7 / 132 / 0.03 | 4 / 131 / 0.01 | 7 / 135 / 0.08 |
+| tree, 150 nodes | 37 / 2 / 0.19 | 26 / 0 / 0.25 | 26 / 0 / 0.25 |
+| tree, 600 nodes | 138 / 0 / 0.44 | 124 / 0 / 0.12 | 162 / 1 / 0.45 |
+
+Two things learnt on the way:
+- The first score left out a link crossing the group's own body, and then rated the UNTURNED
+  angle best on exactly the moves where it is worst (a real map: 10 crossings against 1).
+- The weight of link crossings hardly matters (1 and 8 differ on one move; 3, 8 and 1000 not
+  at all in the first version).
+
+Still open: the 600-node tree is worse by score (162 steps and 1 crossing against 124 and 0) —
+crossings where a group is set down only predict those where its links land, after the rest
+has made room; the os map's force-layout move still stops at 0.7 of its size at any angle
+tried; the large grid gains nothing.
+
 The research on this (`_local/research/2026-11-24-11-moving-subgraphs-rotation-and-routing.md`)
 found no published method for exactly this problem; what systems do is this fit, a damped
 torque, or a search over some twenty candidate angles scored on link length, crossings and
@@ -742,5 +775,5 @@ from step to step (a skin distance, rebuilt when something has moved half of it)
 | 1 | The remaining whole-drawing passes of a step | solve, springs and neighbour index are awake-only now; at 2 % awake a 43,000-node step is still 60–70 ms where 10 would be in proportion |
 | 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
 | 3 | Route a moved group's links around what lies between | open item 2 |
-| 4 | Turn by scored candidates (crossings and overlap, not link length alone); a guard for groups linked on all sides | the two cases above where turning does not help |
+| 4 | The move that never reaches full size (os map, 135 nodes); a score that predicts where links LAND | what set-down by score leaves open |
 | 5 | Hanging a branch on another node in the app | needs the app's edge list to follow the flow's graph |
