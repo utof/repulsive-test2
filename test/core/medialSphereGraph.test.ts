@@ -6,6 +6,7 @@ import {
     medialGraphFrom,
     medialGraphStep,
     minClearance,
+    relevantSegments,
 } from '../../src/core/medialSphereGraph';
 import { countPlanarCrossings } from '../../src/core/subdivide';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
@@ -263,6 +264,88 @@ describe('medialGraphStep', () => {
             // … and it all comes to rest again, with nothing crossed.
             expect(settle(g, 600)).toBe(0);
             expect(countPlanarCrossings(vec(g), segs(g), 2)).toBe(0);
+        });
+        test('the segments a mostly sleeping step indexes: never fewer than can matter, and far from all', () => {
+            const g = grid(40);
+            const { x, segs, n } = g;
+            const m = segs.a.length;
+            const reach = 1.1;
+            /** Distance from point (px, py) to segment k. */
+            const toSeg = (px: number, py: number, k: number): number => {
+                const ax = x[3 * segs.a[k]];
+                const ay = x[3 * segs.a[k] + 1];
+                const bx = x[3 * segs.b[k]];
+                const by = x[3 * segs.b[k] + 1];
+                const L2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1;
+                const t = Math.max(
+                    0,
+                    Math.min(1, ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / L2),
+                );
+                return Math.hypot(px - ax - t * (bx - ax), py - ay - t * (by - ay));
+            };
+            /** Segments within `reach` of the point, by brute force (20 sample points each). */
+            const nearPoint = (px: number, py: number): number[] => {
+                const out: number[] = [];
+                for (let k = 0; k < m; k++) if (toSeg(px, py, k) <= reach) out.push(k);
+                return out;
+            };
+            // Everything asleep but three nodes: one awake, one held by the caller, one pulled.
+            const asleep = new Uint8Array(n).fill(1);
+            const awake = 5 * 40 + 6;
+            const pinned = 17 * 40 + 3;
+            const pulled = 12 * 40 + 30;
+            asleep[awake] = 0;
+            const fixed = new Uint8Array(n);
+            fixed[pinned] = 1;
+            // … and one that the caller moved since the last step (from `last` to where it is).
+            const last = Float64Array.from(x);
+            const moved = 33 * 40 + 15;
+            last[3 * moved] += 2.5;
+            last[3 * moved + 1] += 1.5;
+            const sl = { asleep, last };
+            const only = relevantSegments(x, segs, sl, fixed, new Map([[pulled, [0, 0]]]), reach);
+            if (!only) throw new Error('no mask');
+            // What the step can touch: segments near the three nodes; near where the moved node
+            // is and was; near the ends of THOSE segments (they are woken and probe); and near
+            // any point of a segment that has such a node at an end (sampled).
+            const mayWake = new Set<number>([awake, pinned, pulled, moved]);
+            for (const [px, py] of [
+                [x[3 * moved], x[3 * moved + 1]],
+                [last[3 * moved], last[3 * moved + 1]],
+            ])
+                for (const k of nearPoint(px, py)) {
+                    expect(only[k]).toBe(1);
+                    mayWake.add(segs.a[k]);
+                    mayWake.add(segs.b[k]);
+                }
+            let needed = 0;
+            for (let k = 0; k < m; k++) {
+                if (!mayWake.has(segs.a[k]) && !mayWake.has(segs.b[k])) continue;
+                for (let j = 0; j <= 20; j++) {
+                    const px = x[3 * segs.a[k]] + (j / 20) * (x[3 * segs.b[k]] - x[3 * segs.a[k]]);
+                    const py =
+                        x[3 * segs.a[k] + 1] +
+                        (j / 20) * (x[3 * segs.b[k] + 1] - x[3 * segs.a[k] + 1]);
+                    for (const f of nearPoint(px, py)) {
+                        expect(only[f]).toBe(1);
+                        needed++;
+                    }
+                }
+            }
+            expect(needed).toBeGreaterThan(100); // the check looked at something
+            let kept = 0;
+            for (let k = 0; k < m; k++) kept += only[k];
+            expect(kept).toBeLessThan(0.5 * m); // … and most of the drawing is left out
+            // Nothing asleep: everything is kept.
+            const all = relevantSegments(
+                x,
+                segs,
+                { asleep: new Uint8Array(n), last: x },
+                fixed,
+                undefined,
+                reach,
+            );
+            expect(all?.every((v) => v === 1)).toBe(true);
         });
         test('a drag ends where it ends without sleeping, to a fraction of a clearance', () => {
             const drag = (sleep: boolean): MedialGraph => {

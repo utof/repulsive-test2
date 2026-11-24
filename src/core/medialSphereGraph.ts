@@ -427,9 +427,17 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     // Why midpoints and not "segments starting at a node within reach" (the first version):
     // the reach is half a segment shorter and the test is per piece; the search was a third
     // of a step.
-    const pcs = segmentPieces(x, segs, 2 * rMax);
+    // With most of the drawing asleep, only the segments near something that can move, probe
+    // or wake are cut and indexed (`relevantSegments`).
+    const sleeping =
+        opts.sleep && g.sleepState && g.sleepState.asleep.length === n ? g.sleepState : undefined;
+    const pcs = segmentPieces(x, segs, 2 * rMax, (maxHalf) =>
+        sleeping
+            ? relevantSegments(x, segs, sleeping, fixed, opts.pinTargets, 2 * rMax + 2 * maxHalf)
+            : undefined,
+    );
     const segReach = 2 * rMax + pcs.maxHalf;
-    const grid = makeGrid(pcs.mid, pcs.count, segReach);
+    const grid = makeGrid(pcs.mid, pcs.count, segReach, pcs.origin);
     // tested[k] = i: segment k has already been tested for node i (found once per piece).
     const tested = new Int32Array(m).fill(-1);
     const reach2 = (2 * rMax) ** 2;
@@ -749,6 +757,9 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         if (ghostEdge?.[Math.floor(k / g.pieces)]) continue; // a carried edge pulls on nobody
         const a = segs.a[k];
         const b = segs.b[k];
+        // Between two held nodes: everything it would add goes to rows that are dropped (the
+        // solve is over the free nodes). Skipped so that a sleeping drawing costs nothing here.
+        if (held[a] && held[b]) continue;
         const L = rest[k] || 1e-300;
         // Spring plus a constant tension (the paper's length term, kept small): the spring
         // holds the size, the tension pulls kinks straight — springs alone leave an edge that
@@ -782,6 +793,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                 if (ghostEdge?.[e]) break;
                 const a = nodeAt(e, q - 1);
                 const b = nodeAt(e, q + 1);
+                if (held[a] && held[b]) continue; // as for the springs above
                 const L = rest[e * g.pieces + q - 1] + rest[e * g.pieces + q] || 1e-300;
                 const dx = x[3 * a] - x[3 * b];
                 const dy = x[3 * a + 1] - x[3 * b + 1];
@@ -840,31 +852,63 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         diag[linkA[k]] += linkW[k];
         diag[linkB[k]] += linkW[k];
     }
+    // The system is solved over the FREE nodes only (not held: not pinned, carried or asleep).
+    // A held node's unknown is 0 and its right-hand side is 0 (zeroed above), so its row and
+    // column drop out: every term they would add to a sum is an exact 0, which is why this
+    // gives the same numbers, bit for bit, as solving over all nodes with identity rows — as
+    // long as free nodes and segments are visited in their original order (they are).
+    // Why: with most of a large drawing asleep the solve was the largest part of a step and
+    // the one part that did not get cheaper (measured at 42,960 nodes with 13 % awake: 103 of
+    // 240 ms).
+    // @see docs/plans/2026-11-24-medial-sphere-method.md ("A step costs what is awake")
+    let nFree = 0;
+    const slot = new Int32Array(n).fill(-1);
+    for (let i = 0; i < n; i++) if (!held[i]) slot[i] = nFree++;
+    const freeNode = new Int32Array(nFree);
+    const diagF = new Float64Array(nFree);
+    for (let i = 0; i < n; i++)
+        if (slot[i] >= 0) {
+            freeNode[slot[i]] = i;
+            diagF[slot[i]] = diag[i];
+        }
+    // Couplings between two free nodes (one with a held end multiplies that end's 0).
+    let nc = 0;
+    const coA = new Int32Array(m + linkA.length);
+    const coB = new Int32Array(m + linkA.length);
+    const coW = new Float64Array(m + linkA.length);
+    for (let k = 0; k < m; k++) {
+        const a = slot[segs.a[k]];
+        const b = slot[segs.b[k]];
+        if (a < 0 || b < 0) continue;
+        coA[nc] = a;
+        coB[nc] = b;
+        coW[nc++] = stiff[k];
+    }
+    for (let k = 0; k < linkA.length; k++) {
+        const a = slot[linkA[k]];
+        const b = slot[linkB[k]];
+        if (a < 0 || b < 0) continue;
+        coA[nc] = a;
+        coB[nc] = b;
+        coW[nc++] = linkW[k];
+    }
     const applyP = (v: Float64Array, out: Float64Array): void => {
-        for (let i = 0; i < n; i++) out[i] = diag[i] * v[i];
-        for (let k = 0; k < m; k++) {
-            const a = segs.a[k];
-            const b = segs.b[k];
-            out[a] -= stiff[k] * v[b];
-            out[b] -= stiff[k] * v[a];
+        for (let i = 0; i < nFree; i++) out[i] = diagF[i] * v[i];
+        for (let k = 0; k < nc; k++) {
+            const a = coA[k];
+            const b = coB[k];
+            out[a] -= coW[k] * v[b];
+            out[b] -= coW[k] * v[a];
         }
-        for (let k = 0; k < linkA.length; k++) {
-            const a = linkA[k];
-            const b = linkB[k];
-            out[a] -= linkW[k] * v[b];
-            out[b] -= linkW[k] * v[a];
-        }
-        // A pinned node's unknown is fixed at 0: identity row (its v stays 0 throughout).
-        for (let i = 0; i < n; i++) if (held[i]) out[i] = v[i];
     };
     const d = new Float64Array(3 * n);
-    const rhs = new Float64Array(n);
-    const sol = new Float64Array(n);
+    const rhs = new Float64Array(nFree);
+    const sol = new Float64Array(nFree);
     let cgIterations = 0;
     for (let c = 0; c < 2; c++) {
-        for (let i = 0; i < n; i++) rhs[i] = G[3 * i + c];
-        cgIterations = Math.max(cgIterations, jacobiCg(applyP, diag, rhs, sol));
-        for (let i = 0; i < n; i++) d[3 * i + c] = held[i] ? 0 : sol[i];
+        for (let i = 0; i < nFree; i++) rhs[i] = G[3 * freeNode[i] + c];
+        cgIterations = Math.max(cgIterations, jacobiCg(applyP, diagF, rhs, sol));
+        for (let i = 0; i < nFree; i++) d[3 * freeNode[i] + c] = sol[i];
     }
 
     // --- move, each node within its own crossing-free limit ------------------------------------
@@ -894,7 +938,8 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         activeSeg = new Uint8Array(m);
         for (let k = 0; k < m; k++) activeSeg[k] = held[segs.a[k]] && held[segs.b[k]] ? 0 : 1;
     }
-    const caps = nodeMotionCaps(x, n, segs, 2 * rMax, 0.45, skip, close, activeSeg);
+    // `pcs`: the probes' cut of the segments (same reach, positions not yet moved).
+    const caps = nodeMotionCaps(x, n, segs, 2 * rMax, 0.45, skip, close, activeSeg, pcs);
     let move = 0;
     let capped = 0;
     const xOld = pass || close.d.length > 0 ? Float64Array.from(x) : undefined;
@@ -1009,6 +1054,113 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         minRadius: minRadius / r,
         awakeNodes,
     };
+}
+
+/**
+ * Which segments this step's searches have to know about when most nodes are asleep: 1 per
+ * segment that can come within `reach` of
+ *  - a node that is, or can become, awake this step: not asleep, held by the caller, pulled
+ *    by a pin target, moved by the caller since the last step — or an end of a segment near
+ *    where such a moved node is or was (those are woken by it and then probe);
+ *  - any point of a segment with such a node at an end (the pair search starts from those).
+ * A superset, never less: the step's results are the same as with every segment indexed
+ * (checked bit for bit against the unrestricted step).
+ * How: a coarse mask of cells of side 2·reach. Every point that searches is within one cell
+ * side of a SAMPLE (a node, or points along a segment no farther apart than a cell), the
+ * 3×3 cells around each sample are marked, and a segment counts if a cell its bounding box
+ * touches is marked: a segment within `reach` of a searching point has a point at most
+ * reach + half a cell = one cell side from a sample, so in one of the nine.
+ * Why: cutting every segment into pieces and indexing them twice per step was, with 13 % of
+ * a 42,960-node drawing awake, 30 of 165 ms; this pass is two loops of arithmetic.
+ * @see docs/plans/2026-11-24-medial-sphere-method.md ("A step costs what is awake")
+ */
+export function relevantSegments(
+    x: Float64Array,
+    segs: SegmentList,
+    sl: { asleep: Uint8Array; last: Float64Array },
+    fixed: ArrayLike<number>,
+    pinTargets: ReadonlyMap<number, readonly [number, number]> | undefined,
+    reach: number,
+): Uint8Array | undefined {
+    const n = sl.asleep.length;
+    const m = segs.a.length;
+    const may = new Uint8Array(n); // may be awake this step
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < n; i++) {
+        if (!sl.asleep[i] || fixed[i]) may[i] = 1;
+        for (const px of [x[3 * i], sl.last[3 * i]]) {
+            if (px < minX) minX = px;
+            if (px > maxX) maxX = px;
+        }
+        for (const py of [x[3 * i + 1], sl.last[3 * i + 1]]) {
+            if (py < minY) minY = py;
+            if (py > maxY) maxY = py;
+        }
+    }
+    if (pinTargets) for (const i of pinTargets.keys()) if (i < n) may[i] = 1;
+    if (!(maxX >= minX) || !(reach > 0)) return undefined;
+    let C = 2 * reach;
+    while ((Math.floor((maxX - minX) / C) + 1) * (Math.floor((maxY - minY) / C) + 1) > 1 << 22)
+        C *= 2;
+    const nx = Math.floor((maxX - minX) / C) + 1;
+    const ny = Math.floor((maxY - minY) / C) + 1;
+    const mask = new Uint8Array(nx * ny);
+    const mark = (px: number, py: number): void => {
+        const cx = Math.floor((px - minX) / C);
+        const cy = Math.floor((py - minY) / C);
+        for (let v = Math.max(0, cy - 1); v <= Math.min(ny - 1, cy + 1); v++)
+            for (let u = Math.max(0, cx - 1); u <= Math.min(nx - 1, cx + 1); u++)
+                mask[u + nx * v] = 1;
+    };
+    /** Does a cell the segment's bounding box touches carry a mark? (A long one: yes, unasked.) */
+    const hits = (k: number): boolean => {
+        const ax = x[3 * segs.a[k]];
+        const ay = x[3 * segs.a[k] + 1];
+        const bx = x[3 * segs.b[k]];
+        const by = x[3 * segs.b[k] + 1];
+        const u0 = Math.floor((Math.min(ax, bx) - minX) / C);
+        const u1 = Math.floor((Math.max(ax, bx) - minX) / C);
+        const v0 = Math.floor((Math.min(ay, by) - minY) / C);
+        const v1 = Math.floor((Math.max(ay, by) - minY) / C);
+        if ((u1 - u0 + 1) * (v1 - v0 + 1) > 256) return true;
+        for (let v = v0; v <= v1; v++)
+            for (let u = u0; u <= u1; u++) if (mask[u + nx * v]) return true;
+        return false;
+    };
+    // Moved by the caller: awake, and it wakes the segments near where it is and where it was.
+    let moved = false;
+    for (let i = 0; i < n; i++)
+        if (x[3 * i] !== sl.last[3 * i] || x[3 * i + 1] !== sl.last[3 * i + 1]) {
+            moved = true;
+            may[i] = 1;
+            mark(x[3 * i], x[3 * i + 1]);
+            mark(sl.last[3 * i], sl.last[3 * i + 1]);
+        }
+    if (moved)
+        for (let k = 0; k < m; k++)
+            if (hits(k)) {
+                may[segs.a[k]] = 1;
+                may[segs.b[k]] = 1;
+            }
+    // Every segment with an end that may be awake: marked along its whole length.
+    for (let k = 0; k < m; k++) {
+        const a = segs.a[k];
+        const b = segs.b[k];
+        if (!may[a] && !may[b]) continue;
+        const ax = x[3 * a];
+        const ay = x[3 * a + 1];
+        const bx = x[3 * b];
+        const by = x[3 * b + 1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / C));
+        for (let j = 0; j <= steps; j++)
+            mark(ax + (j / steps) * (bx - ax), ay + (j / steps) * (by - ay));
+    }
+    const only = new Uint8Array(m);
+    for (let k = 0; k < m; k++) if (may[segs.a[k]] || may[segs.b[k]] || hits(k)) only[k] = 1;
+    return only;
 }
 
 /**
