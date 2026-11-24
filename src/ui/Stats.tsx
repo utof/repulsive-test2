@@ -100,6 +100,7 @@ export function Stats() {
                 <span style={{ marginRight: 20, color: '#66ccff' }}>
                     graph flow: move {graphFlowInfo.movePerNode.toExponential(1)}, limited{' '}
                     {graphFlowInfo.cappedNodes}, {graphFlowInfo.msPerStep.toFixed(0)} ms/step
+                    {graphFlowInfo.awake === 0 ? ', at rest' : `, awake ${graphFlowInfo.awake}`}
                     {graphFlowInfo.crossings > 0 && `, crossings ${graphFlowInfo.crossings}`}
                     {graphFlowInfo.growing !== null &&
                         `, group growing back ${(100 * graphFlowInfo.growing).toFixed(0)}%`}

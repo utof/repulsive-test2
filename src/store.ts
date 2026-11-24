@@ -114,6 +114,9 @@ export type GraphFlowInfo =
           growing: number | null;
           /** True while a group is being carried over the drawing. */
           carrying: boolean;
+          /** Nodes the last step worked on; 0 = the drawing is at rest and steps cost nothing
+           *  (see `sleep` in `medialGraphStep`). */
+          awake: number;
       }
     | { phase: 'skipped'; reason: string };
 
@@ -912,6 +915,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
             let steps = 0;
             let move = 0;
             let capped = 0;
+            let awake = 0;
             let grown: GroupGrowth | null = null;
             for (let k = 0; k < maxSteps; k++) {
                 // A set-down group takes the room the last step gave it.
@@ -923,10 +927,14 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     for (const pin of s.pins)
                         if (pin.enabled && at.has(pin.vertexIndex)) g.pinned[pin.vertexIndex] = 1;
                 }
-                const res = medialGraphStep(g, { r, pinTargets: targets });
+                // `sleep`: the part of the drawing at rest is left alone, so a frame costs what
+                // is moving — nothing at all once everything has settled.
+                const res = medialGraphStep(g, { r, pinTargets: targets, sleep: {} });
                 steps++;
                 move = res.movePerNode;
                 capped = res.cappedNodes;
+                awake = res.awakeNodes;
+                if (awake === 0 && !run.growth) break; // at rest: more steps would do nothing
                 if (performance.now() - t0 > budgetMs) break;
             }
             // Pairs that have come apart are guarded again: that crossing is gone for good.
@@ -964,6 +972,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     crossings: allowedCrossingsNow(g),
                     growing: run.growth ? run.growth.scale : null,
                     carrying: run.move !== null,
+                    awake,
                 },
             });
         },

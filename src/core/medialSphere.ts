@@ -645,6 +645,8 @@ export function maxSafeStep(
  * a finely divided drawing two edges of one junction lie a fraction of a (short) segment
  * apart by construction; treating those as dangerously close jammed the 18x18 grid at 8
  * points per edge (clearance stuck at 0.20 where it reaches 0.68).
+ * `active` (optional, per segment): only pairs with an active segment are looked at — the
+ * limits of nodes that will not move anyway are then not computed (see `forNearSegmentPairs`).
  * @see docs/plans/2026-11-24-medial-sphere-method.md
  */
 export function nodeMotionCaps(
@@ -655,6 +657,7 @@ export function nodeMotionCaps(
     frac = 0.45,
     skip?: (k1: number, k2: number) => boolean,
     close?: { below: number; rel: number; k1: number[]; k2: number[]; d: number[] },
+    active?: Uint8Array,
 ): Float64Array {
     const m = segs.a.length;
     const cap = new Float64Array(nNodes).fill(frac * within);
@@ -669,25 +672,32 @@ export function nodeMotionCaps(
         }
     }
     // The search (grid, long segments apart) is `forNearSegmentPairs`'s: one place for it.
-    forNearSegmentPairs(x, nNodes, segs, within, (e, f) => {
-        if (skip?.(e, f)) return;
-        const a1 = segs.a[e];
-        const b1 = segs.b[e];
-        const a2 = segs.a[f];
-        const b2 = segs.b[f];
-        const D = segmentDistance(x, a1, b1, a2, b2);
-        if (D >= within) return;
-        if (close && len && D < close.below && D < close.rel * Math.min(len[e], len[f])) {
-            close.k1.push(e);
-            close.k2.push(f);
-            close.d.push(D);
-        }
-        const c = frac * D;
-        if (c < cap[a1]) cap[a1] = c;
-        if (c < cap[b1]) cap[b1] = c;
-        if (c < cap[a2]) cap[a2] = c;
-        if (c < cap[b2]) cap[b2] = c;
-    });
+    forNearSegmentPairs(
+        x,
+        nNodes,
+        segs,
+        within,
+        (e, f) => {
+            if (skip?.(e, f)) return;
+            const a1 = segs.a[e];
+            const b1 = segs.b[e];
+            const a2 = segs.a[f];
+            const b2 = segs.b[f];
+            const D = segmentDistance(x, a1, b1, a2, b2);
+            if (D >= within) return;
+            if (close && len && D < close.below && D < close.rel * Math.min(len[e], len[f])) {
+                close.k1.push(e);
+                close.k2.push(f);
+                close.d.push(D);
+            }
+            const c = frac * D;
+            if (c < cap[a1]) cap[a1] = c;
+            if (c < cap[b1]) cap[b1] = c;
+            if (c < cap[a2]) cap[a2] = c;
+            if (c < cap[b2]) cap[b2] = c;
+        },
+        active,
+    );
     return cap;
 }
 
@@ -771,6 +781,8 @@ export function segmentPieces(
  * half-lengths. Why midpoints and not first endpoints (the first version): the reach is one
  * segment length shorter and the test is per pair, which halved the candidates — the search
  * was half of a graph-flow step in a profile.
+ * `active` (optional, per segment): only pairs with at least one active segment are visited,
+ * at a cost in proportion to the active ones — for a drawing most of which is at rest.
  * @see docs/plans/2026-11-24-medial-sphere-method.md
  */
 export function forNearSegmentPairs(
@@ -779,6 +791,7 @@ export function forNearSegmentPairs(
     segs: SegmentList,
     within: number,
     visit: (k1: number, k2: number) => void,
+    active?: Uint8Array,
 ): void {
     const m = segs.a.length;
     const { count, mid, half, seg, start, maxHalf } = segmentPieces(x, segs);
@@ -786,11 +799,15 @@ export function forNearSegmentPairs(
     const grid = makeGrid(mid, count, reach);
     // seen[f] = e: the pair (e, f) has been visited (a long segment is found once per piece).
     const seen = new Int32Array(m).fill(-1);
-    for (let e = 0; e < m; e++)
+    for (let e = 0; e < m; e++) {
+        if (active && !active[e]) continue;
         for (let p = start[e]; p < start[e + 1]; p++)
             grid.forNear(p, reach, (q) => {
                 const f = seg[q];
-                if (f <= e || seen[f] === e) return;
+                if (f === e || seen[f] === e) return;
+                // Each pair once: from its lower segment — or, when that one is not active
+                // and so never starts a search, from the higher one.
+                if (f < e && (!active || active[f])) return;
                 const dx = mid[3 * p] - mid[3 * q];
                 const dy = mid[3 * p + 1] - mid[3 * q + 1];
                 const dz = mid[3 * p + 2] - mid[3 * q + 2];
@@ -806,6 +823,7 @@ export function forNearSegmentPairs(
                     return;
                 visit(e, f);
             });
+    }
 }
 
 /** Is the motion `x → x − step·d` of a closed curve provably free of strand crossings? */

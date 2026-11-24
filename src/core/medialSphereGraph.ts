@@ -75,6 +75,14 @@ export interface MedialGraph {
      * strand and a strand that crosses it comes at it lengthways.
      */
     passPairs?: Map<number, number>;
+    /**
+     * Which nodes are at rest and left alone by the step (only kept when the step is run with
+     * `sleep`): `asleep[i]`, the number of consecutive steps node `i` has hardly moved, and
+     * the positions the last step left — a node found somewhere else has been moved by the
+     * caller and is woken. Set to `undefined` to wake everything (after changing rest
+     * lengths, pins or anything else the positions do not show).
+     */
+    sleepState?: { quiet: Uint16Array; asleep: Uint8Array; last: Float64Array };
 }
 
 /** Key of the unordered pair of original edges `(e, f)` in `MedialGraph.passPairs`. */
@@ -200,6 +208,14 @@ export interface MedialGraphOptions {
      *  (0.34 with it).
      *  `'none'`: the node-only pull of the paper, kept for comparison. */
     reaction?: 'auto' | 'all' | 'none';
+    /** Leave the part of the drawing that is at rest alone. A node that has moved less than
+     *  `below·r` (default 2e-4) in each of `after` steps (default 10) in a row goes to sleep:
+     *  no probes, no motion limits, held in place. It wakes when anything within reach of it
+     *  moves more than that, or when the caller moves it or drags it.
+     *  Why: every interaction is local, so a step should cost what is MOVING, not the size
+     *  of the drawing — a mind map of 30,000 nodes with one node being dragged.
+     *  Off by default: the benchmarks of the flow itself measure every node. */
+    sleep?: { below?: number; after?: number };
     /** The drag: node index → (x, y) it is being pulled to. Such a node is NOT held; it gets a
      *  spring to its target (`pinStiffness`, force capped at `pinForceMax`) and otherwise
      *  takes part in the flow like any other — so the contact barrier acts on it too.
@@ -226,6 +242,8 @@ export interface MedialGraphStepResult {
     links: number;
     /** Smallest circle radius found, in units of `r`: half the tightest clearance seen. */
     minRadius: number;
+    /** Nodes the step worked on: all that are not held, or with `sleep` those awake. */
+    awakeNodes: number;
 }
 
 /** Per-node topology that does not change during a flow. */
@@ -309,6 +327,33 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         ? pinned.map((v, i) => v | (g.ghost as { node: Uint8Array }).node[i])
         : pinned;
 
+    // --- sleeping, the cheap way out: nothing awake and nothing touched → nothing to do --------
+    // Why here, before anything is built: a drawing at rest is the common state of the app,
+    // and even the linear passes below (lengths, grids, the solve's setup) were a tenth of a
+    // full step (20 ms of 200 for 10,680 nodes).
+    if (opts.sleep && g.sleepState && g.sleepState.asleep.length === n) {
+        const s = g.sleepState;
+        let busy = false;
+        for (let i = 0; i < n && !busy; i++)
+            busy =
+                (!s.asleep[i] && !fixed[i]) ||
+                x[3 * i] !== s.last[3 * i] ||
+                x[3 * i + 1] !== s.last[3 * i + 1];
+        if (!busy && opts.pinTargets)
+            for (const [i, target] of opts.pinTargets)
+                if (i < n && !fixed[i] && (x[3 * i] !== target[0] || x[3 * i + 1] !== target[1]))
+                    busy = true;
+        if (!busy)
+            return {
+                cappedNodes: 0,
+                movePerNode: 0,
+                cgIterations: 0,
+                links: 0,
+                minRadius: Number.POSITIVE_INFINITY,
+                awakeNodes: 0,
+            };
+    }
+
     const len = new Float64Array(m);
     const w = new Float64Array(n);
     for (let k = 0; k < m; k++) {
@@ -381,7 +426,57 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     // over its probes — what the preconditioner's diagonal has to carry.
     const contact = new Float64Array(n);
     let minRadius = Infinity;
+    // --- sleeping: which nodes this step leaves alone (see `sleep` in the options) -------------
+    let sl = opts.sleep ? g.sleepState : undefined;
+    if (opts.sleep && (!sl || sl.asleep.length !== n))
+        sl = g.sleepState = {
+            quiet: new Uint16Array(n),
+            asleep: new Uint8Array(n),
+            last: Float64Array.from(x),
+        };
+    const asleep = sl?.asleep;
+    const xStart = sl ? Float64Array.from(x) : undefined;
+    /** Wake every node of a segment within reach of (px, py). */
+    const wakeNear = (px: number, py: number): void => {
+        if (!sl) return;
+        const s = sl;
+        grid.forNearPoint(px, py, 0, segReach, (q) => {
+            const k = pcs.seg[q];
+            s.asleep[segs.a[k]] = 0;
+            s.quiet[segs.a[k]] = 0;
+            s.asleep[segs.b[k]] = 0;
+            s.quiet[segs.b[k]] = 0;
+        });
+    };
+    if (sl) {
+        // Moved by the caller since the last step (a drag target, a group set down, an edit):
+        // awake, with everything around where it was and where it is now.
+        for (let i = 0; i < n; i++)
+            if (x[3 * i] !== sl.last[3 * i] || x[3 * i + 1] !== sl.last[3 * i + 1]) {
+                sl.asleep[i] = 0;
+                sl.quiet[i] = 0;
+                wakeNear(x[3 * i], x[3 * i + 1]);
+                wakeNear(sl.last[3 * i], sl.last[3 * i + 1]);
+            }
+        if (opts.pinTargets)
+            for (const [i, target] of opts.pinTargets)
+                if (i < n && (x[3 * i] !== target[0] || x[3 * i + 1] !== target[1])) {
+                    sl.asleep[i] = 0;
+                    sl.quiet[i] = 0;
+                }
+        // A node the caller holds is not "asleep": when it is let go it must be awake.
+        for (let i = 0; i < n; i++)
+            if (fixed[i]) {
+                sl.asleep[i] = 0;
+                sl.quiet[i] = 0;
+            }
+    }
+    // Held = not moved by this step: fixed by the caller, or asleep.
+    const held = asleep ? fixed.map((v, i) => v | asleep[i]) : fixed;
+    let awakeNodes = 0;
+    for (let i = 0; i < n; i++) if (!held[i]) awakeNodes++;
     for (let i = 0; i < n; i++) {
+        if (asleep?.[i]) continue;
         const deg = t.nbrStart[i + 1] - t.nbrStart[i];
         const xi = x[3 * i];
         const yi = x[3 * i + 1];
@@ -688,7 +783,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         }
     }
     for (let i = 0; i < n; i++)
-        if (fixed[i]) {
+        if (held[i]) {
             G[3 * i] = 0;
             G[3 * i + 1] = 0;
         }
@@ -729,7 +824,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             out[b] -= linkW[k] * v[a];
         }
         // A pinned node's unknown is fixed at 0: identity row (its v stays 0 throughout).
-        for (let i = 0; i < n; i++) if (fixed[i]) out[i] = v[i];
+        for (let i = 0; i < n; i++) if (held[i]) out[i] = v[i];
     };
     const d = new Float64Array(3 * n);
     const rhs = new Float64Array(n);
@@ -738,7 +833,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     for (let c = 0; c < 2; c++) {
         for (let i = 0; i < n; i++) rhs[i] = G[3 * i + c];
         cgIterations = Math.max(cgIterations, jacobiCg(applyP, diag, rhs, sol));
-        for (let i = 0; i < n; i++) d[3 * i + c] = fixed[i] ? 0 : sol[i];
+        for (let i = 0; i < n; i++) d[3 * i + c] = held[i] ? 0 : sol[i];
     }
 
     // --- move, each node within its own crossing-free limit ------------------------------------
@@ -762,7 +857,13 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         k2: [] as number[],
         d: [] as number[],
     };
-    const caps = nodeMotionCaps(x, n, segs, 2 * rMax, 0.45, skip, close);
+    // With sleeping nodes: only the pairs that have a segment with a node that can move.
+    let activeSeg: Uint8Array | undefined;
+    if (asleep) {
+        activeSeg = new Uint8Array(m);
+        for (let k = 0; k < m; k++) activeSeg[k] = held[segs.a[k]] && held[segs.b[k]] ? 0 : 1;
+    }
+    const caps = nodeMotionCaps(x, n, segs, 2 * rMax, 0.45, skip, close, activeSeg);
     let move = 0;
     let capped = 0;
     const xOld = pass || close.d.length > 0 ? Float64Array.from(x) : undefined;
@@ -851,12 +952,31 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                 if (c < allowed) pass.set(key, c);
             }
     }
+    // --- sleeping: who moved, who is woken by it, who goes to sleep -----------------------------
+    if (sl && xStart && opts.sleep) {
+        const eps = (opts.sleep.below ?? 2e-4) * r;
+        const after = opts.sleep.after ?? 10;
+        for (let i = 0; i < n; i++) {
+            if (held[i]) continue;
+            const dx = x[3 * i] - xStart[3 * i];
+            const dy = x[3 * i + 1] - xStart[3 * i + 1];
+            if (dx * dx + dy * dy > eps * eps) {
+                sl.quiet[i] = 0;
+                // (The grid is of the positions at the start of the step; its reach covers
+                // one step's motion, which is under a clearance.)
+                wakeNear(xStart[3 * i], xStart[3 * i + 1]);
+            } else if (sl.quiet[i] < 65535) sl.quiet[i]++;
+        }
+        for (let i = 0; i < n; i++) if (!held[i] && sl.quiet[i] >= after) sl.asleep[i] = 1;
+        sl.last.set(x);
+    }
     return {
         cappedNodes: capped,
         movePerNode: move / n / r,
         cgIterations,
         links: contactLinks,
         minRadius: minRadius / r,
+        awakeNodes,
     };
 }
 
