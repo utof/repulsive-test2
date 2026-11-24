@@ -294,6 +294,76 @@ async function graphFlow(size: number, ms: number) {
     return out;
 }
 
+/**
+ * Spike `groupmove:<size>:<ms>`: the flat-grid preset at 2 points per edge, graph flow with
+ * move-through. The corner square (four pinned nodes) is dragged to the middle of the grid
+ * and released; the frame loop then has `ms` milliseconds. The group must be carried, set
+ * down, grow back to full size where it was put, and the crossing count must never grow
+ * after its links land.
+ * @see src/core/medialGraphMove.ts
+ */
+async function groupMove(size: number, ms: number) {
+    const store = useSimStore;
+    store.getState().setPreset('flat-grid');
+    store.getState().setParam('size', size);
+    store.getState().setEdgeSubdivision(2);
+    store.getState().regenerate();
+    store.getState().setGraphFlow(true);
+    store.getState().setGraphFlowMoveThrough(true);
+    await sleep(1500);
+    const blob = [0, 1, size, size + 1];
+    for (const i of blob) store.getState().addPin(i);
+    store.getState().setRunning(true);
+    await sleep(200);
+    const base = [...store.getState().live[0]];
+    const to: [number, number] = [base[0] + 2, base[1] + 2];
+    store.getState().beginPinDrag(0);
+    // A drag in ten stages, as a pointer would do it.
+    let carried = false;
+    for (let k = 1; k <= 10; k++) {
+        store.getState().setPinTarget(0, [base[0] + (2 * k) / 10, base[1] + (2 * k) / 10, 0]);
+        await sleep(60);
+        const i = store.getState().graphFlowInfo;
+        if (i?.phase === 'running' && i.carrying) carried = true;
+    }
+    store.getState().endPinDrag();
+    const t0 = performance.now();
+    let grownMs: number | null = null;
+    let crossingsAtRelease: number | null = null;
+    let worst = 0;
+    while (performance.now() - t0 < ms) {
+        const i = store.getState().graphFlowInfo;
+        if (i?.phase === 'running') {
+            if (grownMs === null && i.growing === null) {
+                grownMs = performance.now() - t0;
+                crossingsAtRelease = i.crossings;
+            }
+            if (grownMs !== null) worst = Math.max(worst, i.crossings);
+        }
+        if (!store.getState().running) break;
+        await sleep(30);
+    }
+    const end = store.getState();
+    const info = end.graphFlowInfo;
+    const out = {
+        size,
+        segments: end.graph.edges.length,
+        carried,
+        grownMs: grownMs === null ? null : Math.round(grownMs),
+        crossingsAtRelease,
+        crossingsWorst: worst,
+        crossingsEnd: info?.phase === 'running' ? info.crossings : null,
+        node0FromTarget: Math.hypot(end.live[0][0] - to[0], end.live[0][1] - to[1]),
+        msPerStep: info?.phase === 'running' ? info.msPerStep : null,
+        stillRunning: end.running,
+        allFinite: end.live.every((p) => p.every(Number.isFinite)),
+    };
+    end.setRunning(false);
+    store.getState().setGraphFlowMoveThrough(false);
+    store.getState().setGraphFlow(false);
+    return out;
+}
+
 declare global {
     interface Window {
         __runSpike: (name: string) => Promise<string>;
@@ -305,6 +375,7 @@ window.__runSpike = async (name) => {
         return JSON.stringify(await prePass(Number(n), Number(steps), Number(driver)));
     if (kind === 'untangle') return JSON.stringify(await untangle(Number(n), Number(steps)));
     if (kind === 'graphflow') return JSON.stringify(await graphFlow(Number(n), Number(steps)));
+    if (kind === 'groupmove') return JSON.stringify(await groupMove(Number(n), Number(steps)));
     if (kind !== 'run') throw new Error(`appHarness: unknown spike '${name}'`);
     return JSON.stringify(await run(Number(n), Number(steps), driver as SolverDriver | undefined));
 };

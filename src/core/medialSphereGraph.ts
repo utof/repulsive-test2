@@ -28,7 +28,7 @@
  * @see docs/plans/2026-11-24-medial-sphere-method.md (the flat-graph spike and its bar)
  * @see src/core/medialSphere.ts (the closed-curve method this is derived from)
  */
-import { makeGrid, nodeMotionCaps, type SegmentList } from './medialSphere';
+import { forNearSegmentPairs, makeGrid, nodeMotionCaps, type SegmentList } from './medialSphere';
 import { subdivideGraph } from './subdivide';
 import type { Edge, Vec3 } from './testConfigs';
 
@@ -48,6 +48,54 @@ export interface MedialGraph {
     edgeB: Int32Array;
     /** 1 = held in place. */
     pinned: Uint8Array;
+    /**
+     * A group being carried over the drawing (see src/core/medialGraphMove.ts). `edge[e] = 1`:
+     * original edge `e` takes no part in the flow — no forces, no collisions, invisible to
+     * every probe. `node[i] = 1`: the node is placed by the caller and the flow leaves it alone.
+     */
+    ghost?: { edge: Uint8Array; node: Uint8Array };
+    /**
+     * Pairs of original edges that are allowed to cross, and how many times: key
+     * `min·E + max` (E = number of original edges; see `passKey`) → the number of crossings
+     * the pair may have. Such a pair is not held apart by the motion limits, so a drawing
+     * that has crossings can still flow; instead the step UNDOES the move of both edges
+     * whenever it would give them more crossings than allowed, and lowers the allowance when
+     * they have fewer. Every other pair keeps the no-crossing guarantee. So crossings can
+     * disappear and never appear.
+     * Two simpler rules were tried and measured: (1) the pair exempt from everything — the
+     * two edges wove through each other, 3 crossings became 7; (2) the exemption per pair of
+     * SEGMENTS — a crossing was then locked between two nodes of each edge, slid up to one of
+     * them and jammed there (gap 1e-16), because a node only looks sideways from its own
+     * strand and a strand that crosses it comes at it lengthways.
+     */
+    passPairs?: Map<number, number>;
+}
+
+/** Key of the unordered pair of original edges `(e, f)` in `MedialGraph.passPairs`. */
+export function passKey(g: MedialGraph, e: number, f: number): number {
+    return Math.min(e, f) * g.edgeA.length + Math.max(e, f);
+}
+
+/**
+ * How many times original edges `e` and `f` cross right now (pairs of their segments that
+ * share no node and intersect). Why exported: the group move counts with the same rule the
+ * step enforces.
+ */
+export function crossingsBetween(g: MedialGraph, e: number, f: number): number {
+    const { x, segs, pieces } = g;
+    let c = 0;
+    for (let p = 0; p < pieces; p++)
+        for (let q = e === f ? p + 1 : 0; q < pieces; q++) {
+            const k1 = e * pieces + p;
+            const k2 = f * pieces + q;
+            const a1 = segs.a[k1];
+            const b1 = segs.b[k1];
+            const a2 = segs.a[k2];
+            const b2 = segs.b[k2];
+            if (a1 === a2 || a1 === b2 || b1 === a2 || b1 === b2) continue;
+            if (planarSegmentDistance(x, a1, b1, a2, b2) <= 0) c++;
+        }
+    return c;
 }
 
 /** Build the flow's graph: every edge cut into `pieces` segments, rest lengths as drawn. */
@@ -130,6 +178,17 @@ export interface MedialGraphOptions {
     lambda?: number;
     /** Step length before the per-node limits. Default 1 (a quasi-Newton step). */
     tau?: number;
+    /** Undo the move of two edges that are allowed to cross when it would give them more
+     *  crossings than allowed (see `MedialGraph.passPairs`). Default true; false exists so a
+     *  test can show that this check, and nothing else, is what holds the count. */
+    holdCrossings?: boolean;
+    /** Give the segment that a node pushes off the opposite push (see the step).
+     *  `'long'` (default): only where the segment, or the probing node's own segment, is a
+     *  long one (over 3× the typical length) — the contacts that need it. `'all'`: every
+     *  contact; measured to halve the opening speed of a finely divided grid (18×18 at 8
+     *  points per edge: clearance 0.28 after 600 steps against 0.68), so not the default.
+     *  `'none'`: the node-only pull of the paper, kept for comparison. */
+    reaction?: 'long' | 'all' | 'none';
     /** The drag: node index → (x, y) it is being pulled to. Such a node is NOT held; it gets a
      *  spring to its target (`pinStiffness`, force capped at `pinForceMax`) and otherwise
      *  takes part in the flow like any other — so the contact barrier acts on it too.
@@ -233,12 +292,20 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const tension = opts.tension ?? 0.5;
     const barrier = opts.barrier ?? 1;
     const bend = opts.bend ?? 1;
+    const reaction = opts.reaction ?? 'long';
     const tanHalfMin = Math.tan(((opts.minAngleDeg ?? 30) * Math.PI) / 360);
     const beta = opts.beta ?? 0.01;
     const lambda = opts.lambda ?? 0.02;
     const tau = opts.tau ?? 1;
     // The paper's empirical thickness–weight relation (its reference code: r ≈ 3.36/√α).
     const alpha = (3.36 / r) ** 2;
+    // Carried group and allowed crossings (both usually absent). `fixed` = not moved by the flow.
+    const ghostEdge = g.ghost?.edge;
+    const pass = g.passPairs && g.passPairs.size > 0 ? g.passPairs : undefined;
+    const nEdges = g.edgeA.length;
+    const fixed = g.ghost
+        ? pinned.map((v, i) => v | (g.ghost as { node: Uint8Array }).node[i])
+        : pinned;
 
     const len = new Float64Array(m);
     const w = new Float64Array(n);
@@ -252,8 +319,35 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
 
     // --- the pull: one circle per angular sector of every node --------------------------------
     const G = new Float64Array(3 * n);
+    // LONG segments (over 3× the typical length) are kept out of the grid search and tested
+    // against every node instead. Why: the search radius has to cover the longest segment it
+    // serves, and one edge drawn across the whole map (a moved group's link) would make every
+    // node search the whole drawing — measured 3.4× slower per step on a 12×12 grid with four
+    // such edges. With no long segment this is exactly the old search. "Typical" = the mean
+    // of the segments not over twice the plain mean, so a few long ones do not hide themselves.
+    let meanAll = 0;
+    for (let k = 0; k < m; k++) meanAll += len[k] / m;
+    let typical = 0;
+    let nTypical = 0;
+    for (let k = 0; k < m; k++)
+        if (len[k] <= 2 * meanAll) {
+            typical += len[k];
+            nTypical++;
+        }
+    typical /= nTypical || 1;
+    const longSegs: number[] = [];
     let maxSeg = 0;
-    for (let k = 0; k < m; k++) maxSeg = Math.max(maxSeg, len[k]);
+    for (let k = 0; k < m; k++)
+        if (len[k] > 3 * typical) longSegs.push(k);
+        else maxSeg = Math.max(maxSeg, len[k]);
+    const isLong = longSegs.length > 0 ? new Uint8Array(m) : undefined;
+    for (const k of longSegs) (isLong as Uint8Array)[k] = 1;
+    // Nodes at the ends of a long segment: their contacts get the reaction force (see there).
+    const onLong = longSegs.length > 0 ? new Uint8Array(n) : undefined;
+    for (const k of longSegs) {
+        (onLong as Uint8Array)[segs.a[k]] = 1;
+        (onLong as Uint8Array)[segs.b[k]] = 1;
+    }
     const segReach = 2 * rMax + maxSeg;
     const grid = makeGrid(x, n, segReach);
     const reach2 = (2 * rMax) ** 2;
@@ -262,6 +356,10 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const dirY = new Float64Array(maxDir);
     const rad = new Float64Array(maxDir);
     const hit = new Int32Array(maxDir);
+    const hitSeg = new Int32Array(maxDir);
+    const hitAt = new Float64Array(maxDir);
+    // Reaction of long segments (see below): force and stiffness handed to their end nodes.
+    const reactDiag = new Float64Array(n);
     const angles: number[] = [];
     const linkA: number[] = [];
     const linkB: number[] = [];
@@ -282,6 +380,8 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         const yi = x[3 * i + 1];
         let nd = 0;
         if (deg === 0) continue;
+        // A point of a carried edge neither pushes nor is pushed.
+        if (ghostEdge && t.own[i] >= 0 && ghostEdge[t.own[i]]) continue;
         angles.length = 0;
         for (let q = t.nbrStart[i]; q < t.nbrStart[i + 1]; q++) {
             const j = t.nbr[q];
@@ -314,8 +414,12 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         // Every segment that starts at a node within reach: its first endpoint is at most
         // 2·rMax + (its own length) from anything it can affect.
         grid.forNear(i, segReach, (j0) => {
-            for (let q = t.segStart[j0]; q < t.segStart[j0 + 1]; q++) testSegment(t.segByFirst[q]);
+            for (let q = t.segStart[j0]; q < t.segStart[j0 + 1]; q++) {
+                const k = t.segByFirst[q];
+                if (!isLong?.[k]) testSegment(k);
+            }
         });
+        for (const k of longSegs) testSegment(k);
         // forNear skips the node itself: segments starting AT node i contain it and are
         // skipped by the rule below anyway.
         function testSegment(k: number): void {
@@ -323,6 +427,14 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             const sb = segs.b[k];
             if (sa === i || sb === i) return;
             const e = Math.floor(k / g.pieces);
+            if (ghostEdge?.[e]) return;
+            // Two edges that are allowed to cross do not push each other's points away: a point
+            // of one ignores the other. Why: with the push, the two points either side of every
+            // crossing backed off to a full clearance from the other edge — an edge crossed
+            // ten times became a band of zigzags. (A junction is not a point of ONE edge and
+            // still sees everything: it has to stay off the edges its own edges cross.)
+            if (pass && ownI >= 0 && pass.has(Math.min(ownI, e) * nEdges + Math.max(ownI, e)))
+                return;
             const pos = (k % g.pieces) + 0.5; // the segment's place along its edge, in hops
             // Which rule applies (see the two measured failures each sits between):
             //  - a segment of the node's own edge (for a junction: of one of its edges): the
@@ -405,6 +517,8 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                 if (R < rad[l]) {
                     rad[l] = R;
                     hit[l] = bestS < 0.5 ? sa : sb;
+                    hitSeg[l] = k;
+                    hitAt[l] = bestS;
                 }
             }
         }
@@ -430,7 +544,39 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             px += gain * (rad[l] - rMax) * dirX[l];
             py += gain * (rad[l] - rMax) * dirY[l];
             // Its stiffness, relative to the plain pull's: −d/dR of gain·(rMax − R).
-            if (hit[l] >= 0) stiffSum += gain * (1 + (barrier * (rMax - Rl)) / Rl);
+            const stiffL = hit[l] >= 0 ? gain * (1 + (barrier * (rMax - Rl)) / Rl) : 0;
+            stiffSum += stiffL;
+            // REACTION: the segment that cut the circle short gets the opposite push, shared
+            // between its two ends by where the contact is. Why: the pull acts on the node
+            // that probes, and a node that meets the INSIDE of a segment is felt by nobody on
+            // the other side — the segment's ends see a point a good way off, keep moving as
+            // the rest of the drawing drives them, and are only held back by their motion
+            // limit, 0.45 of the gap per step: the gap closed geometrically to a rounding
+            // error. Measured twice after a group was set down: its long link against a side
+            // of the group (5e-2 → 2e-16 in 200 steps), and the link's middle point against
+            // an ordinary edge of the grid (1e-7 → 2e-16). With the reaction every node of a
+            // contact feels it, and the push is a pair of equal and opposite forces.
+            // Only contacts with a long segment on either side by default: between ordinary
+            // segments both sides probe each other anyway, and doubling the push there slowed
+            // a finely divided grid to half its speed (see `reaction` in the options).
+            if (
+                hit[l] >= 0 &&
+                (reaction === 'all' ||
+                    (reaction === 'long' && (isLong?.[hitSeg[l]] || onLong?.[i])))
+            ) {
+                const sa = segs.a[hitSeg[l]];
+                const sb = segs.b[hitSeg[l]];
+                const f = (alpha * w[i] * gain * (rad[l] - rMax)) / nd;
+                const kk = (alpha * w[i] * stiffL) / nd;
+                const wb = hitAt[l];
+                const wa = 1 - wb;
+                G[3 * sa] += wa * f * dirX[l];
+                G[3 * sa + 1] += wa * f * dirY[l];
+                G[3 * sb] += wb * f * dirX[l];
+                G[3 * sb + 1] += wb * f * dirY[l];
+                reactDiag[sa] += wa * kk;
+                reactDiag[sb] += wb * kk;
+            }
             minRadius = Math.min(minRadius, rad[l]);
             const j = hit[l];
             if (j >= 0) {
@@ -454,6 +600,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     // --- springs and tension: E = Σ ks (len − L)² / (2L) + tension · len ----------------------------------------------------
     const stiff = new Float64Array(m);
     for (let k = 0; k < m; k++) {
+        if (ghostEdge?.[Math.floor(k / g.pieces)]) continue; // a carried edge pulls on nobody
         const a = segs.a[k];
         const b = segs.b[k];
         const L = rest[k] || 1e-300;
@@ -486,6 +633,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                   : g.nodeCount + e * (g.pieces - 1) + q - 1;
         for (let e = 0; e < g.edgeA.length; e++)
             for (let q = 1; q < g.pieces; q++) {
+                if (ghostEdge?.[e]) break;
                 const a = nodeAt(e, q - 1);
                 const b = nodeAt(e, q + 1);
                 const L = rest[e * g.pieces + q - 1] + rest[e * g.pieces + q] || 1e-300;
@@ -508,7 +656,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         const kp = (opts.pinStiffness ?? 4) / r;
         const fMax = opts.pinForceMax ?? 6;
         for (const [i, target] of opts.pinTargets) {
-            if (i >= n || pinned[i]) continue;
+            if (i >= n || fixed[i]) continue;
             const dx = x[3 * i] - target[0];
             const dy = x[3 * i + 1] - target[1];
             const dist = Math.hypot(dx, dy);
@@ -520,7 +668,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         }
     }
     for (let i = 0; i < n; i++)
-        if (pinned[i]) {
+        if (fixed[i]) {
             G[3 * i] = 0;
             G[3 * i + 1] = 0;
         }
@@ -536,7 +684,8 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     // Laplacian, nodes in contact their full stiffness.
     // Tried and worse: the same stiffness as LINKS instead of a diagonal (free for two
     // strands moving together) — strands ended pressed to zero clearance.
-    for (let i = 0; i < n; i++) diag[i] = (lambda + contact[i]) * alpha * w[i] + dragDiag[i];
+    for (let i = 0; i < n; i++)
+        diag[i] = (lambda + contact[i]) * alpha * w[i] + dragDiag[i] + reactDiag[i];
     for (let k = 0; k < m; k++) {
         diag[segs.a[k]] += stiff[k];
         diag[segs.b[k]] += stiff[k];
@@ -560,7 +709,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             out[b] -= linkW[k] * v[a];
         }
         // A pinned node's unknown is fixed at 0: identity row (its v stays 0 throughout).
-        for (let i = 0; i < n; i++) if (pinned[i]) out[i] = v[i];
+        for (let i = 0; i < n; i++) if (fixed[i]) out[i] = v[i];
     };
     const d = new Float64Array(3 * n);
     const rhs = new Float64Array(n);
@@ -569,14 +718,34 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     for (let c = 0; c < 2; c++) {
         for (let i = 0; i < n; i++) rhs[i] = G[3 * i + c];
         cgIterations = Math.max(cgIterations, jacobiCg(applyP, diag, rhs, sol));
-        for (let i = 0; i < n; i++) d[3 * i + c] = pinned[i] ? 0 : sol[i];
+        for (let i = 0; i < n; i++) d[3 * i + c] = fixed[i] ? 0 : sol[i];
     }
 
     // --- move, each node within its own crossing-free limit ------------------------------------
     // Not one global step: see `nodeMotionCaps` for why (a single tight spot froze the graph).
-    const caps = nodeMotionCaps(x, n, segs, 2 * rMax);
+    // Pairs that may cross (a carried edge with anything; two edges allowed to cross) limit
+    // nobody; every other pair keeps the guarantee.
+    const pieces = g.pieces;
+    const skip =
+        ghostEdge || pass
+            ? (k1: number, k2: number): boolean => {
+                  const e1 = Math.floor(k1 / pieces);
+                  const e2 = Math.floor(k2 / pieces);
+                  if (ghostEdge && (ghostEdge[e1] || ghostEdge[e2])) return true;
+                  return !!pass && pass.has(Math.min(e1, e2) * nEdges + Math.max(e1, e2));
+              }
+            : undefined;
+    const close = {
+        below: 0.02 * r,
+        rel: 0.02,
+        k1: [] as number[],
+        k2: [] as number[],
+        d: [] as number[],
+    };
+    const caps = nodeMotionCaps(x, n, segs, 2 * rMax, 0.45, skip, close);
     let move = 0;
     let capped = 0;
+    const xOld = pass || close.d.length > 0 ? Float64Array.from(x) : undefined;
     for (let i = 0; i < n; i++) {
         const dx = tau * d[3 * i];
         const dy = tau * d[3 * i + 1];
@@ -589,6 +758,78 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         x[3 * i] -= sc * dx;
         x[3 * i + 1] -= sc * dy;
         move += sc * dl;
+    }
+    // --- a floor under every gap --------------------------------------------------------------
+    // A pair of segments already nearer than 0.02·r, and nearer than 0.02 of the shorter of
+    // the two (so that the ordinary gaps next to a junction of a finely divided drawing do
+    // not count: see `nodeMotionCaps`), may not get nearer: where the move would do that, the
+    // pair's four nodes stay where they were. Why: the motion limit lets a gap
+    // shrink by up to 90% a step, so anything that keeps pressing closes it geometrically —
+    // to a rounding error, where the sign of an orientation test flips and a "crossing"
+    // appears that nothing moved through. Forces were added for each case found (barrier,
+    // reaction, bending), but a real mind map has hubs with 200 children drawn as a fan of
+    // edges a hundredth of a clearance apart, and there the forces cannot all be satisfied
+    // (measured: 1,237-node map, a gap went 4e-3 → 6e-15 in 60 steps, then 44 "crossings").
+    // With the floor no gap that starts above that threshold can fall below a tenth of it.
+    // Holding nodes back is always safe: a node that moves less stays within its limit.
+    // --- edges allowed to cross: no more crossings than allowed ---------------------------------
+    // The motion limits do not hold these pairs apart, so the count is checked after the move
+    // and the move of BOTH edges undone where it went up (see `MedialGraph.passPairs`).
+    // One undo can change another pair that shares a node with it, hence the loop; a pair
+    // whose nodes are all back where they were is as it was, so the loop ends.
+    if (xOld) {
+        const held = new Uint8Array(n);
+        const hold = (i: number): void => {
+            x[3 * i] = xOld[3 * i];
+            x[3 * i + 1] = xOld[3 * i + 1];
+            held[i] = 1;
+        };
+        const undo = (e: number): void => {
+            for (let q = 0; q <= pieces; q++)
+                hold(
+                    q === 0
+                        ? g.edgeA[e]
+                        : q === pieces
+                          ? g.edgeB[e]
+                          : g.nodeCount + e * (pieces - 1) + q - 1,
+                );
+        };
+        const holdCrossings = pass !== undefined && (opts.holdCrossings ?? true);
+        // An edge is undone at most once: a count that is still too high after both edges are
+        // back where they were was not raised by this step, and undoing again changes nothing.
+        const undone = pass ? new Uint8Array(nEdges) : undefined;
+        for (let again = true; again; ) {
+            again = false;
+            for (let q = 0; q < close.d.length; q++) {
+                const a1 = segs.a[close.k1[q]];
+                const b1 = segs.b[close.k1[q]];
+                const a2 = segs.a[close.k2[q]];
+                const b2 = segs.b[close.k2[q]];
+                if (held[a1] && held[b1] && held[a2] && held[b2]) continue;
+                if (planarSegmentDistance(x, a1, b1, a2, b2) >= close.d[q]) continue;
+                hold(a1);
+                hold(b1);
+                hold(a2);
+                hold(b2);
+                again = true;
+            }
+            if (pass && undone && holdCrossings)
+                for (const [key, allowed] of pass) {
+                    const e = Math.floor(key / nEdges);
+                    const f = key % nEdges;
+                    if ((undone[e] && undone[f]) || crossingsBetween(g, e, f) <= allowed) continue;
+                    undo(e);
+                    undo(f);
+                    undone[e] = 1;
+                    undone[f] = 1;
+                    again = true;
+                }
+        }
+        if (pass && holdCrossings)
+            for (const [key, allowed] of pass) {
+                const c = crossingsBetween(g, Math.floor(key / nEdges), key % nEdges);
+                if (c < allowed) pass.set(key, c);
+            }
     }
     return {
         cappedNodes: capped,
@@ -656,7 +897,8 @@ function jacobiCg(
  * Smallest distance between two segments of NON-INCIDENT original edges (exact,
  * grid-accelerated), or `searchWithin` if none is nearer. Why not all pairs: segments of one
  * edge are a segment-length apart by construction, and two edges that meet at a junction come
- * arbitrarily close near it — neither says anything about the drawing's clearance.
+ * arbitrarily close near it — neither says anything about the drawing's clearance. Pairs
+ * that are allowed to cross (`passPairs`) are left out for the same reason.
  */
 export function minClearance(g: MedialGraph, searchWithin: number): number {
     const incident = (e: number, f: number): boolean =>
@@ -666,44 +908,22 @@ export function minClearance(g: MedialGraph, searchWithin: number): number {
         g.edgeB[e] === g.edgeA[f] ||
         g.edgeB[e] === g.edgeB[f];
     const { n, x, segs } = g;
-    const m = segs.a.length;
-    let maxEdge = 0;
-    for (let k = 0; k < m; k++)
-        maxEdge = Math.max(
-            maxEdge,
-            Math.hypot(
-                x[3 * segs.b[k]] - x[3 * segs.a[k]],
-                x[3 * segs.b[k] + 1] - x[3 * segs.a[k] + 1],
-            ),
-        );
-    const reach = searchWithin + 2 * maxEdge;
-    const grid = makeGrid(x, n, reach);
-    const start = new Int32Array(n + 1);
-    for (let k = 0; k < m; k++) start[segs.a[k] + 1]++;
-    for (let i = 0; i < n; i++) start[i + 1] += start[i];
-    const fill = Int32Array.from(start.subarray(0, n));
-    const byFirst = new Int32Array(m);
-    for (let k = 0; k < m; k++) byFirst[fill[segs.a[k]]++] = k;
     let best = searchWithin;
-    for (let e = 0; e < m; e++) {
-        const a1 = segs.a[e];
-        const b1 = segs.b[e];
-        grid.forNear(a1, reach, (j) => {
-            for (let q = start[j]; q < start[j + 1]; q++) {
-                const f = byFirst[q];
-                if (f <= e) continue;
-                const a2 = segs.a[f];
-                const b2 = segs.b[f];
-                if (incident(Math.floor(e / g.pieces), Math.floor(f / g.pieces))) continue;
-                best = Math.min(best, planarSegmentDistance(x, a1, b1, a2, b2));
-            }
-        });
-    }
+    forNearSegmentPairs(x, n, segs, searchWithin, (e, f) => {
+        const e1 = Math.floor(e / g.pieces);
+        const e2 = Math.floor(f / g.pieces);
+        if (incident(e1, e2)) return;
+        if (g.passPairs?.has(passKey(g, e1, e2))) return;
+        best = Math.min(best, planarSegmentDistance(x, segs.a[e], segs.b[e], segs.a[f], segs.b[f]));
+    });
     return best;
 }
 
-/** Distance between two segments in the plane: 0 if they cross, else the least endpoint–segment distance. */
-function planarSegmentDistance(
+/**
+ * Distance between two segments in the plane: 0 if they cross, else the least
+ * endpoint–segment distance. Why exported: the group move decides which edge pairs cross.
+ */
+export function planarSegmentDistance(
     x: Float64Array,
     a: number,
     b: number,

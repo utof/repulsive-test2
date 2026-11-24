@@ -42,6 +42,8 @@ export function ControlPanel() {
     const sobolevSolver = useSimStore((s) => s.sobolevSolver);
     const forcePrePass = useSimStore((s) => s.forcePrePass);
     const graphFlow = useSimStore((s) => s.graphFlow);
+    const graphFlowMoveThrough = useSimStore((s) => s.graphFlowMoveThrough);
+    const setGraphFlowMoveThrough = useSimStore((s) => s.setGraphFlowMoveThrough);
     const setGraphFlow = useSimStore((s) => s.setGraphFlow);
     const graphFlowClearance = useSimStore((s) => s.graphFlowClearance);
     const setGraphFlowClearance = useSimStore((s) => s.setGraphFlowClearance);
@@ -364,6 +366,26 @@ export function ControlPanel() {
                         onChange={(e) => setGraphFlow(e.target.checked)}
                     />
                     <span>Graph flow (flat graphs; drag a pinned node)</span>
+                </label>
+                {/* Move-through: a drag carries ALL pinned nodes over the drawing and sets them
+                    down on release; without it a drag pulls one node and nothing can cross.
+                    @see src/core/medialGraphMove.ts */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        cursor: 'pointer',
+                        opacity: graphFlow ? 1 : 0.4,
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={graphFlowMoveThrough}
+                        disabled={!graphFlow}
+                        onChange={(e) => setGraphFlowMoveThrough(e.target.checked)}
+                    />
+                    <span>Move through (carry the pinned group; its links may cross)</span>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ opacity: graphFlow ? 1 : 0.4 }}>Clearance (× edge length):</span>

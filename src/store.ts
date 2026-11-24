@@ -15,6 +15,17 @@ import {
     writeForceLayout,
 } from './core/forceLayout';
 import {
+    allowedCrossingsNow,
+    beginGroupMove,
+    crossingPairs,
+    dropGroupMove,
+    type GroupGrowth,
+    type GroupMove,
+    growGroup,
+    prunePassPairs,
+    setGroupOffset,
+} from './core/medialGraphMove';
+import {
     type MedialGraph,
     medialGraphFromSubdivided,
     medialGraphStep,
@@ -92,7 +103,18 @@ export type UntangleInfo =
  * of the clearance r — the flow's own convergence measure.
  */
 export type GraphFlowInfo =
-    | { phase: 'running'; movePerNode: number; cappedNodes: number; msPerStep: number }
+    | {
+          phase: 'running';
+          movePerNode: number;
+          cappedNodes: number;
+          msPerStep: number;
+          /** Crossings the drawing has (they can go away, none can appear). */
+          crossings: number;
+          /** Scale of a set-down group that is still growing back, or null. */
+          growing: number | null;
+          /** True while a group is being carried over the drawing. */
+          carrying: boolean;
+      }
     | { phase: 'skipped'; reason: string };
 
 const STORAGE_KEY = 'repulsive-test-config';
@@ -359,7 +381,26 @@ export interface SimStore {
     // @see docs/plans/2026-11-24-medial-sphere-method.md
     graphFlow: boolean;
     graphFlowClearance: number;
-    graphFlowRun: { g: MedialGraph; r: number } | null;
+    // MOVE-THROUGH (`graphFlowMoveThrough`, default off): a drag then CARRIES the pinned nodes
+    // (all enabled pins move together with the dragged one) over the drawing instead of
+    // pulling one node through it, and sets them down where the pointer is released — the
+    // only way to get a group into another region, since the flow keeps the embedding. The
+    // crossings the group's links then make are allowed, all others stay impossible.
+    // `pinDrag` is the node under the pointer between `beginPinDrag` and `endPinDrag`;
+    // `graphFlowRun.move` is the group in the air and `moveBase` where the dragged node was
+    // picked up; `growth` is a group that was set down smaller than it is (so that it fits
+    // between what is already there) and grows back as the rest makes room. A run with a
+    // growing group survives a pause — dropping it would leave the group small for good.
+    // @see src/core/medialGraphMove.ts
+    graphFlowMoveThrough: boolean;
+    pinDrag: number | null;
+    graphFlowRun: {
+        g: MedialGraph;
+        r: number;
+        move: GroupMove | null;
+        moveBase: [number, number];
+        growth: GroupGrowth | null;
+    } | null;
     graphFlowSkipped: boolean;
     graphFlowInfo: GraphFlowInfo | null;
     // stats (React-subscribed, throttled by the writer)
@@ -402,6 +443,11 @@ export interface SimStore {
     // loop instead of a descent step: at most `maxSteps` flow steps or `budgetMs` milliseconds.
     setGraphFlow(b: boolean): void;
     setGraphFlowClearance(v: number): void;
+    setGraphFlowMoveThrough(b: boolean): void;
+    // Called by the scene when a drag of pinned node `i` starts and when it ends (pointer
+    // released or lost). Ending a drag sets a carried group down.
+    beginPinDrag(i: number): void;
+    endPinDrag(): void;
     tickGraphFlow(maxSteps?: number, budgetMs?: number): void;
     tickUntangle(maxSteps?: number, budgetMs?: number): void;
     // Pin actions (briefing §5B). addPin snapshots the vertex's CURRENT live
@@ -475,6 +521,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
             graphFlowRun: null,
             graphFlowSkipped: false,
             graphFlowInfo: null,
+            pinDrag: null,
             // Preset/config change = a run (re)start boundary → re-anchor the
             // frozen targets x₀, L⁰, ℓ⁰ (see the frozen-targets lifecycle anchor above).
             sobolevX0: barycenterTarget(b.graph.vertices, b.graph.edges),
@@ -586,6 +633,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
         untangleInfo: null,
         graphFlow: false,
         graphFlowClearance: 0.4,
+        graphFlowMoveThrough: false,
+        pinDrag: null,
         graphFlowRun: null,
         graphFlowSkipped: false,
         graphFlowInfo: null,
@@ -754,6 +803,34 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 graphFlowRun: null,
                 graphFlowSkipped: false,
             }),
+        setGraphFlowMoveThrough: (b) => {
+            if (!b) get().endPinDrag(); // a group in the air is set down first
+            set({ graphFlowMoveThrough: b });
+        },
+        beginPinDrag: (i) => set({ pinDrag: i }),
+        endPinDrag: () => {
+            const s = get();
+            const run = s.graphFlowRun;
+            if (!run?.move) {
+                set({ pinDrag: null });
+                return;
+            }
+            // Set the group down where it is. Its pins now aim at the full-size positions,
+            // which is where it will be once it has grown back.
+            const drop = dropGroupMove(run.g, run.move, { r: run.r });
+            for (let i = 0; i < run.g.n; i++) {
+                s.live[i][0] = run.g.x[3 * i];
+                s.live[i][1] = run.g.x[3 * i + 1];
+            }
+            set({
+                pinDrag: null,
+                graphFlowRun: { ...run, move: null, growth: drop.growth },
+                pins: s.pins.map((p) => {
+                    const t = drop.targets.get(p.vertexIndex);
+                    return t ? { ...p, target: [t[0], t[1], 0] as Vec3 } : p;
+                }),
+            });
+        },
         tickGraphFlow: (maxSteps = 4, budgetMs = 12) => {
             const s = get();
             let run = s.graphFlowRun;
@@ -782,9 +859,42 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 let mean = 0;
                 for (let k = 0; k < g.rest.length; k++) mean += g.rest[k];
                 // r = clearance × mean length of an ORIGINAL edge (its segments' rest lengths added).
-                run = { g, r: (s.graphFlowClearance * mean * pieces) / g.rest.length };
+                const r = (s.graphFlowClearance * mean * pieces) / g.rest.length;
+                // A drawing that already has crossings can flow: the pairs that cross now are
+                // allowed to (they would otherwise freeze each other), no new one can appear.
+                g.passPairs = crossingPairs(g, 1e-9 * r);
+                run = { g, r, move: null, moveBase: [0, 0], growth: null };
             }
             const { g, r } = run;
+            // Move-through: a drag picks up every pinned ORIGINAL node (the dragged one among
+            // them) and carries the group to where the dragged pin's target is.
+            const dragPin =
+                s.graphFlowMoveThrough && s.pinDrag !== null && s.pinDrag < g.nodeCount
+                    ? s.pins.find((p) => p.enabled && p.vertexIndex === s.pinDrag)
+                    : undefined;
+            // Not on a mere click: only once the pointer has left the node by a quarter of the
+            // clearance (a set-down straightens the group's links and re-measures them).
+            const pulledAway =
+                dragPin !== undefined &&
+                Math.hypot(
+                    dragPin.target[0] - g.x[3 * dragPin.vertexIndex],
+                    dragPin.target[1] - g.x[3 * dragPin.vertexIndex + 1],
+                ) >
+                    0.25 * r;
+            if (dragPin && !run.move && pulledAway) {
+                const group = s.pins
+                    .filter((p) => p.enabled && p.vertexIndex < g.nodeCount)
+                    .map((p) => p.vertexIndex);
+                run.moveBase = [g.x[3 * dragPin.vertexIndex], g.x[3 * dragPin.vertexIndex + 1]];
+                run.move = beginGroupMove(g, group);
+            }
+            if (run.move && dragPin)
+                setGroupOffset(
+                    g,
+                    run.move,
+                    dragPin.target[0] - run.moveBase[0],
+                    dragPin.target[1] - run.moveBase[1],
+                );
             // Pins: an enabled pin whose target is where its node already is HOLDS the node;
             // one whose target is elsewhere (the user is dragging it, or dropped it where the
             // node has not arrived yet) pulls the node there with a bounded spring.
@@ -793,6 +903,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
             for (const pin of s.pins) {
                 if (!pin.enabled || pin.vertexIndex >= g.n) continue;
                 const v = pin.vertexIndex;
+                if (g.ghost?.node[v]) continue; // carried: placed above, not pulled
                 const away = Math.hypot(g.x[3 * v] - pin.target[0], g.x[3 * v + 1] - pin.target[1]);
                 if (away <= 1e-9 * r) g.pinned[v] = 1;
                 else targets.set(v, [pin.target[0], pin.target[1]]);
@@ -801,16 +912,46 @@ export const useSimStore = create<SimStore>()((set, get) => {
             let steps = 0;
             let move = 0;
             let capped = 0;
+            let grown: GroupGrowth | null = null;
             for (let k = 0; k < maxSteps; k++) {
+                // A set-down group takes the room the last step gave it.
+                if (run.growth && growGroup(g, run.growth, r) >= 1) {
+                    grown = run.growth;
+                    run.growth = null;
+                    // Released at full size: held from this very step by its pins.
+                    const at = new Set(grown.points);
+                    for (const pin of s.pins)
+                        if (pin.enabled && at.has(pin.vertexIndex)) g.pinned[pin.vertexIndex] = 1;
+                }
                 const res = medialGraphStep(g, { r, pinTargets: targets });
                 steps++;
                 move = res.movePerNode;
                 capped = res.cappedNodes;
                 if (performance.now() - t0 > budgetMs) break;
             }
+            // Pairs that have come apart are guarded again: that crossing is gone for good.
+            prunePassPairs(g, 0.05 * r);
             for (let i = 0; i < g.n; i++) {
                 s.live[i][0] = g.x[3 * i];
                 s.live[i][1] = g.x[3 * i + 1];
+            }
+            // Back at full size: its pins hold it exactly where it now is.
+            if (grown) {
+                const at = new Set(grown.points);
+                set({
+                    pins: get().pins.map((p) =>
+                        at.has(p.vertexIndex)
+                            ? {
+                                  ...p,
+                                  target: [
+                                      g.x[3 * p.vertexIndex],
+                                      g.x[3 * p.vertexIndex + 1],
+                                      0,
+                                  ] as Vec3,
+                              }
+                            : p,
+                    ),
+                });
             }
             set({
                 graphFlowRun: run,
@@ -820,6 +961,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     movePerNode: move,
                     cappedNodes: capped,
                     msPerStep: (performance.now() - t0) / steps,
+                    crossings: allowedCrossingsNow(g),
+                    growing: run.growth ? run.growth.scale : null,
+                    carrying: run.move !== null,
                 },
             });
         },
@@ -995,6 +1139,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
             // Commit-on-pause: fold the live buffer back into graph.vertices so paused
             // consumers (GradientArrows) read current positions, and recompute energy.
             // @see spec §4.1 (store.commit) / §6 (stale-arrow fix)
+            // A group in the air is set down first, so what is committed is a real drawing.
+            if (get().graphFlowRun?.move) get().endPinDrag();
             const s = get();
             // A pause during the untangle pass ends it properly first (audited result or the
             // input back in `live`); everything below then reads that geometry.
@@ -1003,8 +1149,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 ...untanglePatch,
                 running: false,
                 // The graph flow keeps no state across a pause: the next run starts from the
-                // committed geometry, with rest lengths taken from it.
-                graphFlowRun: null,
+                // committed geometry, with rest lengths taken from it. Exception: a group that
+                // is still growing back (its full size is known only to the run).
+                graphFlowRun: get().graphFlowRun?.growth ? get().graphFlowRun : null,
                 graphFlowSkipped: false,
                 // A pause during the pre-pass abandons it; the next play starts a new one
                 // from wherever the nodes are now (`prePassDone` stays false).

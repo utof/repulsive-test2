@@ -584,6 +584,15 @@ export function maxSafeStep(
  * pair. On a graph, a tight spot near one junction shrank the step of EVERY node geometrically
  * to zero (measured: 0.4 → 1e-14 in 50 steps on an 8×8 grid). A per-node limit lets a tight
  * spot slow down only its own nodes.
+ * `skip(k1, k2)` (optional) exempts a pair of segments: it then limits nobody. Used for pairs
+ * that are ALLOWED to cross (a drawing that already has crossings, or a group being carried
+ * over the drawing); every other pair keeps its guarantee, since the argument is per pair.
+ * `close` (optional) collects the pairs nearer than `close.below` AND nearer than `close.rel`
+ * times the shorter of their two segments, with their distances, for a caller that wants to
+ * keep such pairs from closing further (see `medialGraphStep`). Why the second condition: on
+ * a finely divided drawing two edges of one junction lie a fraction of a (short) segment
+ * apart by construction; treating those as dangerously close jammed the 18x18 grid at 8
+ * points per edge (clearance stuck at 0.20 where it reaches 0.68).
  * @see docs/plans/2026-11-24-medial-sphere-method.md
  */
 export function nodeMotionCaps(
@@ -592,22 +601,63 @@ export function nodeMotionCaps(
     segs: SegmentList,
     within: number,
     frac = 0.45,
+    skip?: (k1: number, k2: number) => boolean,
+    close?: { below: number; rel: number; k1: number[]; k2: number[]; d: number[] },
 ): Float64Array {
     const m = segs.a.length;
     const cap = new Float64Array(nNodes).fill(frac * within);
-    let maxEdge = 0;
+    const len = new Float64Array(m);
+    let mean = 0;
     for (let k = 0; k < m; k++) {
         const a = segs.a[k];
         const b = segs.b[k];
-        maxEdge = Math.max(
-            maxEdge,
-            Math.hypot(
-                x[3 * b] - x[3 * a],
-                x[3 * b + 1] - x[3 * a + 1],
-                x[3 * b + 2] - x[3 * a + 2],
-            ),
+        len[k] = Math.hypot(
+            x[3 * b] - x[3 * a],
+            x[3 * b + 1] - x[3 * a + 1],
+            x[3 * b + 2] - x[3 * a + 2],
         );
+        mean += len[k] / m;
     }
+    // LONG segments (over 3× the typical length) are paired with every segment directly
+    // instead of through the grid: the grid's reach must cover the longest segment it serves,
+    // and one edge across the whole drawing would turn the search into all pairs. With no long
+    // segment this is the plain grid search. "Typical" = the mean of the segments not over
+    // twice the plain mean, so a few long ones do not hide themselves.
+    let typical = 0;
+    let nTypical = 0;
+    for (let k = 0; k < m; k++)
+        if (len[k] <= 2 * mean) {
+            typical += len[k];
+            nTypical++;
+        }
+    typical /= nTypical || 1;
+    const longSegs: number[] = [];
+    let maxEdge = 0;
+    for (let k = 0; k < m; k++)
+        if (len[k] > 3 * typical) longSegs.push(k);
+        else maxEdge = Math.max(maxEdge, len[k]);
+    const isLong = longSegs.length > 0 ? new Uint8Array(m) : undefined;
+    for (const k of longSegs) (isLong as Uint8Array)[k] = 1;
+    const pair = (e: number, f: number): void => {
+        const a1 = segs.a[e];
+        const b1 = segs.b[e];
+        const a2 = segs.a[f];
+        const b2 = segs.b[f];
+        if (a1 === a2 || a1 === b2 || b1 === a2 || b1 === b2) return;
+        if (skip?.(e, f)) return;
+        const D = segmentDistance(x, a1, b1, a2, b2);
+        if (D >= within) return;
+        if (close && D < close.below && D < close.rel * Math.min(len[e], len[f])) {
+            close.k1.push(e);
+            close.k2.push(f);
+            close.d.push(D);
+        }
+        const c = frac * D;
+        if (c < cap[a1]) cap[a1] = c;
+        if (c < cap[b1]) cap[b1] = c;
+        if (c < cap[a2]) cap[a2] = c;
+        if (c < cap[b2]) cap[b2] = c;
+    };
     const reach = within + 2 * maxEdge;
     const grid = makeGrid(x, nNodes, reach);
     const start = new Int32Array(nNodes + 1);
@@ -617,15 +667,13 @@ export function nodeMotionCaps(
     const byFirst = new Int32Array(m);
     for (let k = 0; k < m; k++) byFirst[fill[segs.a[k]]++] = k;
     for (let e = 0; e < m; e++) {
+        if (isLong?.[e]) continue;
         const a1 = segs.a[e];
-        const b1 = segs.b[e];
         grid.forNear(a1, reach, (j) => {
             for (let q = start[j]; q < start[j + 1]; q++) {
                 const f = byFirst[q];
-                if (f <= e) continue;
+                if (f <= e || isLong?.[f]) continue;
                 const a2 = segs.a[f];
-                const b2 = segs.b[f];
-                if (a1 === a2 || a1 === b2 || b1 === a2 || b1 === b2) continue;
                 // Cheap rejection before the exact distance.
                 if (
                     Math.hypot(
@@ -637,17 +685,122 @@ export function nodeMotionCaps(
                     within
                 )
                     continue;
-                const D = segmentDistance(x, a1, b1, a2, b2);
-                if (D >= within) continue;
-                const c = frac * D;
-                if (c < cap[a1]) cap[a1] = c;
-                if (c < cap[b1]) cap[b1] = c;
-                if (c < cap[a2]) cap[a2] = c;
-                if (c < cap[b2]) cap[b2] = c;
+                pair(e, f);
             }
         });
     }
+    // Long segments against everything (each long–long pair once). Cheap rejection: the other
+    // segment's first endpoint is farther from the long segment's midpoint than half its
+    // length + the other's length + `within`.
+    for (const e of longSegs) {
+        const a1 = segs.a[e];
+        const b1 = segs.b[e];
+        const mx = 0.5 * (x[3 * a1] + x[3 * b1]);
+        const my = 0.5 * (x[3 * a1 + 1] + x[3 * b1 + 1]);
+        const mz = 0.5 * (x[3 * a1 + 2] + x[3 * b1 + 2]);
+        for (let f = 0; f < m; f++) {
+            if (f === e || (isLong?.[f] && f < e)) continue;
+            const a2 = segs.a[f];
+            if (
+                Math.hypot(x[3 * a2] - mx, x[3 * a2 + 1] - my, x[3 * a2 + 2] - mz) >=
+                0.5 * len[e] + len[f] + within
+            )
+                continue;
+            pair(e, f);
+        }
+    }
     return cap;
+}
+
+/**
+ * Visit every pair of segments (sharing no node, each pair once) that can be within `within`
+ * of each other; the visitor does the exact test. A superset: a visited pair may be farther
+ * apart.
+ * Why one helper: three callers need the same search (clearance, crossing count, crossing
+ * pairs), and the same trap applies to all of them — the grid's reach must cover the longest
+ * segment it serves, so one edge drawn across the whole map turns the search into all pairs
+ * (a crossing count of 5,040 segments with four such edges took seconds). Segments over 3×
+ * the typical length are therefore paired with everything directly, with a cheap distance
+ * test, and kept out of the grid. Same rule as `nodeMotionCaps`.
+ */
+export function forNearSegmentPairs(
+    x: Float64Array,
+    nNodes: number,
+    segs: SegmentList,
+    within: number,
+    visit: (k1: number, k2: number) => void,
+): void {
+    const m = segs.a.length;
+    const len = new Float64Array(m);
+    let mean = 0;
+    for (let k = 0; k < m; k++) {
+        const a = segs.a[k];
+        const b = segs.b[k];
+        len[k] = Math.hypot(
+            x[3 * b] - x[3 * a],
+            x[3 * b + 1] - x[3 * a + 1],
+            x[3 * b + 2] - x[3 * a + 2],
+        );
+        mean += len[k] / m;
+    }
+    let typical = 0;
+    let nTypical = 0;
+    for (let k = 0; k < m; k++)
+        if (len[k] <= 2 * mean) {
+            typical += len[k];
+            nTypical++;
+        }
+    typical /= nTypical || 1;
+    const isLong = new Uint8Array(m);
+    const longSegs: number[] = [];
+    let maxEdge = 0;
+    for (let k = 0; k < m; k++)
+        if (len[k] > 3 * typical) {
+            isLong[k] = 1;
+            longSegs.push(k);
+        } else maxEdge = Math.max(maxEdge, len[k]);
+    const shares = (e: number, f: number): boolean =>
+        segs.a[e] === segs.a[f] ||
+        segs.a[e] === segs.b[f] ||
+        segs.b[e] === segs.a[f] ||
+        segs.b[e] === segs.b[f];
+    const reach = within + 2 * maxEdge;
+    const grid = makeGrid(x, nNodes, reach);
+    const start = new Int32Array(nNodes + 1);
+    for (let k = 0; k < m; k++) start[segs.a[k] + 1]++;
+    for (let i = 0; i < nNodes; i++) start[i + 1] += start[i];
+    const fill = Int32Array.from(start.subarray(0, nNodes));
+    const byFirst = new Int32Array(m);
+    for (let k = 0; k < m; k++) byFirst[fill[segs.a[k]]++] = k;
+    for (let e = 0; e < m; e++) {
+        if (isLong[e]) continue;
+        const a1 = segs.a[e];
+        // Segments starting at the same node share it; `forNear` leaves that node out.
+        grid.forNear(a1, reach, (j) => {
+            for (let q = start[j]; q < start[j + 1]; q++) {
+                const f = byFirst[q];
+                if (f <= e || isLong[f] || shares(e, f)) continue;
+                visit(e, f);
+            }
+        });
+    }
+    for (const e of longSegs) {
+        const a1 = segs.a[e];
+        const b1 = segs.b[e];
+        const mx = 0.5 * (x[3 * a1] + x[3 * b1]);
+        const my = 0.5 * (x[3 * a1 + 1] + x[3 * b1 + 1]);
+        const mz = 0.5 * (x[3 * a1 + 2] + x[3 * b1 + 2]);
+        for (let f = 0; f < m; f++) {
+            if (f === e || (isLong[f] && f < e) || shares(e, f)) continue;
+            const a2 = segs.a[f];
+            if (
+                Math.hypot(x[3 * a2] - mx, x[3 * a2 + 1] - my, x[3 * a2 + 2] - mz) >=
+                0.5 * len[e] + len[f] + within
+            )
+                continue;
+            visit(e, f);
+        }
+    }
 }
 
 /** Is the motion `x → x − step·d` of a closed curve provably free of strand crossings? */

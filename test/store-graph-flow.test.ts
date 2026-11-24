@@ -19,6 +19,7 @@ describe('graph flow (store)', () => {
     // The store is one module-level object shared by every test file in a run: leave it as found.
     afterAll(() => {
         st().setRunning(false);
+        st().setGraphFlowMoveThrough(false);
         st().setGraphFlow(false);
         st().setEdgeSubdivision(1);
         st().setPreset('random');
@@ -98,5 +99,99 @@ describe('graph flow (store)', () => {
         expect(st().graphFlowInfo).toEqual({ phase: 'skipped', reason: 'not a flat graph' });
         st().setRunning(false);
         expect(st().graphFlowSkipped).toBe(false); // re-evaluated by the next run
+    });
+
+    test('move-through: the pinned group is carried over the grid, set down, and crossings never grow', () => {
+        st().setEdgeSubdivision(2);
+        st().setGraphFlow(true);
+        st().setGraphFlowMoveThrough(true);
+        const blob = [0, 1, 8, 9]; // the corner square
+        for (const i of blob) st().addPin(i);
+        st().setRunning(true);
+        const base = [...st().live[0]];
+        const side = Math.hypot(st().live[1][0] - base[0], st().live[1][1] - base[1]);
+        // A click alone carries nothing.
+        st().beginPinDrag(0);
+        st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+        expect(st().graphFlowRun?.move).toBeNull();
+        // Drag node 0 to the middle of the grid: the whole square goes with it, rigidly, over
+        // everything in between.
+        st().setPinTarget(0, [base[0] + 2, base[1] + 2, 0]);
+        for (let k = 0; k < 5; k++) st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+        const info = st().graphFlowInfo;
+        expect(info?.phase === 'running' && info.carrying).toBe(true);
+        expect(st().live[0][0]).toBeCloseTo(base[0] + 2, 12);
+        expect(
+            Math.hypot(st().live[1][0] - st().live[0][0], st().live[1][1] - st().live[0][1]),
+        ).toBeCloseTo(side, 12);
+        // Release: set down smaller than it is (it lands among the grid's edges), links not yet.
+        st().endPinDrag();
+        expect(st().pinDrag).toBeNull();
+        expect(st().graphFlowRun?.move).toBeNull();
+        expect(st().graphFlowRun?.growth).not.toBeNull();
+        const info2 = () => {
+            const i = st().graphFlowInfo;
+            if (i?.phase !== 'running') throw new Error('graph flow is not running');
+            return i;
+        };
+        // (Its links are still carried — drawn, but not part of the drawing yet.)
+        st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+        expect(info2().crossings).toBe(0);
+        // It grows back as the rest makes room.
+        let ticks = 0;
+        do {
+            st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+            ticks++;
+        } while (info2().growing !== null && ticks < 400);
+        expect(info2().growing).toBeNull();
+        // Full size, exactly where it was put, held there by its pins.
+        expect(st().live[0][0]).toBeCloseTo(base[0] + 2, 9);
+        expect(
+            Math.hypot(st().live[1][0] - st().live[0][0], st().live[1][1] - st().live[0][1]),
+        ).toBeCloseTo(side, 9);
+        const pin1 = st().pins.find((p) => p.vertexIndex === 1);
+        expect(pin1?.target[0]).toBeCloseTo(st().live[1][0], 12);
+        // Its links are down now: they cross what lies between, and that is all that crosses.
+        const at = crossings();
+        expect(at).toBeGreaterThan(0);
+        expect(info2().crossings).toBe(at);
+        let worst = at;
+        for (let k = 0; k < 120; k++) {
+            st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+            worst = Math.max(worst, crossings());
+        }
+        expect(worst).toBe(at);
+        expect(st().live[0][0]).toBeCloseTo(base[0] + 2, 9); // held
+        expect(info2().carrying).toBe(false);
+        expect(st().live.every((p) => p.every(Number.isFinite))).toBe(true);
+        st().setRunning(false);
+        st().setGraphFlowMoveThrough(false);
+    });
+
+    test('pausing while a group is in the air sets it down first', () => {
+        st().setEdgeSubdivision(2);
+        st().setGraphFlow(true);
+        st().setGraphFlowMoveThrough(true);
+        st().addPin(0);
+        st().setRunning(true);
+        const base = [...st().live[0]];
+        st().beginPinDrag(0);
+        st().setPinTarget(0, [base[0] + 2, base[1] + 2, 0]);
+        st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+        expect(st().graphFlowRun?.move).not.toBeNull();
+        st().setRunning(false);
+        expect(st().pinDrag).toBeNull();
+        // Set down (a single node has no size to grow back to): nothing is in the air, the
+        // run is dropped as on any pause, and the drawing has the crossings of its two links.
+        expect(st().graphFlowRun).toBeNull();
+        const at = crossings();
+        expect(at).toBeGreaterThan(0);
+        // The next run takes the drawing as it is, crossings included, and can move.
+        st().setRunning(true);
+        st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+        const info = st().graphFlowInfo;
+        expect(info?.phase === 'running' && info.crossings).toBe(at);
+        st().setRunning(false);
+        st().setGraphFlowMoveThrough(false);
     });
 });
