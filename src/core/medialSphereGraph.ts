@@ -189,11 +189,15 @@ export interface MedialGraphOptions {
      *  test can show that this check, and nothing else, is what holds the count. */
     holdCrossings?: boolean;
     /** Give the segment that a node pushes off the opposite push (see the step).
-     *  `'auto'` (default): only at the contacts that need it — where the probing node is held
-     *  (pinned or carried: it cannot give way itself), or where the segment, or the probing
-     *  node's own segment, is a long one (over 3× the typical length). `'all'`: every
-     *  contact; measured to halve the opening speed of a finely divided grid (18×18 at 8
-     *  points per edge: clearance 0.28 after 600 steps against 0.68), so not the default.
+     *  `'auto'` (default): at every contact between two UNRELATED edges, and besides where
+     *  the probing node is held (pinned or carried: it cannot give way itself) or the
+     *  segment, or the probing node's own segment, is a long one (over 3× the typical
+     *  length). Not at the contacts of an edge with itself or with an edge it meets at a
+     *  junction (the fold rule, the minimum angle). `'all'`: those too; measured to halve
+     *  the opening speed of a finely divided grid (18×18 at 8 points per edge: clearance
+     *  0.28 after 600 steps against 0.68), so not the default. Without the unrelated-edge
+     *  part a real 88-node mind map settled with two strands 0.007 of a clearance apart
+     *  (0.34 with it).
      *  `'none'`: the node-only pull of the paper, kept for comparison. */
     reaction?: 'auto' | 'all' | 'none';
     /** The drag: node index → (x, y) it is being pulled to. Such a node is NOT held; it gets a
@@ -359,6 +363,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const rad = new Float64Array(maxDir);
     const hit = new Int32Array(maxDir);
     const hitSeg = new Int32Array(maxDir);
+    const hitPlain = new Uint8Array(maxDir);
     const hitAt = new Float64Array(maxDir);
     // Reaction of long segments (see below): force and stiffness handed to their end nodes.
     const reactDiag = new Float64Array(n);
@@ -461,12 +466,14 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             //  - anything else: the plain rule, compared with rMax.
             // "Compared with ref" means radii are rescaled by rMax/ref before the usual test.
             let ref = rMax;
+            let plain = true; // a segment of an unrelated edge: the plain rule applies
             if (ownI >= 0) {
                 const a1 = g.edgeA[ownI];
                 const b1 = g.edgeB[ownI];
                 if (e === ownI) {
                     const arc = ((Math.abs(hopI - pos) - 0.5) * edgeLen[e]) / g.pieces;
                     ref = Math.min(rMax, arc / 4);
+                    plain = false;
                 } else {
                     const a2 = g.edgeA[e];
                     const b2 = g.edgeB[e];
@@ -474,12 +481,14 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                     if (shared >= 0) {
                         const sJ = Math.hypot(x[3 * shared] - xi, x[3 * shared + 1] - yi);
                         ref = Math.min(rMax, sJ * tanHalfMin);
+                        plain = false;
                     }
                 }
             } else if (g.edgeA[e] === i || g.edgeB[e] === i) {
                 const hop = g.edgeA[e] === i ? 0 : g.pieces;
                 const arc = ((Math.abs(hop - pos) - 0.5) * edgeLen[e]) / g.pieces;
                 ref = Math.min(rMax, arc / 4);
+                plain = false;
             }
             if (ref <= 0) return;
             const scale = rMax / ref;
@@ -524,6 +533,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                     hit[l] = bestS < 0.5 ? sa : sb;
                     hitSeg[l] = k;
                     hitAt[l] = bestS;
+                    hitPlain[l] = plain ? 1 : 0;
                 }
             }
         }
@@ -561,16 +571,18 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             // of the group (5e-2 → 2e-16 in 200 steps), and the link's middle point against
             // an ordinary edge of the grid (1e-7 → 2e-16). With the reaction every node of a
             // contact feels it, and the push is a pair of equal and opposite forces.
-            // By default only where it is needed: a held node (it cannot give way, so without
-            // the reaction an edge pressed against a pinned group's corner closed to the gap
-            // floor and stayed: 0.008 where the same run with the reaction keeps 0.15), or a
-            // long segment on either side. Between ordinary free segments both sides probe
-            // each other anyway, and doubling the push there slowed a finely divided grid to
-            // half its speed (see `reaction` in the options).
+            // By default: every contact between UNRELATED edges (the plain rule), plus a held
+            // node (it cannot give way, so without the reaction an edge pressed against a
+            // pinned group's corner closed to the gap floor and stayed: 0.008 where the same
+            // run with the reaction keeps 0.15) and a long segment on either side.
+            // Not for the two rules about an edge's own shape (the fold rule, the minimum
+            // angle at a junction): those are one-sided by design, and reacting to them is
+            // what slowed a finely divided grid to half its speed (see `reaction`).
             if (
                 hit[l] >= 0 &&
                 (reaction === 'all' ||
-                    (reaction === 'auto' && (fixed[i] || isLong?.[hitSeg[l]] || onLong?.[i])))
+                    (reaction === 'auto' &&
+                        (hitPlain[l] === 1 || fixed[i] || isLong?.[hitSeg[l]] || onLong?.[i])))
             ) {
                 const sa = segs.a[hitSeg[l]];
                 const sb = segs.b[hitSeg[l]];
