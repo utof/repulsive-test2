@@ -22,6 +22,8 @@ import {
     type GroupGrowth,
     type GroupMove,
     growGroup,
+    hangGroupOn,
+    nearestOutsideNode,
     prunePassPairs,
     setGroupOffset,
     settleTurn,
@@ -404,6 +406,13 @@ export interface SimStore {
      *  and left 11 crossings fewer instead of 6 more; on grids it is neutral.
      *  @see docs/plans/2026-11-24-medial-sphere-method.md ("Turning and re-attaching") */
     graphFlowTurn: boolean;
+    /** On release, RE-ATTACH a carried group that has exactly one link: the link leaves its
+     *  old end and goes to the node nearest to where the dragged node was let go (then, when
+     *  it lands, to the nearest node it can see). Default off: it changes the graph.
+     *  Why: "take this branch off its parent and hang it there" — moved far, a branch that
+     *  keeps its parent keeps a link across everything in between.
+     *  @see src/core/medialGraphMove.ts (`hangGroupOn`) */
+    graphFlowHang: boolean;
     pinDrag: number | null;
     graphFlowRun: {
         g: MedialGraph;
@@ -411,6 +420,9 @@ export interface SimStore {
         move: GroupMove | null;
         moveBase: [number, number];
         growth: GroupGrowth | null;
+        /** The flow's segment list that `graph.edges` mirrors (a re-attached link replaces
+         *  the list; the app's edges then follow: `mirrorEdges`). */
+        segs: MedialGraph['segs'];
     } | null;
     graphFlowSkipped: boolean;
     graphFlowInfo: GraphFlowInfo | null;
@@ -456,6 +468,7 @@ export interface SimStore {
     setGraphFlowClearance(v: number): void;
     setGraphFlowMoveThrough(b: boolean): void;
     setGraphFlowTurn(b: boolean): void;
+    setGraphFlowHang(b: boolean): void;
     // Called by the scene when a drag of pinned node `i` starts and when it ends (pointer
     // released or lost). Ending a drag sets a carried group down.
     beginPinDrag(i: number): void;
@@ -503,6 +516,25 @@ function initialConfig() {
 // folds `live` back into `graph.vertices` so paused consumers read current positions.
 // Why: curried create<T>()(...) — zustand's documented form that keeps TS generic inference
 // sound if a middleware wrapper (persist/devtools) is ever added. @see spec §3, §4.1, §5.
+/**
+ * The app's edge list when the flow's graph has changed under it (a carried group hung on
+ * another node): `graph.edges` and the pair list rebuilt from the flow's segments, or nothing
+ * if the list is the one already mirrored.
+ * Why here and not a rebuild of everything: the positions, pins and the running flow stay;
+ * only who is joined to whom has changed, for one link.
+ */
+function mirrorEdges(
+    run: { g: MedialGraph; segs: MedialGraph['segs'] },
+    graph: GraphState,
+): { graph?: GraphState; disjointPairs?: ReturnType<typeof calculateDisjointPairs> } {
+    if (run.g.segs === run.segs) return {};
+    const edges = Array.from(run.g.segs.a, (a, k) => [a, run.g.segs.b[k]] as [number, number]);
+    return {
+        graph: { vertices: graph.vertices, edges },
+        disjointPairs: pairListFits(graph.vertices.length) ? calculateDisjointPairs(edges) : [],
+    };
+}
+
 export const useSimStore = create<SimStore>()((set, get) => {
     const { test, params } = initialConfig();
     const built = buildGraphState(test, params);
@@ -647,6 +679,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
         graphFlowClearance: 0.4,
         graphFlowMoveThrough: false,
         graphFlowTurn: true,
+        graphFlowHang: false,
         pinDrag: null,
         graphFlowRun: null,
         graphFlowSkipped: false,
@@ -821,6 +854,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
             set({ graphFlowMoveThrough: b });
         },
         setGraphFlowTurn: (b) => set({ graphFlowTurn: b }),
+        setGraphFlowHang: (b) => set({ graphFlowHang: b }),
         beginPinDrag: (i) => set({ pinDrag: i }),
         endPinDrag: () => {
             const s = get();
@@ -831,6 +865,17 @@ export const useSimStore = create<SimStore>()((set, get) => {
             }
             // Set the group down where it is. Its pins now aim at the full-size positions,
             // which is where it will be once it has grown back.
+            // Hung on the node nearest to where the dragged node is let go, if asked and the
+            // group has one link (several: which one would move is not for the app to guess).
+            if (s.graphFlowHang && run.move.connecting.length === 1 && s.pinDrag !== null) {
+                const to = nearestOutsideNode(
+                    run.g,
+                    run.move,
+                    run.g.x[3 * s.pinDrag],
+                    run.g.x[3 * s.pinDrag + 1],
+                );
+                if (to >= 0) hangGroupOn(run.g, run.move, to);
+            }
             // Turned for the links while carried; set down at the angle that crosses least.
             if (s.graphFlowTurn) settleTurn(run.g, run.move);
             const drop = dropGroupMove(run.g, run.move, { r: run.r });
@@ -840,7 +885,8 @@ export const useSimStore = create<SimStore>()((set, get) => {
             }
             set({
                 pinDrag: null,
-                graphFlowRun: { ...run, move: null, growth: drop.growth },
+                ...mirrorEdges(run, s.graph),
+                graphFlowRun: { ...run, move: null, growth: drop.growth, segs: run.g.segs },
                 pins: s.pins.map((p) => {
                     const t = drop.targets.get(p.vertexIndex);
                     return t ? { ...p, target: [t[0], t[1], 0] as Vec3 } : p;
@@ -879,7 +925,7 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 // A drawing that already has crossings can flow: the pairs that cross now are
                 // allowed to (they would otherwise freeze each other), no new one can appear.
                 g.passPairs = crossingPairs(g, 1e-9 * r);
-                run = { g, r, move: null, moveBase: [0, 0], growth: null };
+                run = { g, r, move: null, moveBase: [0, 0], growth: null, segs: g.segs };
             }
             const { g, r } = run;
             // Move-through: a drag picks up every pinned ORIGINAL node (the dragged one among
@@ -976,7 +1022,11 @@ export const useSimStore = create<SimStore>()((set, get) => {
                     ),
                 });
             }
+            // A hung link may have gone to another node when it landed (the nearest it can see).
+            const mirrored = mirrorEdges(run, s.graph);
+            run.segs = g.segs;
             set({
+                ...mirrored,
                 graphFlowRun: run,
                 step: s.step + steps,
                 graphFlowInfo: {

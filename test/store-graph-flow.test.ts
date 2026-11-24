@@ -21,6 +21,7 @@ describe('graph flow (store)', () => {
         st().setRunning(false);
         st().setGraphFlowMoveThrough(false);
         st().setGraphFlowTurn(true);
+        st().setGraphFlowHang(false);
         st().setGraphFlow(false);
         st().setEdgeSubdivision(1);
         st().setPreset('random');
@@ -134,6 +135,65 @@ describe('graph flow (store)', () => {
         const turned = carry(true);
         expect(Math.abs(turned.tilt)).toBeGreaterThan(0.05);
         expect(turned.off).toBeLessThan(1e-9);
+    });
+
+    test("hang: a branch released next to another node is taken off its parent and joined there; the app's edges follow", () => {
+        st().setPreset('flat-tree');
+        st().setEdgeSubdivision(2);
+        st().setGraphFlow(true);
+        st().setGraphFlowMoveThrough(true);
+        st().setGraphFlowHang(true);
+        const P = 2;
+        const N = st().nodeCount;
+        // The tree as the app holds it: original edge e = segments e·P … e·P+P−1.
+        const ends = (): [number, number][] => {
+            const E = st().graph.edges;
+            const out: [number, number][] = [];
+            for (let e = 0; e < E.length / P; e++) out.push([E[e * P][0], E[e * P + P - 1][1]]);
+            return out;
+        };
+        const before = ends();
+        const kids = new Map<number, number[]>();
+        for (const [a, b] of before) kids.set(a, [...(kids.get(a) ?? []), b]);
+        const sub = (i: number): number[] => [i, ...(kids.get(i) ?? []).flatMap(sub)];
+        const main = kids.get(0) as number[];
+        const branch = sub(main[1]);
+        const root = main[1];
+        expect(branch.length).toBeGreaterThan(5);
+        for (const i of branch) st().addPin(i);
+        st().setRunning(true);
+        // Dragged by its root to just beyond a node of the opposite main branch.
+        const there = (kids.get(main[4]) as number[])[0];
+        const to = st().live[there];
+        st().beginPinDrag(root);
+        st().setPinTarget(root, [1.25 * to[0], 1.25 * to[1], 0]);
+        for (let k = 0; k < 4; k++) st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+        expect(st().graphFlowRun?.move).not.toBeNull();
+        st().endPinDrag();
+        let ticks = 0;
+        do {
+            st().tickGraphFlow(1, Number.POSITIVE_INFINITY);
+            ticks++;
+        } while (st().graphFlowRun?.growth && ticks < 600);
+        expect(st().graphFlowRun?.growth).toBeNull();
+        // Still a tree on the same nodes; the branch's root has a new parent outside the branch.
+        const after = ends();
+        expect(after.length).toBe(before.length);
+        const link = after.filter(([a, b]) => branch.includes(a) !== branch.includes(b));
+        expect(link.length).toBe(1);
+        const parentNow = branch.includes(link[0][0]) ? link[0][1] : link[0][0];
+        expect(link[0]).toContain(root);
+        expect(parentNow).not.toBe(0);
+        expect(parentNow).toBeLessThan(N);
+        // The app's edges are the flow's segments, and the drawing has no crossing.
+        const g = st().graphFlowRun?.g;
+        expect(
+            st().graph.edges.every(([a, b], k) => a === g?.segs.a[k] && b === g?.segs.b[k]),
+        ).toBe(true);
+        expect(crossings()).toBe(0);
+        expect(st().live.every((p) => p.every(Number.isFinite))).toBe(true);
+        st().setRunning(false);
+        st().setGraphFlowMoveThrough(false);
     });
 
     test('move-through: the pinned group is carried over the grid, set down, and crossings never grow', () => {

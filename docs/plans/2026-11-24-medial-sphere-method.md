@@ -681,8 +681,7 @@ group in).
 - One real move (the os map, force layout, 135 nodes) no longer reaches full size in 400 steps
   (0.71; unturned: 249 steps): turned, it is set down in a tighter place. The angle is chosen
   for the links alone; it does not look at what is in the way.
-- Hanging is not in the app yet: it changes the graph, and the app's edge list is shared with
-  the other solver.
+- (Hanging in the app: done the same day, see below.)
 
 ### Set down by score (`settleTurn`, same day)
 
@@ -716,6 +715,15 @@ Still open: the 600-node tree is worse by score (162 steps and 1 crossing agains
 crossings where a group is set down only predict those where its links land, after the rest
 has made room; the os map's force-layout move still stops at 0.7 of its size at any angle
 tried; the large grid gains nothing.
+
+### Hanging in the app (same day)
+
+"On release, hang a one-link group on the nearest node" (off by default: it changes the
+graph). On release the group's link goes to the node nearest to where the dragged node was let
+go, the group is turned and set down as above, and the app's edge list follows the flow's
+segments (`mirrorEdges` in the store: the positions, pins and the running flow stay; only the
+one link's ends and the pair list change). New preset "Flat Tree" (a radial mind map, 8–3,000
+nodes): the grid has no branch to try this on.
 
 The research on this (`_local/research/2026-11-24-11-moving-subgraphs-rotation-and-routing.md`)
 found no published method for exactly this problem; what systems do is this fit, a damped
@@ -792,4 +800,3 @@ from step to step (a skin distance, rebuilt when something has moved half of it)
 | 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
 | 3 | Route a moved group's links around what lies between | open item 2 |
 | 4 | The move that never reaches full size (os map, 135 nodes); a score that predicts where links LAND | what set-down by score leaves open |
-| 5 | Hanging a branch on another node in the app | needs the app's edge list to follow the flow's graph |
