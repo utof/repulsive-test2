@@ -287,6 +287,37 @@ function createRandomChain(params?: Record<string, number>): GraphState {
     return { vertices, edges };
 }
 
+/**
+ * A flat (z = 0) jittered grid: a planar graph with junctions, the stand-in for a mind map.
+ * Why it exists: the local graph flow and the crossing guard work in the plane only, and no
+ * other preset is flat. The jitter is deterministic (same graph for the same size).
+ * @see src/core/medialSphereGraph.ts
+ */
+function createFlatGrid(params?: Record<string, number>): GraphState {
+    const g = Math.max(2, Math.floor(params?.size ?? 8));
+    let seed = 7;
+    const rnd = (): number => {
+        seed = (1664525 * seed + 1013904223) % 4294967296;
+        return seed / 4294967296;
+    };
+    const vertices: Vec3[] = [];
+    const edges: Edge[] = [];
+    const scale = 4 / (g - 1); // overall extent 4, like the other presets
+    for (let y = 0; y < g; y++)
+        for (let x = 0; x < g; x++)
+            vertices.push([
+                (x - (g - 1) / 2 + 0.3 * (rnd() - 0.5)) * scale,
+                (y - (g - 1) / 2 + 0.3 * (rnd() - 0.5)) * scale,
+                0,
+            ]);
+    for (let y = 0; y < g; y++)
+        for (let x = 0; x < g; x++) {
+            if (x + 1 < g) edges.push([y * g + x, y * g + x + 1]);
+            if (y + 1 < g) edges.push([y * g + x, (y + 1) * g + x]);
+        }
+    return { vertices, edges };
+}
+
 export const testConfigs: TestConfig[] = [
     {
         id: 'crossing',
@@ -327,6 +358,12 @@ export const testConfigs: TestConfig[] = [
         name: 'Trefoil Knot (large, configurable)',
         generate: createLargeKnot,
         params: [{ name: 'vertices', min: 100, max: 30000, default: 2000 }],
+    },
+    {
+        id: 'flat-grid',
+        name: 'Flat Grid (planar graph, configurable)',
+        generate: createFlatGrid,
+        params: [{ name: 'size', min: 2, max: 40, default: 8 }],
     },
     {
         id: 'chain',

@@ -14,6 +14,11 @@ import {
     rescaleForceLayout,
     writeForceLayout,
 } from './core/forceLayout';
+import {
+    type MedialGraph,
+    medialGraphFromSubdivided,
+    medialGraphStep,
+} from './core/medialSphereGraph';
 import type { ProjectionMode, SobolevStepStats } from './core/optimizer';
 import { edgeLengths, totalLength } from './core/sobolev/constraintSet';
 import { barycenterTarget } from './core/sobolev/constraints';
@@ -78,6 +83,16 @@ export type UntangleInfo =
           stopped: UntangleStop | 'abandoned';
           audit: 'kept' | 'unverified' | 'failed';
       }
+    | { phase: 'skipped'; reason: string };
+
+/**
+ * What the stats line shows about the local graph flow.
+ * Why: when the flow cannot run (the graph is not flat) the ordinary descent runs instead, and
+ * that must be visible. `movePerNode` is the mean node displacement of the last step in units
+ * of the clearance r — the flow's own convergence measure.
+ */
+export type GraphFlowInfo =
+    | { phase: 'running'; movePerNode: number; cappedNodes: number; msPerStep: number }
     | { phase: 'skipped'; reason: string };
 
 const STORAGE_KEY = 'repulsive-test-config';
@@ -329,6 +344,24 @@ export interface SimStore {
     untangleInput: Vec3[] | null;
     untangleDone: boolean;
     untangleInfo: UntangleInfo | null;
+    // OPTIONAL layout engine for FLAT graphs (default off): the local graph flow
+    // (src/core/medialSphereGraph.ts) runs INSTEAD of the tangent-point descent. Every edge
+    // keeps its length as drawn at run start (springs), strands closer than the clearance push
+    // apart, and no step can pass an edge through another — so a drawing without crossings
+    // stays without crossings. Pins are the interaction: a pin whose target is elsewhere pulls
+    // its node there with a bounded spring (a drag), and the rest makes room.
+    // `graphFlowClearance` is the clearance scale r as a fraction of the mean edge length.
+    // Lifecycle: `graphFlowRun` is built lazily by the first tick of a run (after any
+    // pre-pass, so the rest lengths are the geometry the flow starts from) and dropped on
+    // pause, rebuild or toggle. A graph that is not flat cannot use it: `graphFlowSkipped`
+    // is then set for the rest of the run, the reason goes to `graphFlowInfo`, and the
+    // ordinary descent runs.
+    // @see docs/plans/2026-11-24-medial-sphere-method.md
+    graphFlow: boolean;
+    graphFlowClearance: number;
+    graphFlowRun: { g: MedialGraph; r: number } | null;
+    graphFlowSkipped: boolean;
+    graphFlowInfo: GraphFlowInfo | null;
     // stats (React-subscribed, throttled by the writer)
     step: number;
     energy: number;
@@ -365,6 +398,11 @@ export interface SimStore {
     // Untangle pass (see the `untangleFirst` field). `tickUntangle` is called by the frame loop
     // while `untangle` is non-null: at most `maxSteps` flow steps or `budgetMs` milliseconds.
     setUntangleFirst(b: boolean): void;
+    // Local graph flow (see the `graphFlow` field). `tickGraphFlow` is called by the frame
+    // loop instead of a descent step: at most `maxSteps` flow steps or `budgetMs` milliseconds.
+    setGraphFlow(b: boolean): void;
+    setGraphFlowClearance(v: number): void;
+    tickGraphFlow(maxSteps?: number, budgetMs?: number): void;
     tickUntangle(maxSteps?: number, budgetMs?: number): void;
     // Pin actions (briefing §5B). addPin snapshots the vertex's CURRENT live
     // position as the frozen target (idempotent by vertexIndex); setPinTarget is
@@ -434,6 +472,9 @@ export const useSimStore = create<SimStore>()((set, get) => {
             untangleInput: null,
             untangleDone: false,
             untangleInfo: null,
+            graphFlowRun: null,
+            graphFlowSkipped: false,
+            graphFlowInfo: null,
             // Preset/config change = a run (re)start boundary → re-anchor the
             // frozen targets x₀, L⁰, ℓ⁰ (see the frozen-targets lifecycle anchor above).
             sobolevX0: barycenterTarget(b.graph.vertices, b.graph.edges),
@@ -543,6 +584,11 @@ export const useSimStore = create<SimStore>()((set, get) => {
         untangleInput: null,
         untangleDone: false,
         untangleInfo: null,
+        graphFlow: false,
+        graphFlowClearance: 0.4,
+        graphFlowRun: null,
+        graphFlowSkipped: false,
+        graphFlowInfo: null,
         pins: [],
         // Penalties default ALL OFF (every weight 0 ⇒ penaltiesActive false ⇒
         // bit-identical threading, plan §2.4). field.X is a placeholder unit axis
@@ -695,6 +741,87 @@ export const useSimStore = create<SimStore>()((set, get) => {
                 return;
             }
             set(settleUntangle(s));
+        },
+        // Toggling the engine or changing its clearance drops the current run's state; the next
+        // tick rebuilds it from the live geometry.
+        setGraphFlow: (b) =>
+            set({ graphFlow: b, graphFlowRun: null, graphFlowSkipped: false, graphFlowInfo: null }),
+        setGraphFlowClearance: (v) =>
+            // An empty number field parses to NaN: keep the old value.
+            Number.isFinite(v) &&
+            set({
+                graphFlowClearance: Math.min(2, Math.max(0.05, v)),
+                graphFlowRun: null,
+                graphFlowSkipped: false,
+            }),
+        tickGraphFlow: (maxSteps = 4, budgetMs = 12) => {
+            const s = get();
+            let run = s.graphFlowRun;
+            if (!run) {
+                // Flat means z = 0 everywhere (to rounding, relative to the drawing's size).
+                let extent = 0;
+                let zMax = 0;
+                for (const p of s.live) {
+                    extent = Math.max(extent, Math.abs(p[0]), Math.abs(p[1]));
+                    zMax = Math.max(zMax, Math.abs(p[2]));
+                }
+                const pieces = s.edgeSubdivision;
+                const reason =
+                    s.graph.edges.length === 0
+                        ? 'no edges'
+                        : zMax > 1e-9 * (extent || 1)
+                          ? 'not a flat graph'
+                          : s.graph.edges.length % pieces !== 0
+                            ? 'edge subdivision does not match the graph'
+                            : null;
+                if (reason) {
+                    set({ graphFlowSkipped: true, graphFlowInfo: { phase: 'skipped', reason } });
+                    return;
+                }
+                const g = medialGraphFromSubdivided(s.live, s.graph.edges, s.nodeCount, pieces);
+                let mean = 0;
+                for (let k = 0; k < g.rest.length; k++) mean += g.rest[k];
+                // r = clearance × mean length of an ORIGINAL edge (its segments' rest lengths added).
+                run = { g, r: (s.graphFlowClearance * mean * pieces) / g.rest.length };
+            }
+            const { g, r } = run;
+            // Pins: an enabled pin whose target is where its node already is HOLDS the node;
+            // one whose target is elsewhere (the user is dragging it, or dropped it where the
+            // node has not arrived yet) pulls the node there with a bounded spring.
+            g.pinned.fill(0);
+            const targets = new Map<number, [number, number]>();
+            for (const pin of s.pins) {
+                if (!pin.enabled || pin.vertexIndex >= g.n) continue;
+                const v = pin.vertexIndex;
+                const away = Math.hypot(g.x[3 * v] - pin.target[0], g.x[3 * v + 1] - pin.target[1]);
+                if (away <= 1e-9 * r) g.pinned[v] = 1;
+                else targets.set(v, [pin.target[0], pin.target[1]]);
+            }
+            const t0 = performance.now();
+            let steps = 0;
+            let move = 0;
+            let capped = 0;
+            for (let k = 0; k < maxSteps; k++) {
+                const res = medialGraphStep(g, { r, pinTargets: targets });
+                steps++;
+                move = res.movePerNode;
+                capped = res.cappedNodes;
+                if (performance.now() - t0 > budgetMs) break;
+            }
+            for (let i = 0; i < g.n; i++) {
+                s.live[i][0] = g.x[3 * i];
+                s.live[i][1] = g.x[3 * i + 1];
+            }
+            set({
+                graphFlowRun: run,
+                step: s.step + steps,
+                graphFlowInfo: {
+                    phase: 'running',
+                    movePerNode: move,
+                    cappedNodes: capped,
+                    msPerStep: (performance.now() - t0) / steps,
+                },
+            });
         },
         // Pin actions (briefing §5B). A pin is a per-vertex point constraint; like
         // the other constraint toggles, mutating the pin set invalidates ONLY the
@@ -875,6 +1002,10 @@ export const useSimStore = create<SimStore>()((set, get) => {
             set({
                 ...untanglePatch,
                 running: false,
+                // The graph flow keeps no state across a pause: the next run starts from the
+                // committed geometry, with rest lengths taken from it.
+                graphFlowRun: null,
+                graphFlowSkipped: false,
                 // A pause during the pre-pass abandons it; the next play starts a new one
                 // from wherever the nodes are now (`prePassDone` stays false).
                 prePass: null,
