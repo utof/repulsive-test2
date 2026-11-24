@@ -160,7 +160,20 @@ describe('medialGraphStep', () => {
         // An arc of radius 3 (far wider than the range): nothing may move.
         const arc = bentEdge((k) => [3 * Math.cos(0.08 * k), 3 * Math.sin(0.08 * k)]);
         const before = Float64Array.from(arc.x);
-        expect(medialGraphStep(arc, { r: R, tension: 0 }).links).toBe(0);
+        // (Bending springs off: they would, rightly, start to straighten the arc.)
+        expect(medialGraphStep(arc, { r: R, tension: 0, bend: 0 }).links).toBe(0);
         expect(Array.from(arc.x)).toEqual(Array.from(before));
+    });
+    test('bending springs: a zigzag edge straightens instead of folding flat', () => {
+        // An edge of 16 segments drawn as a zigzag of ±60°, its rest lengths those of the
+        // zigzag, so only the bending springs act. Its span must grow, not shrink.
+        const zig = bentEdge((k) => [0.1 * k, k % 2 === 0 ? 0 : 0.17]);
+        const span = (g: MedialGraph) => Math.hypot(g.x[3] - g.x[0], g.x[4] - g.x[1]);
+        const amplitude = (g: MedialGraph) => Math.abs(g.x[3 * 3 + 1] - g.x[3 * 4 + 1]);
+        const a0 = amplitude(zig);
+        const s0 = span(zig);
+        for (let k = 0; k < 60; k++) medialGraphStep(zig, { r: R, tension: 0 });
+        expect(amplitude(zig)).toBeLessThan(0.5 * a0);
+        expect(span(zig)).toBeGreaterThan(s0);
     });
 });

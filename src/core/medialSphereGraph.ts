@@ -92,6 +92,9 @@ export interface MedialGraphOptions {
     /** Constant tension along every segment (the paper's length term has 1). Default 0.5;
      *  edges settle about `tension / spring` short of their rest length. */
     tension?: number;
+    /** Stiffness of the bending springs (across two consecutive segments of an edge), in
+     *  units of `spring`. Default 1; 0 switches them off. */
+    bend?: number;
     /** Smallest angle, in degrees, that two edges meeting at a junction are left alone at;
      *  below it they push each other apart. Default 30. */
     minAngleDeg?: number;
@@ -128,6 +131,9 @@ interface Topology {
     own: Int32Array;
     /** Keys `min·nodeCount + max` of the original edges, for junction–junction adjacency. */
     edgeKeys: Set<number>;
+    /** CSR of the segments by their first endpoint. */
+    segStart: Int32Array;
+    segByFirst: Int32Array;
 }
 
 const topologies = new WeakMap<SegmentList, Topology>();
@@ -159,7 +165,13 @@ function topologyOf(g: MedialGraph): Topology {
         edgeKeys.add(
             Math.min(g.edgeA[e], g.edgeB[e]) * g.nodeCount + Math.max(g.edgeA[e], g.edgeB[e]),
         );
-    const t = { nbrStart, nbr, own, edgeKeys };
+    const segStart = new Int32Array(n + 1);
+    for (let k = 0; k < m; k++) segStart[segs.a[k] + 1]++;
+    for (let i = 0; i < n; i++) segStart[i + 1] += segStart[i];
+    const segFill = Int32Array.from(segStart.subarray(0, n));
+    const segByFirst = new Int32Array(m);
+    for (let k = 0; k < m; k++) segByFirst[segFill[segs.a[k]]++] = k;
+    const t = { nbrStart, nbr, own, edgeKeys, segStart, segByFirst };
     topologies.set(g.segs, t);
     return t;
 }
@@ -184,6 +196,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const ks = opts.spring ?? 4;
     const tension = opts.tension ?? 0.5;
     const barrier = opts.barrier ?? 1;
+    const bend = opts.bend ?? 1;
     const tanHalfMin = Math.tan(((opts.minAngleDeg ?? 30) * Math.PI) / 360);
     const beta = opts.beta ?? 0.01;
     const lambda = opts.lambda ?? 0.02;
@@ -203,7 +216,10 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
 
     // --- the pull: one circle per angular sector of every node --------------------------------
     const G = new Float64Array(3 * n);
-    const grid = makeGrid(x, n, 2 * rMax);
+    let maxSeg = 0;
+    for (let k = 0; k < m; k++) maxSeg = Math.max(maxSeg, len[k]);
+    const segReach = 2 * rMax + maxSeg;
+    const grid = makeGrid(x, n, segReach);
     const reach2 = (2 * rMax) ** 2;
     const maxDir = maxDirections(t, n);
     const dirX = new Float64Array(maxDir);
@@ -258,75 +274,104 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             hit[l] = -1;
         }
         const ownI = t.own[i];
-        grid.forNear(i, 2 * rMax, (j) => {
-            // Which rule applies to the pair (i, j):
-            //  - same edge, or a junction and a node of one of its own edges: no interaction
-            //    (along one's own edge the "largest empty circle" is a bend's circumcircle);
-            //  - nodes of two edges that MEET at a junction J: the minimum-angle rule below;
-            //  - anything else: the plain rule.
-            const ownJ = t.own[j];
-            let shared = -1; // the junction the two edges share, if they are incident
-            let foldRef = -1; // reference radius of the fold rule, when both are on one edge
+        const hopI = ownI >= 0 ? hopIndex(i) : -1;
+        // Every segment that starts at a node within reach: its first endpoint is at most
+        // 2·rMax + (its own length) from anything it can affect.
+        grid.forNear(i, segReach, (j0) => {
+            for (let q = t.segStart[j0]; q < t.segStart[j0 + 1]; q++) testSegment(t.segByFirst[q]);
+        });
+        // forNear skips the node itself: segments starting AT node i contain it and are
+        // skipped by the rule below anyway.
+        function testSegment(k: number): void {
+            const sa = segs.a[k];
+            const sb = segs.b[k];
+            if (sa === i || sb === i) return;
+            const e = Math.floor(k / g.pieces);
+            const pos = (k % g.pieces) + 0.5; // the segment's place along its edge, in hops
+            // Which rule applies (see the two measured failures each sits between):
+            //  - a segment of the node's own edge (for a junction: of one of its edges): the
+            //    FOLD rule — the circle is compared with a quarter of the arc between them,
+            //    so an ordinary bend's circumcircle is not contact but a hairpin is;
+            //  - a segment of an edge that meets the node's edge at a junction J: the
+            //    MINIMUM-ANGLE rule — compared with what `minAngle` gives at this distance
+            //    from J, so they push apart only when the angle closes below it;
+            //  - anything else: the plain rule, compared with rMax.
+            // "Compared with ref" means radii are rescaled by rMax/ref before the usual test.
+            let ref = rMax;
             if (ownI >= 0) {
                 const a1 = g.edgeA[ownI];
                 const b1 = g.edgeB[ownI];
-                if (ownJ === ownI || j === a1 || j === b1) {
-                    // Fold rule, for two points of ONE edge. Along a gently bent edge the
-                    // largest empty circle is the bend's own circumcircle, which must not
-                    // count as contact; but with no interaction at all an edge under
-                    // compression folds back onto itself down to a rounding error (measured
-                    // on a 36×36 grid: 5e-18, reported as a crossing). So the circle is
-                    // compared with a quarter of the arc length between the two points:
-                    // tighter than that is a fold, and only a fold is pushed open.
-                    // Neighbours and gentle bends never qualify.
-                    const hopJ = ownJ === ownI ? hopIndex(j) : j === a1 ? 0 : g.pieces;
-                    const arc = (Math.abs(hopIndex(i) - hopJ) * edgeLen[ownI]) / g.pieces;
-                    foldRef = Math.min(rMax, arc / 4);
-                } else if (ownJ >= 0) {
-                    const a2 = g.edgeA[ownJ];
-                    const b2 = g.edgeB[ownJ];
-                    if (a1 === a2 || a1 === b2) shared = a1;
-                    else if (b1 === a2 || b1 === b2) shared = b1;
-                } else if (t.edgeKeys.has(Math.min(a1, j) * g.nodeCount + Math.max(a1, j)))
-                    shared = a1;
-                else if (t.edgeKeys.has(Math.min(b1, j) * g.nodeCount + Math.max(b1, j)))
-                    shared = b1;
-            } else if (ownJ >= 0) {
-                if (g.edgeA[ownJ] === i || g.edgeB[ownJ] === i) return;
-            } else if (t.edgeKeys.has(Math.min(i, j) * g.nodeCount + Math.max(i, j))) return;
-            const dx = x[3 * j] - xi;
-            const dy = x[3 * j + 1] - yi;
-            const d2 = dx * dx + dy * dy;
-            if (d2 >= reach2 || d2 === 0) return;
-            // Minimum-angle rule. Two edges leaving J at angle θ put, at arc length s from J, a
-            // circle of radius about s·tan(θ/2) between them — always inside the range near J,
-            // so the plain rule would push them apart forever (measured: every edge wiggles and
-            // the drawing swells to 1.5–2.4×). No interaction at all is as wrong the other way:
-            // nothing holds them apart, and they fold onto each other down to a rounding error
-            // (measured: 1e-14, where an orientation test flips and reports a crossing).
-            // So the circle is compared with what the angle `minAngle` would give at this
-            // distance from J, not with rMax: radii are rescaled so that "as open as minAngle"
-            // counts as "nothing in range". Wider than that, the two edges do not interact.
-            let scale = 1;
-            if (foldRef >= 0) {
-                if (foldRef === 0) return;
-                scale = rMax / foldRef;
-            } else if (shared >= 0) {
-                const sJ = Math.hypot(x[3 * shared] - xi, x[3 * shared + 1] - yi);
-                const ref = Math.min(rMax, sJ * tanHalfMin);
-                if (ref <= 0) return;
-                scale = rMax / ref;
+                if (e === ownI) {
+                    const arc = ((Math.abs(hopI - pos) - 0.5) * edgeLen[e]) / g.pieces;
+                    ref = Math.min(rMax, arc / 4);
+                } else {
+                    const a2 = g.edgeA[e];
+                    const b2 = g.edgeB[e];
+                    const shared = a1 === a2 || a1 === b2 ? a1 : b1 === a2 || b1 === b2 ? b1 : -1;
+                    if (shared >= 0) {
+                        const sJ = Math.hypot(x[3 * shared] - xi, x[3 * shared + 1] - yi);
+                        ref = Math.min(rMax, sJ * tanHalfMin);
+                    }
+                }
+            } else if (g.edgeA[e] === i || g.edgeB[e] === i) {
+                const hop = g.edgeA[e] === i ? 0 : g.pieces;
+                const arc = ((Math.abs(hop - pos) - 0.5) * edgeLen[e]) / g.pieces;
+                ref = Math.min(rMax, arc / 4);
             }
+            if (ref <= 0) return;
+            const scale = rMax / ref;
+            // The largest circle tangent at the node along x that stays clear of the WHOLE
+            // segment P(s) = p + s·u: min over s∈[0,1] of |P|² / (2 x·P). A node-to-node test
+            // (the paper's, and this file's first version) is blind to a strand closer than
+            // about one segment length — its nearest node is off to the side, so the circle
+            // through it is large — which is how strands closed to a rounding error unseen.
+            const px = x[3 * sa] - xi;
+            const py = x[3 * sa + 1] - yi;
+            const ux = x[3 * sb] - x[3 * sa];
+            const uy = x[3 * sb + 1] - x[3 * sa + 1];
+            const A = ux * ux + uy * uy;
+            const B = 2 * (px * ux + py * uy);
+            const C = px * px + py * py;
+            // Cheap rejection: the segment's nearest point is beyond reach of any capped circle.
+            const sNear = A > 0 ? Math.max(0, Math.min(1, -B / (2 * A))) : 0;
+            if (A * sNear * sNear + B * sNear + C >= reach2) return;
             for (let l = 0; l < nd; l++) {
-                const along = dirX[l] * dx + dirY[l] * dy;
-                if (along <= 0) continue;
-                const R = (scale * d2) / (2 * along);
+                const E = dirX[l] * ux + dirY[l] * uy;
+                const F = dirX[l] * px + dirY[l] * py;
+                // R(s) = (A s² + B s + C) / (2 (E s + F)) where E s + F > 0. Stationary points:
+                // A E s² + 2 A F s + (B F − E C) = 0. Candidates: those roots and the ends.
+                let best = Infinity;
+                let bestS = 0;
+                const consider = (sv: number): void => {
+                    if (sv < 0 || sv > 1) return;
+                    const den = E * sv + F;
+                    if (den <= 0) return;
+                    const R = (A * sv * sv + B * sv + C) / (2 * den);
+                    if (R < best) {
+                        best = R;
+                        bestS = sv;
+                    }
+                };
+                consider(0);
+                consider(1);
+                const qa = A * E;
+                const qb = 2 * A * F;
+                const qc = B * F - E * C;
+                if (Math.abs(qa) > 1e-300) {
+                    const disc = qb * qb - 4 * qa * qc;
+                    if (disc >= 0) {
+                        const sq = Math.sqrt(disc);
+                        consider((-qb + sq) / (2 * qa));
+                        consider((-qb - sq) / (2 * qa));
+                    }
+                } else if (Math.abs(qb) > 1e-300) consider(-qc / qb);
+                const R = scale * best;
                 if (R < rad[l]) {
                     rad[l] = R;
-                    hit[l] = j;
+                    hit[l] = bestS < 0.5 ? sa : sb;
                 }
             }
-        });
+        }
         // G_i = −α w_i (1/N_i) Σ_l (R_l − rMax) x_l: descent moves the node away from whatever
         // cut a circle short. For the two opposite probes of a degree-2 node this IS the
         // paper's pull towards the circle centres (the rMax terms cancel); written as a
@@ -387,6 +432,39 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         G[3 * b] -= fx;
         G[3 * b + 1] -= fy;
         stiff[k] = ks / L + tension / len[k];
+    }
+    // --- bending: a spring across every two consecutive segments of an edge -----------------------
+    // Rest length = the two segments' rest lengths added, i.e. "straight". Why: the probes look
+    // sideways from an edge, so an edge that folds up ALONG its own line — an accordion, which
+    // is how a chain under compression buckles — approaches itself where no probe looks.
+    // Measured at 4,896 segments: a junction ended 1e-15 from the second segment of its own
+    // edge while unrelated edges kept a clearance of 0.33. A spring between a point's two
+    // neighbours resists the fold from the start, and as a link in P it costs no stability.
+    const contactLinks = linkA.length; // reported; the bending links below are not contacts
+    if (bend > 0 && g.pieces > 1) {
+        const nodeAt = (e: number, q: number): number =>
+            q === 0
+                ? g.edgeA[e]
+                : q === g.pieces
+                  ? g.edgeB[e]
+                  : g.nodeCount + e * (g.pieces - 1) + q - 1;
+        for (let e = 0; e < g.edgeA.length; e++)
+            for (let q = 1; q < g.pieces; q++) {
+                const a = nodeAt(e, q - 1);
+                const b = nodeAt(e, q + 1);
+                const L = rest[e * g.pieces + q - 1] + rest[e * g.pieces + q] || 1e-300;
+                const dx = x[3 * a] - x[3 * b];
+                const dy = x[3 * a + 1] - x[3 * b + 1];
+                const d = Math.hypot(dx, dy) || 1e-300;
+                const f = (bend * ks * (d - L)) / L / d;
+                G[3 * a] += f * dx;
+                G[3 * a + 1] += f * dy;
+                G[3 * b] -= f * dx;
+                G[3 * b + 1] -= f * dy;
+                linkA.push(a);
+                linkB.push(b);
+                linkW.push((bend * ks) / L);
+            }
     }
     for (let i = 0; i < n; i++)
         if (pinned[i]) {
@@ -463,7 +541,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         cappedNodes: capped,
         movePerNode: move / n / r,
         cgIterations,
-        links: linkA.length,
+        links: contactLinks,
         minRadius: minRadius / r,
     };
 }
