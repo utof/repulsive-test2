@@ -183,12 +183,13 @@ export interface MedialGraphOptions {
      *  test can show that this check, and nothing else, is what holds the count. */
     holdCrossings?: boolean;
     /** Give the segment that a node pushes off the opposite push (see the step).
-     *  `'long'` (default): only where the segment, or the probing node's own segment, is a
-     *  long one (over 3× the typical length) — the contacts that need it. `'all'`: every
+     *  `'auto'` (default): only at the contacts that need it — where the probing node is held
+     *  (pinned or carried: it cannot give way itself), or where the segment, or the probing
+     *  node's own segment, is a long one (over 3× the typical length). `'all'`: every
      *  contact; measured to halve the opening speed of a finely divided grid (18×18 at 8
      *  points per edge: clearance 0.28 after 600 steps against 0.68), so not the default.
      *  `'none'`: the node-only pull of the paper, kept for comparison. */
-    reaction?: 'long' | 'all' | 'none';
+    reaction?: 'auto' | 'all' | 'none';
     /** The drag: node index → (x, y) it is being pulled to. Such a node is NOT held; it gets a
      *  spring to its target (`pinStiffness`, force capped at `pinForceMax`) and otherwise
      *  takes part in the flow like any other — so the contact barrier acts on it too.
@@ -292,7 +293,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const tension = opts.tension ?? 0.5;
     const barrier = opts.barrier ?? 1;
     const bend = opts.bend ?? 1;
-    const reaction = opts.reaction ?? 'long';
+    const reaction = opts.reaction ?? 'auto';
     const tanHalfMin = Math.tan(((opts.minAngleDeg ?? 30) * Math.PI) / 360);
     const beta = opts.beta ?? 0.01;
     const lambda = opts.lambda ?? 0.02;
@@ -556,13 +557,16 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             // of the group (5e-2 → 2e-16 in 200 steps), and the link's middle point against
             // an ordinary edge of the grid (1e-7 → 2e-16). With the reaction every node of a
             // contact feels it, and the push is a pair of equal and opposite forces.
-            // Only contacts with a long segment on either side by default: between ordinary
-            // segments both sides probe each other anyway, and doubling the push there slowed
-            // a finely divided grid to half its speed (see `reaction` in the options).
+            // By default only where it is needed: a held node (it cannot give way, so without
+            // the reaction an edge pressed against a pinned group's corner closed to the gap
+            // floor and stayed: 0.008 where the same run with the reaction keeps 0.15), or a
+            // long segment on either side. Between ordinary free segments both sides probe
+            // each other anyway, and doubling the push there slowed a finely divided grid to
+            // half its speed (see `reaction` in the options).
             if (
                 hit[l] >= 0 &&
                 (reaction === 'all' ||
-                    (reaction === 'long' && (isLong?.[hitSeg[l]] || onLong?.[i])))
+                    (reaction === 'auto' && (fixed[i] || isLong?.[hitSeg[l]] || onLong?.[i])))
             ) {
                 const sa = segs.a[hitSeg[l]];
                 const sb = segs.b[hitSeg[l]];
