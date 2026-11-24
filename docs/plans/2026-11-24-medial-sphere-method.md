@@ -272,3 +272,36 @@ The cost per step is about 21 µs per segment, and CG needs 40 iterations at 2 p
 against 157 at 8. A graph is therefore best run at 2 segments per edge; the earlier "20k
 segments" case was the 1,296-node grid at 8 per edge. What remains slow is the NUMBER of steps
 (whole-drawing motion), which is the solver lever, not this one.
+
+## The graph flow in the app, and the drag (2026-11-24)
+
+- Store switch `graphFlow` ("Graph flow" in the panel) makes the local graph flow the layout
+  engine for a FLAT graph: the frame loop ticks it instead of a tangent-point step. Rest
+  lengths are the geometry at the first tick of a run; the clearance is a fraction of the mean
+  edge length. A graph that is not flat falls back to the ordinary descent and says so.
+- New preset `flat-grid` (a jittered planar grid), the only flat preset.
+- **The drag is a bounded spring, not a forced move.** A pin whose target is elsewhere pulls
+  its node with `pinStiffness·distance/r`, capped at `pinForceMax`; the node otherwise takes
+  part in the flow, so the contact barrier acts on it. The first version marched a pinned node
+  towards its target at the speed its motion limit allowed: a 2×2 blob dragged into a 12×12
+  grid stopped after a third of the way, in contact, for good. With the spring it arrives
+  (0.2 from its target after 900 steps at 11 ms each), with 0 crossings at every step.
+
+**What the drag can and cannot do — a limit of the idea, not of the code.** The flow never
+lets an edge pass through another, so the drawing's embedding is fixed: which face every node
+sits in cannot change. Dragging a blob therefore drags the map along and deforms it; a blob
+cannot be carried ACROSS the map into another region, because its own edges would have to
+cross the edges in between. The benchmark picture shows exactly that: the corner block pulled
+towards the centre shears the whole grid into a diamond.
+
+So the mind-map move ("this blob does not belong here, put it over there and make room")
+needs one more piece, and it is a choice of semantics:
+1. *Ghost drag:* the dragged group's own edges are exempt from the collision limits while
+   it is dragged (they pass over the drawing); on drop, the flow runs with whatever crossings
+   the new position has. Cheap; leaves crossings where the graph's connections make them
+   unavoidable — which is honest, since moving a connected blob far away DOES stretch its
+   links across what lies between.
+2. *Cut and re-insert:* detach the group, route its connecting edges around obstacles
+   (an edge-routing problem), re-attach. Planar when the graph allows it; much more work.
+Recommended: 1 first (it is what "move it there" means in every note-taking tool), then
+look at the crossings it leaves and decide whether 2 is worth building.

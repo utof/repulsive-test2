@@ -41,6 +41,10 @@ export function ControlPanel() {
     const setProjectionMode = useSimStore((s) => s.setProjectionMode);
     const sobolevSolver = useSimStore((s) => s.sobolevSolver);
     const forcePrePass = useSimStore((s) => s.forcePrePass);
+    const graphFlow = useSimStore((s) => s.graphFlow);
+    const setGraphFlow = useSimStore((s) => s.setGraphFlow);
+    const graphFlowClearance = useSimStore((s) => s.graphFlowClearance);
+    const setGraphFlowClearance = useSimStore((s) => s.setGraphFlowClearance);
     const untangleFirst = useSimStore((s) => s.untangleFirst);
     const setUntangleFirst = useSimStore((s) => s.setUntangleFirst);
     const edgeSubdivision = useSimStore((s) => s.edgeSubdivision);
@@ -348,6 +352,31 @@ export function ControlPanel() {
                         onChange={(e) => setUntangleFirst(e.target.checked)}
                     />
                     <span>Untangle first (one closed curve; keeps the knot)</span>
+                </label>
+                {/* Local graph flow as the layout engine for a FLAT graph: edges keep their
+                    lengths, strands nearer than the clearance push apart, nothing can cross.
+                    Click a node to pin it, drag it, and the rest makes room.
+                    @see src/core/medialSphereGraph.ts */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                        type="checkbox"
+                        checked={graphFlow}
+                        onChange={(e) => setGraphFlow(e.target.checked)}
+                    />
+                    <span>Graph flow (flat graphs; drag a pinned node)</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ opacity: graphFlow ? 1 : 0.4 }}>Clearance (× edge length):</span>
+                    <input
+                        type="number"
+                        min={0.05}
+                        max={2}
+                        step={0.05}
+                        value={graphFlowClearance}
+                        disabled={!graphFlow}
+                        onChange={(e) => setGraphFlowClearance(Number.parseFloat(e.target.value))}
+                        style={{ width: 60 }}
+                    />
                 </label>
                 {/* Segments per edge (rebuilds the graph) and the crossing guard. The guard is
                     the paper's collision-limited step: it holds the drawing's crossings fixed,

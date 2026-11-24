@@ -176,4 +176,18 @@ describe('medialGraphStep', () => {
         expect(amplitude(zig)).toBeLessThan(0.5 * a0);
         expect(span(zig)).toBeGreaterThan(s0);
     });
+    test('a dragged node is pulled to its target by a bounded spring and never jams', () => {
+        // Bar 2 lies 0.3 above bar 1; drag the middle of bar 1 upwards, THROUGH where bar 2 is.
+        const { V, E } = bars(0.3);
+        const g = medialGraphFrom(V, E, 4 * PIECES);
+        const mid = 4 + 15; // interior point 16 of bar 1 (interior points follow the 4 nodes)
+        const target: [number, number] = [g.x[3 * mid], 1.5];
+        for (let k = 0; k < 400; k++)
+            medialGraphStep(g, { r: R, pinTargets: new Map([[mid, target]]) });
+        // It went up, pushing bar 2 ahead of it instead of stopping against it …
+        expect(g.x[3 * mid + 1]).toBeGreaterThan(0.6);
+        // … bar 2 is still above it everywhere near there, and they are not in contact.
+        expect(countPlanarCrossings(vec(g), segs(g), 4 * PIECES)).toBe(0);
+        expect(minClearance(g, 2)).toBeGreaterThan(0.05);
+    });
 });

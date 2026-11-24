@@ -38,6 +38,7 @@ export function Stats() {
     const sobolevL0 = useSimStore((s) => s.sobolevL0);
     const prePassAlpha = useSimStore((s) => s.prePassAlpha);
     const untangleInfo = useSimStore((s) => s.untangleInfo);
+    const graphFlowInfo = useSimStore((s) => s.graphFlowInfo);
     const vertices = useSimStore((s) => s.graph.vertices.length);
     const edges = useSimStore((s) => s.graph.edges.length);
     // Current total length from the LIVE buffer. `live` is mutated in place and
@@ -90,6 +91,20 @@ export function Stats() {
                         : untangleInfo.audit === 'unverified'
                           ? 'not verified'
                           : 'CHANGED — input restored'}
+                </span>
+            )}
+            {/* Local graph flow: how far the nodes still move per step (in units of the
+                clearance), how many are held back by their crossing-free limit, and the cost of
+                a step; or why it is not running. @see src/core/medialSphereGraph.ts */}
+            {graphFlowInfo?.phase === 'running' && (
+                <span style={{ marginRight: 20, color: '#66ccff' }}>
+                    graph flow: move {graphFlowInfo.movePerNode.toExponential(1)}, limited{' '}
+                    {graphFlowInfo.cappedNodes}, {graphFlowInfo.msPerStep.toFixed(0)} ms/step
+                </span>
+            )}
+            {graphFlowInfo?.phase === 'skipped' && (
+                <span style={{ marginRight: 20, color: '#ffaa00' }}>
+                    graph flow not used: {graphFlowInfo.reason}
                 </span>
             )}
             {untangleInfo?.phase === 'skipped' && (

@@ -395,6 +395,14 @@ function Simulation() {
             // @see src/core/forceLayout.ts / the `forcePrePass` field in src/store.ts
             if (!inFlight.current) st.tickPrePass();
             lastEnergy.current = null;
+        } else if (st.running && st.graphFlow && !st.graphFlowSkipped) {
+            // Local graph flow as the layout engine: its steps run on the main thread INSTEAD
+            // of a descent step (same in-flight and E₀ rules as the two phases above). If the
+            // graph is not flat the store sets `graphFlowSkipped` on the first tick and the
+            // ordinary descent below takes over from the next frame.
+            // @see src/core/medialSphereGraph.ts / the `graphFlow` field in src/store.ts
+            if (!inFlight.current) st.tickGraphFlow();
+            lastEnergy.current = null;
         } else if (st.running) {
             // Penalty-config change since last frame ⇒ invalidate the reused E₀
             // (see the lastPenaltyEpoch anchor). Checked before each SEND on BOTH

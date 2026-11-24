@@ -53,30 +53,53 @@ export interface MedialGraph {
 /** Build the flow's graph: every edge cut into `pieces` segments, rest lengths as drawn. */
 export function medialGraphFrom(vertices: Vec3[], edges: Edge[], pieces: number): MedialGraph {
     const g = subdivideGraph(vertices, edges, pieces);
-    const n = g.vertices.length;
+    return medialGraphFromSubdivided(g.vertices, g.edges, g.nodeCount, g.pieces);
+}
+
+/**
+ * Build the flow's graph from one that is ALREADY subdivided the way `subdivideGraph` does it
+ * (original nodes first, then each edge's interior points; edge `e` owns segments
+ * `e·pieces … (e+1)·pieces`). Why: the app's store keeps its graph in that form, and the flow
+ * must address the same vertex indices the pins and the renderer use.
+ * @see src/core/subdivide.ts (the layout this relies on)
+ */
+export function medialGraphFromSubdivided(
+    vertices: readonly Vec3[],
+    edges: readonly Edge[],
+    nodeCount: number,
+    pieces: number,
+): MedialGraph {
+    const n = vertices.length;
     const x = new Float64Array(3 * n);
     for (let i = 0; i < n; i++) {
-        x[3 * i] = g.vertices[i][0];
-        x[3 * i + 1] = g.vertices[i][1];
+        x[3 * i] = vertices[i][0];
+        x[3 * i + 1] = vertices[i][1];
     }
-    const m = g.edges.length;
+    const m = edges.length;
     const a = new Int32Array(m);
     const b = new Int32Array(m);
     const rest = new Float64Array(m);
     for (let k = 0; k < m; k++) {
-        a[k] = g.edges[k][0];
-        b[k] = g.edges[k][1];
+        a[k] = edges[k][0];
+        b[k] = edges[k][1];
         rest[k] = Math.hypot(x[3 * b[k]] - x[3 * a[k]], x[3 * b[k] + 1] - x[3 * a[k] + 1]);
+    }
+    const original = m / pieces;
+    const edgeA = new Int32Array(original);
+    const edgeB = new Int32Array(original);
+    for (let e = 0; e < original; e++) {
+        edgeA[e] = a[e * pieces];
+        edgeB[e] = b[(e + 1) * pieces - 1];
     }
     return {
         n,
         x,
         segs: { a, b },
         rest,
-        nodeCount: g.nodeCount,
-        pieces: g.pieces,
-        edgeA: Int32Array.from(edges, (e) => e[0]),
-        edgeB: Int32Array.from(edges, (e) => e[1]),
+        nodeCount,
+        pieces,
+        edgeA,
+        edgeB,
         pinned: new Uint8Array(n),
     };
 }
@@ -107,6 +130,19 @@ export interface MedialGraphOptions {
     lambda?: number;
     /** Step length before the per-node limits. Default 1 (a quasi-Newton step). */
     tau?: number;
+    /** The drag: node index → (x, y) it is being pulled to. Such a node is NOT held; it gets a
+     *  spring to its target (`pinStiffness`, force capped at `pinForceMax`) and otherwise
+     *  takes part in the flow like any other — so the contact barrier acts on it too.
+     *  Why a spring and not a prescribed move: a node marched towards its target at the speed
+     *  its crossing-free limit allows closes every gap ahead of it by 90% per step and jams
+     *  against the first strand in its way (measured: a 2×2 blob dragged into a 12×12 grid
+     *  stopped after a third of the way with zero clearance, for good). Pulled by a bounded
+     *  force it pushes what is ahead out of the way and advances as room opens. */
+    pinTargets?: ReadonlyMap<number, readonly [number, number]>;
+    /** Drag spring stiffness: the pull is `pinStiffness · distance / r`. Default 4. */
+    pinStiffness?: number;
+    /** Largest drag pull, in units of the tension. Default 6. */
+    pinForceMax?: number;
 }
 
 /** What one step did. */
@@ -466,6 +502,23 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                 linkW.push((bend * ks) / L);
             }
     }
+    // --- the drag: a capped spring from each dragged node to its target ---------------------------
+    const dragDiag = new Float64Array(n);
+    if (opts.pinTargets) {
+        const kp = (opts.pinStiffness ?? 4) / r;
+        const fMax = opts.pinForceMax ?? 6;
+        for (const [i, target] of opts.pinTargets) {
+            if (i >= n || pinned[i]) continue;
+            const dx = x[3 * i] - target[0];
+            const dy = x[3 * i + 1] - target[1];
+            const dist = Math.hypot(dx, dy);
+            if (dist === 0) continue;
+            const f = Math.min(kp * dist, fMax) / dist;
+            G[3 * i] += f * dx;
+            G[3 * i + 1] += f * dy;
+            dragDiag[i] = kp; // its stiffness, for the preconditioner (more damping when capped)
+        }
+    }
     for (let i = 0; i < n; i++)
         if (pinned[i]) {
             G[3 * i] = 0;
@@ -483,7 +536,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     // Laplacian, nodes in contact their full stiffness.
     // Tried and worse: the same stiffness as LINKS instead of a diagonal (free for two
     // strands moving together) — strands ended pressed to zero clearance.
-    for (let i = 0; i < n; i++) diag[i] = (lambda + contact[i]) * alpha * w[i];
+    for (let i = 0; i < n; i++) diag[i] = (lambda + contact[i]) * alpha * w[i] + dragDiag[i];
     for (let k = 0; k < m; k++) {
         diag[segs.a[k]] += stiff[k];
         diag[segs.b[k]] += stiff[k];
