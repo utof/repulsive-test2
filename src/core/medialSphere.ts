@@ -113,10 +113,19 @@ export function makeGrid(x: Float64Array, n: number, cell: number) {
         ((cx * 73856093) ^ (cy * 19349663) ^ (cz * 83492791)) >>> 0;
     const buckets = new Map<number, number[]>();
     const cellOf = new Int32Array(3 * n);
+    // Largest occupied cell index per axis (the smallest is 0). Why: the search below is
+    // clamped to the occupied range, so a FLAT point set (one layer of cells in z) costs 9
+    // bucket lookups per query, not 27 — measured as 13% of a graph-flow step before.
+    let maxCx = 0;
+    let maxCy = 0;
+    let maxCz = 0;
     for (let i = 0; i < n; i++) {
         const cx = Math.floor((x[3 * i] - minX) / cell);
         const cy = Math.floor((x[3 * i + 1] - minY) / cell);
         const cz = Math.floor((x[3 * i + 2] - minZ) / cell);
+        if (cx > maxCx) maxCx = cx;
+        if (cy > maxCy) maxCy = cy;
+        if (cz > maxCz) maxCz = cz;
         cellOf[3 * i] = cx;
         cellOf[3 * i + 1] = cy;
         cellOf[3 * i + 2] = cz;
@@ -126,15 +135,58 @@ export function makeGrid(x: Float64Array, n: number, cell: number) {
         else buckets.set(k, [i]);
     }
     return {
+        /** Visits every point whose cell is within `ceil(radius / cell)` cells of the cell that
+         *  the location (px, py, pz) falls in — a location that need not be one of the points
+         *  (the graph flow asks "which segment midpoints are near this node"). */
+        forNearPoint(
+            px: number,
+            py: number,
+            pz: number,
+            radius: number,
+            visit: (j: number) => void,
+        ): void {
+            const reach = Math.max(1, Math.ceil(radius / cell));
+            const cx = Math.floor((px - minX) / cell);
+            const cy = Math.floor((py - minY) / cell);
+            const cz = Math.floor((pz - minZ) / cell);
+            const x0 = Math.max(cx - reach, 0);
+            const x1 = Math.min(cx + reach, maxCx);
+            const y0 = Math.max(cy - reach, 0);
+            const y1 = Math.min(cy + reach, maxCy);
+            const z0 = Math.max(cz - reach, 0);
+            const z1 = Math.min(cz + reach, maxCz);
+            for (let ix = x0; ix <= x1; ix++)
+                for (let iy = y0; iy <= y1; iy++)
+                    for (let iz = z0; iz <= z1; iz++) {
+                        const b = buckets.get(key(ix, iy, iz));
+                        if (!b) continue;
+                        for (let q = 0; q < b.length; q++) {
+                            const j = b[q];
+                            // A hash collision can return a far cell's points: check the cell.
+                            if (
+                                cellOf[3 * j] === ix &&
+                                cellOf[3 * j + 1] === iy &&
+                                cellOf[3 * j + 2] === iz
+                            )
+                                visit(j);
+                        }
+                    }
+        },
         /** Visits every point whose cell is within `ceil(radius / cell)` cells of point `i`'s. */
         forNear(i: number, radius: number, visit: (j: number) => void): void {
             const reach = Math.max(1, Math.ceil(radius / cell));
             const cx = cellOf[3 * i];
             const cy = cellOf[3 * i + 1];
             const cz = cellOf[3 * i + 2];
-            for (let dx = -reach; dx <= reach; dx++)
-                for (let dy = -reach; dy <= reach; dy++)
-                    for (let dz = -reach; dz <= reach; dz++) {
+            const x0 = Math.max(-reach, -cx);
+            const x1 = Math.min(reach, maxCx - cx);
+            const y0 = Math.max(-reach, -cy);
+            const y1 = Math.min(reach, maxCy - cy);
+            const z0 = Math.max(-reach, -cz);
+            const z1 = Math.min(reach, maxCz - cz);
+            for (let dx = x0; dx <= x1; dx++)
+                for (let dy = y0; dy <= y1; dy++)
+                    for (let dz = z0; dz <= z1; dz++) {
                         const b = buckets.get(key(cx + dx, cy + dy, cz + dz));
                         if (!b) continue;
                         for (let q = 0; q < b.length; q++) {
@@ -606,48 +658,26 @@ export function nodeMotionCaps(
 ): Float64Array {
     const m = segs.a.length;
     const cap = new Float64Array(nNodes).fill(frac * within);
-    const len = new Float64Array(m);
-    let mean = 0;
-    for (let k = 0; k < m; k++) {
-        const a = segs.a[k];
-        const b = segs.b[k];
-        len[k] = Math.hypot(
-            x[3 * b] - x[3 * a],
-            x[3 * b + 1] - x[3 * a + 1],
-            x[3 * b + 2] - x[3 * a + 2],
-        );
-        mean += len[k] / m;
-    }
-    // LONG segments (over 3× the typical length) are paired with every segment directly
-    // instead of through the grid: the grid's reach must cover the longest segment it serves,
-    // and one edge across the whole drawing would turn the search into all pairs. With no long
-    // segment this is the plain grid search. "Typical" = the mean of the segments not over
-    // twice the plain mean, so a few long ones do not hide themselves.
-    let typical = 0;
-    let nTypical = 0;
-    for (let k = 0; k < m; k++)
-        if (len[k] <= 2 * mean) {
-            typical += len[k];
-            nTypical++;
+    let len: Float64Array | undefined;
+    if (close) {
+        len = new Float64Array(m);
+        for (let k = 0; k < m; k++) {
+            const dx = x[3 * segs.b[k]] - x[3 * segs.a[k]];
+            const dy = x[3 * segs.b[k] + 1] - x[3 * segs.a[k] + 1];
+            const dz = x[3 * segs.b[k] + 2] - x[3 * segs.a[k] + 2];
+            len[k] = Math.sqrt(dx * dx + dy * dy + dz * dz);
         }
-    typical /= nTypical || 1;
-    const longSegs: number[] = [];
-    let maxEdge = 0;
-    for (let k = 0; k < m; k++)
-        if (len[k] > 3 * typical) longSegs.push(k);
-        else maxEdge = Math.max(maxEdge, len[k]);
-    const isLong = longSegs.length > 0 ? new Uint8Array(m) : undefined;
-    for (const k of longSegs) (isLong as Uint8Array)[k] = 1;
-    const pair = (e: number, f: number): void => {
+    }
+    // The search (grid, long segments apart) is `forNearSegmentPairs`'s: one place for it.
+    forNearSegmentPairs(x, nNodes, segs, within, (e, f) => {
+        if (skip?.(e, f)) return;
         const a1 = segs.a[e];
         const b1 = segs.b[e];
         const a2 = segs.a[f];
         const b2 = segs.b[f];
-        if (a1 === a2 || a1 === b2 || b1 === a2 || b1 === b2) return;
-        if (skip?.(e, f)) return;
         const D = segmentDistance(x, a1, b1, a2, b2);
         if (D >= within) return;
-        if (close && D < close.below && D < close.rel * Math.min(len[e], len[f])) {
+        if (close && len && D < close.below && D < close.rel * Math.min(len[e], len[f])) {
             close.k1.push(e);
             close.k2.push(f);
             close.d.push(D);
@@ -657,58 +687,7 @@ export function nodeMotionCaps(
         if (c < cap[b1]) cap[b1] = c;
         if (c < cap[a2]) cap[a2] = c;
         if (c < cap[b2]) cap[b2] = c;
-    };
-    const reach = within + 2 * maxEdge;
-    const grid = makeGrid(x, nNodes, reach);
-    const start = new Int32Array(nNodes + 1);
-    for (let k = 0; k < m; k++) start[segs.a[k] + 1]++;
-    for (let i = 0; i < nNodes; i++) start[i + 1] += start[i];
-    const fill = Int32Array.from(start.subarray(0, nNodes));
-    const byFirst = new Int32Array(m);
-    for (let k = 0; k < m; k++) byFirst[fill[segs.a[k]]++] = k;
-    for (let e = 0; e < m; e++) {
-        if (isLong?.[e]) continue;
-        const a1 = segs.a[e];
-        grid.forNear(a1, reach, (j) => {
-            for (let q = start[j]; q < start[j + 1]; q++) {
-                const f = byFirst[q];
-                if (f <= e || isLong?.[f]) continue;
-                const a2 = segs.a[f];
-                // Cheap rejection before the exact distance.
-                if (
-                    Math.hypot(
-                        x[3 * a1] - x[3 * a2],
-                        x[3 * a1 + 1] - x[3 * a2 + 1],
-                        x[3 * a1 + 2] - x[3 * a2 + 2],
-                    ) -
-                        2 * maxEdge >=
-                    within
-                )
-                    continue;
-                pair(e, f);
-            }
-        });
-    }
-    // Long segments against everything (each long–long pair once). Cheap rejection: the other
-    // segment's first endpoint is farther from the long segment's midpoint than half its
-    // length + the other's length + `within`.
-    for (const e of longSegs) {
-        const a1 = segs.a[e];
-        const b1 = segs.b[e];
-        const mx = 0.5 * (x[3 * a1] + x[3 * b1]);
-        const my = 0.5 * (x[3 * a1 + 1] + x[3 * b1 + 1]);
-        const mz = 0.5 * (x[3 * a1 + 2] + x[3 * b1 + 2]);
-        for (let f = 0; f < m; f++) {
-            if (f === e || (isLong?.[f] && f < e)) continue;
-            const a2 = segs.a[f];
-            if (
-                Math.hypot(x[3 * a2] - mx, x[3 * a2 + 1] - my, x[3 * a2 + 2] - mz) >=
-                0.5 * len[e] + len[f] + within
-            )
-                continue;
-            pair(e, f);
-        }
-    }
+    });
     return cap;
 }
 
@@ -716,91 +695,85 @@ export function nodeMotionCaps(
  * Visit every pair of segments (sharing no node, each pair once) that can be within `within`
  * of each other; the visitor does the exact test. A superset: a visited pair may be farther
  * apart.
- * Why one helper: three callers need the same search (clearance, crossing count, crossing
- * pairs), and the same trap applies to all of them — the grid's reach must cover the longest
- * segment it serves, so one edge drawn across the whole map turns the search into all pairs
- * (a crossing count of 5,040 segments with four such edges took seconds). Segments over 3×
- * the typical length are therefore paired with everything directly, with a cheap distance
- * test, and kept out of the grid. Same rule as `nodeMotionCaps`.
+ * Why one helper: every caller needs the same search (motion limits, clearance, crossing
+ * count, crossing pairs), and the same trap applies to all of them — the grid's reach must
+ * cover the longest segment it serves, so one edge drawn across the whole map turns the
+ * search into all pairs (a crossing count of 5,040 segments with four such edges took
+ * seconds). Segments over 3× the typical length ("typical" = the mean of the segments not
+ * over twice the plain mean, so a few long ones do not hide themselves) are therefore paired
+ * with everything directly, with a cheap distance test, and kept out of the grid.
+ * The grid holds segment MIDPOINTS: two segments can be within `within` only if their
+ * midpoints are within `within` + their two half-lengths. Why midpoints and not first
+ * endpoints (the first version): the reach is one segment length shorter and the test is per
+ * pair, which halved the candidates — the search was half of a graph-flow step in a profile.
+ * @see docs/plans/2026-11-24-medial-sphere-method.md
  */
 export function forNearSegmentPairs(
     x: Float64Array,
-    nNodes: number,
+    _nNodes: number,
     segs: SegmentList,
     within: number,
     visit: (k1: number, k2: number) => void,
 ): void {
     const m = segs.a.length;
-    const len = new Float64Array(m);
+    const mid = new Float64Array(3 * m);
+    const half = new Float64Array(m);
     let mean = 0;
     for (let k = 0; k < m; k++) {
         const a = segs.a[k];
         const b = segs.b[k];
-        len[k] = Math.hypot(
-            x[3 * b] - x[3 * a],
-            x[3 * b + 1] - x[3 * a + 1],
-            x[3 * b + 2] - x[3 * a + 2],
-        );
-        mean += len[k] / m;
+        const dx = x[3 * b] - x[3 * a];
+        const dy = x[3 * b + 1] - x[3 * a + 1];
+        const dz = x[3 * b + 2] - x[3 * a + 2];
+        half[k] = 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz);
+        mid[3 * k] = x[3 * a] + 0.5 * dx;
+        mid[3 * k + 1] = x[3 * a + 1] + 0.5 * dy;
+        mid[3 * k + 2] = x[3 * a + 2] + 0.5 * dz;
+        mean += half[k] / m;
     }
     let typical = 0;
     let nTypical = 0;
     for (let k = 0; k < m; k++)
-        if (len[k] <= 2 * mean) {
-            typical += len[k];
+        if (half[k] <= 2 * mean) {
+            typical += half[k];
             nTypical++;
         }
     typical /= nTypical || 1;
     const isLong = new Uint8Array(m);
     const longSegs: number[] = [];
-    let maxEdge = 0;
+    let maxHalf = 0;
     for (let k = 0; k < m; k++)
-        if (len[k] > 3 * typical) {
+        if (half[k] > 3 * typical) {
             isLong[k] = 1;
             longSegs.push(k);
-        } else maxEdge = Math.max(maxEdge, len[k]);
+        } else maxHalf = Math.max(maxHalf, half[k]);
     const shares = (e: number, f: number): boolean =>
         segs.a[e] === segs.a[f] ||
         segs.a[e] === segs.b[f] ||
         segs.b[e] === segs.a[f] ||
         segs.b[e] === segs.b[f];
-    const reach = within + 2 * maxEdge;
-    const grid = makeGrid(x, nNodes, reach);
-    const start = new Int32Array(nNodes + 1);
-    for (let k = 0; k < m; k++) start[segs.a[k] + 1]++;
-    for (let i = 0; i < nNodes; i++) start[i + 1] += start[i];
-    const fill = Int32Array.from(start.subarray(0, nNodes));
-    const byFirst = new Int32Array(m);
-    for (let k = 0; k < m; k++) byFirst[fill[segs.a[k]]++] = k;
+    const near = (e: number, f: number): boolean => {
+        const dx = mid[3 * e] - mid[3 * f];
+        const dy = mid[3 * e + 1] - mid[3 * f + 1];
+        const dz = mid[3 * e + 2] - mid[3 * f + 2];
+        const lim = within + half[e] + half[f];
+        return dx * dx + dy * dy + dz * dz < lim * lim;
+    };
+    const reach = within + 2 * maxHalf;
+    const grid = makeGrid(mid, m, reach);
     for (let e = 0; e < m; e++) {
         if (isLong[e]) continue;
-        const a1 = segs.a[e];
-        // Segments starting at the same node share it; `forNear` leaves that node out.
-        grid.forNear(a1, reach, (j) => {
-            for (let q = start[j]; q < start[j + 1]; q++) {
-                const f = byFirst[q];
-                if (f <= e || isLong[f] || shares(e, f)) continue;
-                visit(e, f);
-            }
+        grid.forNear(e, reach, (f) => {
+            if (f <= e || isLong[f] || shares(e, f) || !near(e, f)) return;
+            visit(e, f);
         });
     }
-    for (const e of longSegs) {
-        const a1 = segs.a[e];
-        const b1 = segs.b[e];
-        const mx = 0.5 * (x[3 * a1] + x[3 * b1]);
-        const my = 0.5 * (x[3 * a1 + 1] + x[3 * b1 + 1]);
-        const mz = 0.5 * (x[3 * a1 + 2] + x[3 * b1 + 2]);
+    // Long segments against everything (each long–long pair once).
+    for (const e of longSegs)
         for (let f = 0; f < m; f++) {
-            if (f === e || (isLong[f] && f < e) || shares(e, f)) continue;
-            const a2 = segs.a[f];
-            if (
-                Math.hypot(x[3 * a2] - mx, x[3 * a2 + 1] - my, x[3 * a2 + 2] - mz) >=
-                0.5 * len[e] + len[f] + within
-            )
-                continue;
+            if (f === e || (isLong[f] && f < e) || shares(e, f) || !near(e, f)) continue;
             visit(e, f);
         }
-    }
 }
 
 /** Is the motion `x → x − step·d` of a closed curve provably free of strand crossings? */
@@ -830,7 +803,10 @@ function segmentDistance(x: Float64Array, a: number, b: number, c: number, d: nu
     // Re-clamp s for the clamped t (the standard two-pass closest-point rule).
     s = A > 0 ? Math.max(0, Math.min(1, (B * t - D) / A)) : 0;
     t = C > 0 ? Math.max(0, Math.min(1, (B * s + E) / C)) : 0;
-    return Math.hypot(wx + s * ux - t * vx, wy + s * uy - t * vy, wz + s * uz - t * vz);
+    const rx = wx + s * ux - t * vx;
+    const ry = wy + s * uy - t * vy;
+    const rz = wz + s * uz - t * vz;
+    return Math.sqrt(rx * rx + ry * ry + rz * rz); // not Math.hypot: several times slower here
 }
 
 /** What one step did. */

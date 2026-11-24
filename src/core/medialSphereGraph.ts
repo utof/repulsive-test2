@@ -227,9 +227,6 @@ interface Topology {
     own: Int32Array;
     /** Keys `min·nodeCount + max` of the original edges, for junction–junction adjacency. */
     edgeKeys: Set<number>;
-    /** CSR of the segments by their first endpoint. */
-    segStart: Int32Array;
-    segByFirst: Int32Array;
 }
 
 const topologies = new WeakMap<SegmentList, Topology>();
@@ -261,13 +258,7 @@ function topologyOf(g: MedialGraph): Topology {
         edgeKeys.add(
             Math.min(g.edgeA[e], g.edgeB[e]) * g.nodeCount + Math.max(g.edgeA[e], g.edgeB[e]),
         );
-    const segStart = new Int32Array(n + 1);
-    for (let k = 0; k < m; k++) segStart[segs.a[k] + 1]++;
-    for (let i = 0; i < n; i++) segStart[i + 1] += segStart[i];
-    const segFill = Int32Array.from(segStart.subarray(0, n));
-    const segByFirst = new Int32Array(m);
-    for (let k = 0; k < m; k++) segByFirst[segFill[segs.a[k]]++] = k;
-    const t = { nbrStart, nbr, own, edgeKeys, segStart, segByFirst };
+    const t = { nbrStart, nbr, own, edgeKeys };
     topologies.set(g.segs, t);
     return t;
 }
@@ -349,8 +340,17 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         (onLong as Uint8Array)[segs.a[k]] = 1;
         (onLong as Uint8Array)[segs.b[k]] = 1;
     }
-    const segReach = 2 * rMax + maxSeg;
-    const grid = makeGrid(x, n, segReach);
+    // The probes' search: a grid of segment MIDPOINTS. A segment can cut a node's capped circle
+    // only if its midpoint is within 2·rMax + half its length of the node. Why midpoints and
+    // not "segments starting at a node within reach" (the first version): the reach is half a
+    // segment shorter and the test is per segment; the search was a third of a step.
+    const segMid = new Float64Array(3 * m);
+    for (let k = 0; k < m; k++) {
+        segMid[3 * k] = 0.5 * (x[3 * segs.a[k]] + x[3 * segs.b[k]]);
+        segMid[3 * k + 1] = 0.5 * (x[3 * segs.a[k] + 1] + x[3 * segs.b[k] + 1]);
+    }
+    const segReach = 2 * rMax + 0.5 * maxSeg;
+    const grid = makeGrid(segMid, m, segReach);
     const reach2 = (2 * rMax) ** 2;
     const maxDir = maxDirections(t, n);
     const dirX = new Float64Array(maxDir);
@@ -412,13 +412,13 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         }
         const ownI = t.own[i];
         const hopI = ownI >= 0 ? hopIndex(i) : -1;
-        // Every segment that starts at a node within reach: its first endpoint is at most
-        // 2·rMax + (its own length) from anything it can affect.
-        grid.forNear(i, segReach, (j0) => {
-            for (let q = t.segStart[j0]; q < t.segStart[j0 + 1]; q++) {
-                const k = t.segByFirst[q];
-                if (!isLong?.[k]) testSegment(k);
-            }
+        // Every segment whose midpoint is within 2·rMax + half its length (see `segMid`).
+        grid.forNearPoint(xi, yi, 0, segReach, (k) => {
+            if (isLong?.[k]) return;
+            const mx = segMid[3 * k] - xi;
+            const my = segMid[3 * k + 1] - yi;
+            const lim = 2 * rMax + 0.5 * len[k];
+            if (mx * mx + my * my < lim * lim) testSegment(k);
         });
         for (const k of longSegs) testSegment(k);
         // forNear skips the node itself: segments starting AT node i contain it and are
@@ -427,6 +427,17 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             const sa = segs.a[k];
             const sb = segs.b[k];
             if (sa === i || sb === i) return;
+            // Cheap rejection first (most candidates end here): the segment's nearest point is
+            // beyond reach of any capped circle.
+            const px = x[3 * sa] - xi;
+            const py = x[3 * sa + 1] - yi;
+            const ux = x[3 * sb] - x[3 * sa];
+            const uy = x[3 * sb + 1] - x[3 * sa + 1];
+            const A = ux * ux + uy * uy;
+            const B = 2 * (px * ux + py * uy);
+            const C = px * px + py * py;
+            const sNear = A > 0 ? Math.max(0, Math.min(1, -B / (2 * A))) : 0;
+            if (A * sNear * sNear + B * sNear + C >= reach2) return;
             const e = Math.floor(k / g.pieces);
             if (ghostEdge?.[e]) return;
             // Two edges that are allowed to cross do not push each other's points away: a point
@@ -474,16 +485,6 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             // (the paper's, and this file's first version) is blind to a strand closer than
             // about one segment length — its nearest node is off to the side, so the circle
             // through it is large — which is how strands closed to a rounding error unseen.
-            const px = x[3 * sa] - xi;
-            const py = x[3 * sa + 1] - yi;
-            const ux = x[3 * sb] - x[3 * sa];
-            const uy = x[3 * sb + 1] - x[3 * sa + 1];
-            const A = ux * ux + uy * uy;
-            const B = 2 * (px * ux + py * uy);
-            const C = px * px + py * py;
-            // Cheap rejection: the segment's nearest point is beyond reach of any capped circle.
-            const sNear = A > 0 ? Math.max(0, Math.min(1, -B / (2 * A))) : 0;
-            if (A * sNear * sNear + B * sNear + C >= reach2) return;
             for (let l = 0; l < nd; l++) {
                 const E = dirX[l] * ux + dirY[l] * uy;
                 const F = dirX[l] * px + dirY[l] * py;
