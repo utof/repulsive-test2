@@ -334,7 +334,10 @@ async function groupMove(size: number, ms: number) {
     while (performance.now() - t0 < ms) {
         const i = store.getState().graphFlowInfo;
         if (i?.phase === 'running') {
-            if (grownMs === null && i.growing === null) {
+            // `!carrying`: the info is refreshed once per frame, and right after the release it
+            // still describes the carry (growing: null) — read like that, "full size at once,
+            // 0 crossings" was reported for a group that had not been set down yet.
+            if (grownMs === null && !i.carrying && i.growing === null) {
                 grownMs = performance.now() - t0;
                 crossingsAtRelease = i.crossings;
             }
