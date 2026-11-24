@@ -703,10 +703,19 @@ export function nodeMotionCaps(
 
 /**
  * Sample points for neighbour searches over segments: every segment is cut into equal pieces
- * no longer than twice the typical segment length ("typical" = the mean of the segments not
- * over twice the plain mean, so a few long ones do not hide themselves). Piece `p` has
+ * no longer than a length chosen for a search of radius `within` (below). Piece `p` has
  * midpoint `mid[3p..]`, half-length `half[p]` and belongs to segment `seg[p]`; the pieces of
  * segment `k` are `start[k] … start[k+1]−1`.
+ * The piece length: `sqrt(mean segment length · within)`, at least `within`; for a search of
+ * (almost) zero radius — counting crossings — the typical segment length instead ("typical" =
+ * the mean of the segments not over twice the plain mean). Never so short that there are more
+ * than 16 pieces per segment on average, never over twice the typical length.
+ * Why the search radius and not the segment lengths alone (the first version: twice the
+ * typical length): the grid's cells should be about as big as what is searched for. In a
+ * real vault drawn as a tree nearly EVERY segment is long (a hub with 2,900 children), the
+ * typical length was 78, the pieces 156 long — and the whole drawing fell into 98 cells, 36
+ * million candidate pairs a step. The square root balances the two costs: shorter pieces
+ * mean more of them, longer pieces mean bigger cells with more in each.
  * Why pieces: a grid's reach has to cover the longest thing in it. One edge drawn across the
  * whole map (a hub's link to a far child, a link of a moved group) made the reach the size of
  * the map and the search all pairs. The first remedy tested such "long" segments against
@@ -718,6 +727,7 @@ export function nodeMotionCaps(
 export function segmentPieces(
     x: Float64Array,
     segs: SegmentList,
+    within: number,
 ): {
     count: number;
     mid: Float64Array;
@@ -744,7 +754,8 @@ export function segmentPieces(
             nTypical++;
         }
     typical /= nTypical || 1;
-    const maxPiece = 2 * typical || Infinity;
+    const scale = within >= 1e-3 * mean ? Math.max(within, Math.sqrt(mean * within)) : typical;
+    const maxPiece = Math.min(2 * typical, Math.max(scale, mean / 16)) || Infinity;
     const start = new Int32Array(m + 1);
     for (let k = 0; k < m; k++) start[k + 1] = start[k] + Math.max(1, Math.ceil(len[k] / maxPiece));
     const count = start[m];
@@ -781,48 +792,196 @@ export function segmentPieces(
  * half-lengths. Why midpoints and not first endpoints (the first version): the reach is one
  * segment length shorter and the test is per pair, which halved the candidates — the search
  * was half of a graph-flow step in a profile.
+ * HUBS: every piece has a "home" — the end of its segment with the most segments at it — and
+ * inside a grid cell the pieces are sorted by home, so that a search skips, as one block, all
+ * pieces with its own home. Why: two segments with the same home share that node and are
+ * never a pair, but at a hub they are all within reach of each other. A real note vault drawn
+ * as a tree has an index note with 2,900 children; finding and discarding those 8 million
+ * pairs was 78% of a 2.2 s step.
  * `active` (optional, per segment): only pairs with at least one active segment are visited,
  * at a cost in proportion to the active ones — for a drawing most of which is at rest.
  * @see docs/plans/2026-11-24-medial-sphere-method.md
  */
 export function forNearSegmentPairs(
     x: Float64Array,
-    _nNodes: number,
+    nNodes: number,
     segs: SegmentList,
     within: number,
     visit: (k1: number, k2: number) => void,
     active?: Uint8Array,
 ): void {
     const m = segs.a.length;
-    const { count, mid, half, seg, start, maxHalf } = segmentPieces(x, segs);
+    const { count, mid, half, seg, start, maxHalf } = segmentPieces(x, segs, within);
+    if (count === 0) return;
     const reach = within + 2 * maxHalf;
-    const grid = makeGrid(mid, count, reach);
+    // Home of a segment: its end with the higher degree.
+    const degree = new Int32Array(nNodes);
+    for (let k = 0; k < m; k++) {
+        degree[segs.a[k]]++;
+        degree[segs.b[k]]++;
+    }
+    const home = new Int32Array(m);
+    for (let k = 0; k < m; k++)
+        home[k] = degree[segs.a[k]] >= degree[segs.b[k]] ? segs.a[k] : segs.b[k];
+    // The grid: cells of side `reach`, pieces listed per occupied cell, sorted by home.
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
+    for (let p = 0; p < count; p++) {
+        minX = Math.min(minX, mid[3 * p]);
+        minY = Math.min(minY, mid[3 * p + 1]);
+        minZ = Math.min(minZ, mid[3 * p + 2]);
+        maxX = Math.max(maxX, mid[3 * p]);
+        maxY = Math.max(maxY, mid[3 * p + 1]);
+        maxZ = Math.max(maxZ, mid[3 * p + 2]);
+    }
+    const nx = Math.floor((maxX - minX) / reach) + 1;
+    const ny = Math.floor((maxY - minY) / reach) + 1;
+    const nz = Math.floor((maxZ - minZ) / reach) + 1;
+    // Cell key cx + nx·(cy + ny·cz): exact in a double far beyond any drawing's extent.
+    const cellOf = new Int32Array(3 * count);
+    const cellId = new Map<number, number>();
+    const idOf = new Int32Array(count);
+    for (let p = 0; p < count; p++) {
+        const cx = Math.floor((mid[3 * p] - minX) / reach);
+        const cy = Math.floor((mid[3 * p + 1] - minY) / reach);
+        const cz = Math.floor((mid[3 * p + 2] - minZ) / reach);
+        cellOf[3 * p] = cx;
+        cellOf[3 * p + 1] = cy;
+        cellOf[3 * p + 2] = cz;
+        const key = cx + nx * (cy + ny * cz);
+        let id = cellId.get(key);
+        if (id === undefined) {
+            id = cellId.size;
+            cellId.set(key, id);
+        }
+        idOf[p] = id;
+    }
+    const cells = cellId.size;
+    const cellStart = new Int32Array(cells + 1);
+    for (let p = 0; p < count; p++) cellStart[idOf[p] + 1]++;
+    for (let c = 0; c < cells; c++) cellStart[c + 1] += cellStart[c];
+    const fill = Int32Array.from(cellStart.subarray(0, cells));
+    const items = new Int32Array(count);
+    for (let p = 0; p < count; p++) items[fill[idOf[p]]++] = p;
+    for (let c = 0; c < cells; c++)
+        if (cellStart[c + 1] - cellStart[c] > 1)
+            items
+                .subarray(cellStart[c], cellStart[c + 1])
+                .sort((p, q) => home[seg[p]] - home[seg[q]]);
+    // The pieces' data again, in the order the cells list them. Why: the search below reads
+    // cell after cell; with the midpoints where the search finds them it reads memory in
+    // order and rejects most candidates on distance before touching anything else (the loop
+    // over candidates, not the pairs it finds, was the cost on a dense fan: 23 million
+    // candidates for 230 thousand pairs).
+    const itX = new Float64Array(count);
+    const itY = new Float64Array(count);
+    const itZ = new Float64Array(count);
+    const itHalf = new Float64Array(count);
+    const itSeg = new Int32Array(count);
+    const itHome = new Int32Array(count);
+    for (let t = 0; t < count; t++) {
+        const q = items[t];
+        itX[t] = mid[3 * q];
+        itY[t] = mid[3 * q + 1];
+        itZ[t] = mid[3 * q + 2];
+        itHalf[t] = half[q];
+        itSeg[t] = seg[q];
+        itHome[t] = home[seg[q]];
+    }
+    // Per cell: its neighbour cells (itself included), and its BIG runs of one home (16 pieces
+    // or more — a hub's). Why tables: looking both up per piece (a map lookup and two binary
+    // searches for each of a piece's 9 cells) cost more than the search itself.
+    const cellXYZ = new Int32Array(3 * cells);
+    for (let p = 0; p < count; p++) {
+        cellXYZ[3 * idOf[p]] = cellOf[3 * p];
+        cellXYZ[3 * idOf[p] + 1] = cellOf[3 * p + 1];
+        cellXYZ[3 * idOf[p] + 2] = cellOf[3 * p + 2];
+    }
+    const nbrStart = new Int32Array(cells + 1);
+    const nbr: number[] = [];
+    const runStart = new Int32Array(cells + 1);
+    const runHome: number[] = [];
+    const runLo: number[] = [];
+    const runHi: number[] = [];
+    for (let c = 0; c < cells; c++) {
+        const cx = cellXYZ[3 * c];
+        const cy = cellXYZ[3 * c + 1];
+        const cz = cellXYZ[3 * c + 2];
+        for (let iz = Math.max(0, cz - 1); iz <= Math.min(nz - 1, cz + 1); iz++)
+            for (let iy = Math.max(0, cy - 1); iy <= Math.min(ny - 1, cy + 1); iy++)
+                for (let ix = Math.max(0, cx - 1); ix <= Math.min(nx - 1, cx + 1); ix++) {
+                    const id = cellId.get(ix + nx * (iy + ny * iz));
+                    if (id !== undefined) nbr.push(id);
+                }
+        nbrStart[c + 1] = nbr.length;
+        for (let t = cellStart[c]; t < cellStart[c + 1]; ) {
+            let u = t + 1;
+            while (u < cellStart[c + 1] && itHome[u] === itHome[t]) u++;
+            if (u - t >= 16) {
+                runHome.push(itHome[t]);
+                runLo.push(t);
+                runHi.push(u);
+            }
+            t = u;
+        }
+        runStart[c + 1] = runHome.length;
+    }
+    const nbrOf = Int32Array.from(nbr);
+    const rHome = Int32Array.from(runHome);
+    const rLo = Int32Array.from(runLo);
+    const rHi = Int32Array.from(runHi);
     // seen[f] = e: the pair (e, f) has been visited (a long segment is found once per piece).
     const seen = new Int32Array(m).fill(-1);
     for (let e = 0; e < m; e++) {
         if (active && !active[e]) continue;
-        for (let p = start[e]; p < start[e + 1]; p++)
-            grid.forNear(p, reach, (q) => {
-                const f = seg[q];
-                if (f === e || seen[f] === e) return;
-                // Each pair once: from its lower segment — or, when that one is not active
-                // and so never starts a search, from the higher one.
-                if (f < e && (!active || active[f])) return;
-                const dx = mid[3 * p] - mid[3 * q];
-                const dy = mid[3 * p + 1] - mid[3 * q + 1];
-                const dz = mid[3 * p + 2] - mid[3 * q + 2];
-                const lim = within + half[p] + half[q];
-                if (dx * dx + dy * dy + dz * dz >= lim * lim) return;
-                seen[f] = e;
-                if (
-                    segs.a[e] === segs.a[f] ||
-                    segs.a[e] === segs.b[f] ||
-                    segs.b[e] === segs.a[f] ||
-                    segs.b[e] === segs.b[f]
-                )
-                    return;
-                visit(e, f);
-            });
+        const a1 = segs.a[e];
+        const b1 = segs.b[e];
+        const h = home[e];
+        for (let p = start[e]; p < start[e + 1]; p++) {
+            const px = mid[3 * p];
+            const py = mid[3 * p + 1];
+            const pz = mid[3 * p + 2];
+            const hp = within + half[p];
+            const c = idOf[p];
+            for (let w = nbrStart[c]; w < nbrStart[c + 1]; w++) {
+                const id = nbrOf[w];
+                const hi = cellStart[id + 1];
+                // The block of pieces with this segment's own home: skipped whole.
+                let skipLo = hi;
+                let skipHi = hi;
+                for (let u = runStart[id]; u < runStart[id + 1]; u++)
+                    if (rHome[u] === h) {
+                        skipLo = rLo[u];
+                        skipHi = rHi[u];
+                        break;
+                    }
+                for (let t = cellStart[id]; t < hi; t++) {
+                    if (t === skipLo) {
+                        t = skipHi - 1;
+                        continue;
+                    }
+                    const dx = px - itX[t];
+                    const dy = py - itY[t];
+                    const dz = pz - itZ[t];
+                    const lim = hp + itHalf[t];
+                    if (dx * dx + dy * dy + dz * dz >= lim * lim) continue;
+                    const f = itSeg[t];
+                    if (f === e || seen[f] === e) continue;
+                    // Each pair once: from its lower segment — or, when that one is not
+                    // active and so never starts a search, from the higher one.
+                    if (f < e && (!active || active[f])) continue;
+                    seen[f] = e;
+                    const a2 = segs.a[f];
+                    const b2 = segs.b[f];
+                    if (a1 === a2 || a1 === b2 || b1 === a2 || b1 === b2) continue;
+                    visit(e, f);
+                }
+            }
+        }
     }
 }
 
