@@ -38,6 +38,9 @@ const OUT = process.argv[5] ?? 'bench/results/2026-11-24-pkm-graphs.jsonl';
 // comparison run: it repeats the moves only, not the hairball count.
 const MAKE_ROOM = (process.argv[6] ?? 'warp') as 'warp' | 'flow';
 const DUMP = process.env.DUMP;
+// FRAMES=<prefix>: also write every step of each group move as
+// `<prefix>-<graph>-<layout>-<makeRoom>.json`, a panel for bench/app/renderGraphFlow.py.
+const FRAMES = process.env.FRAMES;
 const PIECES = 2;
 const R = 0.3; // clearance, in units of the spacing between neighbouring leaves (1)
 
@@ -230,10 +233,21 @@ function runTree(
     dump(0, blob);
     let cx = 0;
     for (const i of blob) cx += g.x[3 * i] / blob.length;
+    const frames: { x: number[]; label: string }[] = [];
+    const frame = (label: string): void => {
+        if (!FRAMES) return;
+        const xy = new Array<number>(2 * g.n);
+        for (let i = 0; i < g.n; i++) {
+            xy[2 * i] = Math.round(g.x[3 * i] * 1000) / 1000;
+            xy[2 * i + 1] = Math.round(g.x[3 * i + 1] * 1000) / 1000;
+        }
+        frames.push({ x: xy, label });
+    };
     const grab = beginGroupMove(g, blob);
     for (let k = 1; k <= 10; k++) {
         setGroupOffset(g, grab, (-2 * cx * k) / 10, 0); // to the mirror place across the root
         medialGraphStep(g, { r: R });
+        frame('picked up: carried over the map');
     }
     const drop = dropGroupMove(g, grab, { r: R });
     dump(1, blob);
@@ -260,8 +274,35 @@ function runTree(
         prunePassPairs(g, 0.05 * R);
         if (stepsToFullSize !== null && after % 10 === 0)
             worst = Math.max(worst, allowedCrossingsNow(g));
+        frame(
+            stepsToFullSize === null
+                ? `step ${k + 1}: set down small, growing back, ${Math.round(100 * scale)}% of its size`
+                : `full size after ${stepsToFullSize} steps; links landed, ${crossingsAtRelease} crossings in the map, held`,
+        );
     }
     dump(2, blob);
+    if (FRAMES)
+        writeFileSync(
+            `${FRAMES}-${name}-${layout}-${MAKE_ROOM}.json`
+                .replaceAll(' ', '_')
+                .replaceAll(',', ''),
+            JSON.stringify({
+                scene: 'pkm',
+                panels: [
+                    {
+                        title:
+                            MAKE_ROOM === 'flow'
+                                ? 'waiting: the rest is pushed away by contact forces only'
+                                : 'making room: the rest is moved out of the way directly',
+                        a: Array.from(g.segs.a),
+                        b: Array.from(g.segs.b),
+                        nodeCount: g.nodeCount,
+                        hi: blob,
+                        frames,
+                    },
+                ],
+            }),
+        );
     emit({
         bench: 'pkm-graphs',
         graph: name,
