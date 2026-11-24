@@ -558,10 +558,44 @@ after 8 s then. It still arrives.)
    0.02 after settling): allowed crossings pin the strands that cross. Untangling such a
    drawing is a different job from keeping a clean one clean.
 
+## Only step what moves: sleeping nodes (2026-11-24, morning after)
+
+`medialGraphStep` takes `sleep: { below?, after? }`. A node that has moved less than
+`below·r` (default 2e-4) in each of `after` (10) steps in a row goes to sleep: no probes, no
+motion limits, held in the solve. It wakes when anything within reach of it moves more than
+that, when the caller moves it (found by comparing positions with what the last step left),
+or when it is dragged or held. With nothing awake and nothing touched the step returns before
+building anything. The app's tick uses it; the stats line says "at rest" or how many nodes
+are awake. Off by default in the core, so the benchmarks of the flow measure every node.
+
+`bench/app/medialLocalDrag.ts` (`bench/results/2026-11-24-local-drag.jsonl`): a jittered grid
+without tension (so that it comes to rest), settled, then its middle node dragged 2 units.
+
+| Grid | Nodes | At rest, per step: all awake → sleeping | One node dragged: all awake → sleeping | Awake while dragging | Difference at the end |
+|---|---|---|---|---|---|
+| 60×60 | 10,680 | 162 ms → 0.2 ms | 159 ms → 110 ms | 5,112 (48 %) | 0.06 r |
+| 120×120 | 42,960 | 546 ms → 4 ms | 584 ms → 252 ms | 6,889 (16 %) | 0.05 r |
+
+("Difference at the end" = the largest distance between any node's final position with and
+without sleeping. 0 crossings in every run.)
+
+Reading it:
+- **At rest the cost is gone**, at any size. That was the app's common state costing a full
+  step per frame.
+- **A drag is not local in an elastic drawing**: with every node awake, dragging one node 2
+  units moves 6,900 nodes (60×60) or 10,900 (120×120) by more than a hundredth of a
+  clearance. The number awake grows far more slowly than the map (5,100 → 6,900 for four
+  times the nodes), which is the property wanted.
+- **But the time does not follow yet**: 252 ms with 16 % awake. The lengths, the springs and
+  the solve still run over every node whenever anything is awake; that fixed part is now
+  most of the step, and is the next thing to make local.
+- A larger threshold buys little and costs accuracy: at 5e-3 the 60×60 drag takes 57 ms but
+  ends 1.3 r away from the all-awake result.
+
 ## What is next
 
 | # | Step | Why |
 |---|---|---|
-| 1 | Only step what moves (sleeping nodes) | a step costs about 11 µs per segment whatever is happening; at 30,000 nodes that is 0.7 s. First version built on its own branch: 1.3 ms instead of 167 ms per step for a 10,680-node drawing at rest. |
+| 1 | Make the rest of the step local too | with sleeping nodes the probes and motion limits cost only what is awake, but the linear passes and the solve still cover every node: 252 ms per step at 43,000 nodes with 16 % awake |
 | 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
 | 3 | Route a moved group's links around what lies between | open item 2 |
