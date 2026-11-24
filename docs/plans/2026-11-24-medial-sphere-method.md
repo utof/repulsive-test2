@@ -222,3 +222,34 @@ avoids this by keeping the spacing h under r/5 everywhere, which a compressed gr
 violates. **Next: probe a node against SEGMENTS** (the largest circle that stays clear of a
 segment has a closed form). That removes the blind spot, and it removes the need for 8 points
 per edge — which is where the cost at 20k has to come from.
+
+## Update 2 (2026-11-24): segment probes and bending springs — the graph flow holds at 20k
+
+Two more causes found on the graph flow, both of the kind "the probes cannot see it":
+
+| Failure seen | Cause | Change |
+|---|---|---|
+| Strands a rounding error apart at 20,160 segments, unseen by any force | probes tested a node against other NODES; a strand closer than about one segment length has its nearest node off to the side, so the circle through it is large | probes test a node against whole SEGMENTS: `min_s |P(s)|² / (2 x·P(s))` in closed form (two endpoints and the roots of a quadratic) |
+| A junction 1e-15 from the second segment of its own edge, while unrelated edges kept 0.33 | a chain under compression folds up along its own line (an accordion); probes look sideways and see nothing approach along the tangent | bending springs: a spring across every two consecutive segments of an edge, rest length "straight", as a link in P |
+
+Benchmark (`bench/results/2026-11-24-medial-graph-layout.jsonl`, quiet machine):
+
+| Segments | Medial-sphere graph flow | Tangent-point flow + crossing guard |
+|---|---|---|
+| 896 | 28 ms/step; converged in 334 steps (9.5 s); crossings 0 → 0; clearance 0.17 → 0.70 | 788 ms/step; 10 steps (7.9 s); 0 → 0; 0.17 → 0.64 |
+| 4,896 | 197 ms/step; 600 steps (118 s), move down to 1e-3·r; 0 → 0; clearance 0.14 → 0.68; nothing at its motion limit after ~300 steps | first step rejected |
+| 20,160 | 1,217 ms/step; 247 steps in the 300 s budget; 0 → 0; clearance 0.146 → 0.173, still opening | not attempted |
+
+An all-pairs crossing count every 5 steps (same-edge pairs included) found none in 400 steps
+at 4,896 segments and none in 300 steps at 20,160.
+
+**Verdict: the topology holds at every size and the layout is right up to ~5k segments. At 20k
+it is correct but slow** — it needs on the order of a thousand steps at 1.2 s each.
+
+What the cost at 20k is made of, and the levers (not yet pulled):
+1. **Points per edge.** With segment probes the 8 points per edge are no longer needed for the
+   probes to see anything; they are only the edges' ability to bend. 2–3 would cut the size 3×.
+2. **The solve.** Jacobi-preconditioned CG takes 140–160 iterations per coordinate; a sparse
+   Cholesky or a multilevel preconditioner on this graph Laplacian would take a handful.
+3. **Whole-drawing motion.** Opening a band means moving half the drawing; with a better solve
+   the mass floor can drop and that mode gets faster.
