@@ -54,6 +54,14 @@ export function knotDeterminantMod(
     const underT: number[] = [];
     const overEdge: number[] = [];
     const EDGE_TOL = 1e-9;
+    const HEIGHT_TOL = 1e-7;
+    let zLo = Infinity;
+    let zHi = -Infinity;
+    for (let i = 0; i < n; i++) {
+        zLo = Math.min(zLo, pz[i], px[i], py[i]);
+        zHi = Math.max(zHi, pz[i], px[i], py[i]);
+    }
+    const extent = zHi - zLo || 1;
     for (let i = 0; i < n; i++) {
         const i2 = (i + 1) % n;
         const ax = px[i];
@@ -82,7 +90,12 @@ export function knotDeterminantMod(
             if (s < EDGE_TOL || s > 1 - EDGE_TOL || t < EDGE_TOL || t > 1 - EDGE_TOL) return null;
             const zi = pz[i] + s * (pz[i2] - pz[i]);
             const zj = pz[j] + t * (pz[j2] - pz[j]);
-            if (zi === zj) return null;
+            // Which strand is on top must be unambiguous. Two strands pressed together (a
+            // stuck flow leaves them a rounding error apart) have no reliable over/under in
+            // the projections whose crossing falls on the contact: measured on one dataset
+            // trefoil, one direction of five then reported determinant 1 and the other four 3.
+            // Such a projection is refused, like a crossing at a vertex.
+            if (Math.abs(zi - zj) <= HEIGHT_TOL * extent) return null;
             if (zi < zj) {
                 underEdge.push(i);
                 underT.push(s);
@@ -250,7 +263,10 @@ export function knotSignature(c: ClosedCurve): [number, number] | null {
         [0.2672612, 0.5345225, 0.8017837],
         [0.6396021, -0.4264014, 0.6396021],
         [-0.7427814, 0.557086, 0.3713907],
+        [0.1, 0.2, 0.9746794],
+        [0.9, 0.3, 0.3162278],
     ];
+
     for (const d of dirs) {
         const a = knotDeterminantMod(c, KNOT_DETERMINANT_PRIMES[0], d);
         const b = a === null ? null : knotDeterminantMod(c, KNOT_DETERMINANT_PRIMES[1], d);

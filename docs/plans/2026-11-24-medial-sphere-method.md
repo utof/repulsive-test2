@@ -127,7 +127,7 @@ by a failure:
 | A squeezed-then-released edge stays a zigzag | springs do not resist bending | a small constant tension (the paper's length term at 0.5) |
 | The drawing opens very slowly | mass weight 1 turns whole-drawing modes into plain gradient descent | mass weight 0.1 |
 
-Benchmark (`bench/results/2026-11-23-medial-graph-layout.jsonl`; a jittered grid whose middle
+Benchmark (`bench/results/2026-11-24-medial-graph-layout.jsonl`; a jittered grid whose middle
 third is squeezed to a fifth, 8 segments per edge; crossings before → after, clearance =
 smallest distance between non-incident edges):
 
@@ -158,3 +158,67 @@ Next for the graph flow, in order: (1) find and damp the chatter (it is shared w
 it is worth doing once, properly: an energy that is consistent with the frozen-centre gradient,
 or a line search on it); (2) a real sparse solver so the mass term can go to ~0; (3) per-node
 limits that only look as far as the node wants to move.
+
+## Update (2026-11-24, later): what made both flows settle, and what still fails
+
+The tables above are the FIRST version's. Everything below supersedes them; the result files
+were regenerated on a quiet machine.
+
+### The knot flow
+
+| Finding | Evidence | Change |
+|---|---|---|
+| The paper's step length (10–20) is unstable here | at 10 the collision bound cut 91–95% of steps short and the gradient per node chattered at 0.1–0.4; the stopping rule never fired | step length 1 (`P`'s Laplacian is the length term's Hessian, so a plain step is stable only below 2) |
+| The paper's λ and its stopping threshold are not scale-free | the same trefoil stopped on the gradient rule after 107 steps in dataset units (r ≈ 1.2) and never when scaled to extent 2 (r ≈ 0.2) | mass weight `λ/r²`; gradient measure = pointwise gradient × r; identical step counts at both scales (123 / 123, 214 / 214) |
+| Too little damping drives strands into contact | with `λ/r²`, λ = 2: trefoil 47 (largest r) stuck with a zero safe step from step ~100 | λ = 4; a run of 5 zero steps stops the pass as `stuck` |
+| The audit can be fooled by strands in contact | on that stuck curve one projection of five gave determinant 1, the other four 3 | a projection whose crossing has no clear over/under is refused (as one with a crossing at a vertex is) |
+
+Dataset, final (`bench/results/2026-11-24-medial-sphere-knots.jsonl`):
+
+| Dataset | Knot type kept | Crossings: start → end (prototype) | Time, mean (max) | Steps, mean | Stopped on the gradient rule |
+|---|---|---|---|---|---|
+| Trefoil100 | 100 / 100 | 366 → 3.0 (3) | 1.21 s (2.60 s) | 164 | 100 |
+| Knot128 | 128 / 128 | 276 → 10.7 (8.9) | 1.56 s (3.46 s) | 297 | 86 (41 plateau, 1 collapsed) |
+
+The collision bound now limits 1% of steps and refuses none. Not explained: what makes a step
+of 10–20 stable for the authors (their energy carries a factor 2 ours does not, which goes
+the wrong way).
+
+### The hand-off to the tangent-point flow (`bench/results/2026-11-24-untangle-handoff.jsonl`)
+
+| Knot | Points | Pass | Energy at hand-off | Step after | Raw: energy start → after 10 steps | Raw step |
+|---|---|---|---|---|---|---|
+| trefoil0001 | 2,808 | 2.4 s | 17.8 | 1.3 s | 44,222 → 2,094 | 11.9 s |
+| knot0001 (unknot) | 1,998 | 1.1 s | 0.34, converged at once | — | 20,765 → 900 | 5.5 s |
+| knot0002 | 1,611 | 1.0 s | 16.5 | 1.0 s | 11,377 → 416 | 3.2 s |
+| knot0064 | 2,298 | 2.3 s | 65.6 | 1.7 s | 20,993 → 1,211 | 8.0 s |
+
+### The graph flow
+
+| Failure seen | Cause | Change |
+|---|---|---|
+| Move per step stays at 3.6e-2·r for 300 steps at 4,896 segments | the mass term was 10× too soft exactly at the nodes in contact, which overshoot every step | diagonal = (floor + contact stiffness per node)·α·w |
+| Strands pressed together until a rounding error apart | the paper's pull saturates; a spring under 5× compression out-pushes it | contact barrier (deficit × rMax/R), with its stiffness in the diagonal |
+| "Crossing" between two edges of one junction, at distance 1e-14 | they had no interaction at all and folded onto each other | minimum-angle rule (default 30°): they push apart only below it |
+| "Crossing" of an edge with itself, at 5e-18 | an edge's own points had no interaction | fold rule: a circle tighter than a quarter of the arc between two points of one edge is a fold |
+| Tried, worse | contact stiffness as links instead of a diagonal: strands ended at zero clearance | — |
+
+Benchmark, final (`bench/results/2026-11-24-medial-graph-layout.jsonl`):
+
+| Segments | Medial-sphere graph flow | Tangent-point flow + crossing guard |
+|---|---|---|
+| 896 | 23 ms/step; converged in 260 steps (6.0 s); crossings 0 → 0; clearance 0.17 → 0.67 | 879 ms/step; 10 steps (8.8 s); 0 → 0; 0.17 → 0.64 |
+| 4,896 | 173 ms/step; 600 steps, not converged (move 6.7e-4·r); 0 → 0; clearance 0.14 → 0.19; the band opens but stays wavy | first step rejected |
+| 20,160 | 844 ms/step; 356 steps in the 300 s budget; **2 crossings reported**, clearance 0.03 | not attempted |
+
+**Verdict: still PARTIAL.** 38× faster per step where both run; stable and crossing-free up
+to 4,896 segments; not converged there, and it fails at 20,160.
+
+Why it fails at 20,160, and the next step: the probes test a node against other NODES. Two
+strands closer than about one segment length cannot see each other (the nearest node is to
+the side, so the circle through it is large), so neither the barrier nor the fold rule acts,
+and the motion limits then let the gap shrink by 90% per step down to rounding. The paper
+avoids this by keeping the spacing h under r/5 everywhere, which a compressed graph edge
+violates. **Next: probe a node against SEGMENTS** (the largest circle that stays clear of a
+segment has a closed form). That removes the blind spot, and it removes the need for 8 points
+per edge — which is where the cost at 20k has to come from.

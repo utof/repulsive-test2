@@ -25,7 +25,7 @@ import {
 import type { Edge, Vec3 } from './testConfigs';
 
 /** How a pass ended. */
-export type UntangleStop = 'collapsed' | 'plateau' | 'steps';
+export type UntangleStop = 'collapsed' | 'gradient' | 'plateau' | 'stuck' | 'steps';
 
 /** State of one untangle pass. */
 export interface UntangleRun {
@@ -41,6 +41,8 @@ export interface UntangleRun {
     /** Knot determinant of the input (null: the projection had too many crossings to audit). */
     signature0: [number, number] | null;
     steps: number;
+    /** Consecutive steps in which the collision bound allowed no motion. */
+    zeroSteps: number;
     /** Curve length after every step (the plateau rule reads it). */
     lengths: number[];
     stopped: UntangleStop | null;
@@ -57,7 +59,17 @@ export interface UntangleResult {
     audit: 'kept' | 'unverified' | 'failed';
 }
 
-/** Most steps a pass may take (the dataset knots need 200–360). */
+/**
+ * Stopping threshold on the flow's gradient measure (mean pointwise gradient × r, dimensionless).
+ * Why 1e-2 and not the paper's 5e-3: the paper's rule ("below 5e-3·r") is stated in its own
+ * length units and is not scale-free. On the dataset's units (r ≈ 1.2–1.6) it corresponds to
+ * 0.7e-2 – 1.3e-2 of this measure. Measured on all 228 dataset knots: at 5e-3 only 123 stop on
+ * this rule and the rest wait for the length plateau (150–246 steps on average); the end
+ * shapes are the same either way (every trefoil at exactly 3 crossings).
+ */
+export const UNTANGLE_GRADIENT_TOL = 1e-2;
+
+/** Most steps a pass may take (the dataset knots need 100–310). */
 export const UNTANGLE_MAX_STEPS = 5000;
 
 /**
@@ -125,6 +137,7 @@ export function createUntangleRun(
         center,
         signature0: knotSignature(input),
         steps: 0,
+        zeroSteps: 0,
         lengths: [],
         stopped: null,
     };
@@ -138,13 +151,20 @@ export function untangleTick(run: UntangleRun, maxSteps: number, budgetMs: numbe
         run.curve = r.curve;
         run.tryStep = r.nextTryStep;
         run.steps++;
+        run.zeroSteps = r.step === 0 ? run.zeroSteps + 1 : 0;
         run.lengths.push(curveLength(run.curve));
         if (run.curve.n <= 10) run.stopped = 'collapsed';
+        // The paper's rule, made scale-free (see UNTANGLE_GRADIENT_TOL).
+        else if (r.gradientPerNode < UNTANGLE_GRADIENT_TOL) run.stopped = 'gradient';
+        // Stuck: the collision bound allowed no motion at all for 5 steps running — two
+        // strands are in contact and the flow wants to press them further. Say so instead
+        // of idling until the plateau rule notices.
+        else if (run.zeroSteps >= 5) run.stopped = 'stuck';
         else if (run.steps >= UNTANGLE_MAX_STEPS) run.stopped = 'steps';
         else if (run.steps >= 200) {
-            // Plateau: the shortest length of the last 100 steps is within 1% of the shortest
-            // of the 100 before. Why not the paper's gradient rule: our gradient chatters once
-            // the knot is tight and never gets under its threshold (see the plan's results).
+            // Plateau, as a backstop for a knot whose gradient hovers just above the rule's
+            // threshold: the shortest length of the last 100 steps is within 1% of the
+            // shortest of the 100 before.
             let recent = Infinity;
             let before = Infinity;
             for (let q = run.steps - 100; q < run.steps; q++)

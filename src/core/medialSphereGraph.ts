@@ -18,10 +18,12 @@
  * nodes that share a circle; and a move limited only by a collision bound (here per node,
  * `nodeMotionCaps`), with no energy line search. Every interaction is local, so a step costs O(n).
  *
- * A node's circles ignore the nodes of its own edge (and, for a junction, of its incident
- * edges). Why: along one's own edge the "largest empty circle" is the circumcircle of a bend,
- * and pulling towards it makes the edge buckle outward — the paper's space-FILLING behaviour,
- * which a layout does not want.
+ * Along its own edge a node reacts only to a FOLD (the circumcircle of an ordinary bend is not
+ * contact: pulling towards it makes the edge buckle outward, the paper's space-FILLING
+ * behaviour, which a layout does not want). Two edges that meet at a junction interact only
+ * when the angle between them falls under `minAngleDeg`. Both rules sit between two measured
+ * failures — permanent repulsion that swells the drawing, and no repulsion at all, which lets
+ * strands close to a rounding error — and are explained where they are applied in the step.
  *
  * @see docs/plans/2026-11-24-medial-sphere-method.md (the flat-graph spike and its bar)
  * @see src/core/medialSphere.ts (the closed-curve method this is derived from)
@@ -90,12 +92,15 @@ export interface MedialGraphOptions {
     /** Constant tension along every segment (the paper's length term has 1). Default 0.5;
      *  edges settle about `tension / spring` short of their rest length. */
     tension?: number;
-    /** Exponent of a contact barrier on the push (0 = the paper's bounded pull). */
+    /** Smallest angle, in degrees, that two edges meeting at a junction are left alone at;
+     *  below it they push each other apart. Default 30. */
+    minAngleDeg?: number;
+    /** Exponent of the contact barrier on the push (0 = the paper's bounded pull). Default 1. */
     barrier?: number;
     /** Weight of the Laplacian links between nodes sharing a circle. Paper: 0.01. */
     beta?: number;
-    /** Mass weight in units of α (1 = the frozen-centre Hessian of the pull). Default 0.1:
-     *  at 1 the whole-drawing modes crawl (a squeezed 8×8 grid had not opened after 120 steps). */
+    /** Floor of the mass weight, in units of α, for nodes whose probes hit nothing (nodes in
+     *  contact get their own stiffness on top). Default 0.02. */
     lambda?: number;
     /** Step length before the per-node limits. Default 1 (a quasi-Newton step). */
     tau?: number;
@@ -178,9 +183,10 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const rMax = (opts.capRatio ?? 1) * r;
     const ks = opts.spring ?? 4;
     const tension = opts.tension ?? 0.5;
-    const barrier = opts.barrier ?? 0;
+    const barrier = opts.barrier ?? 1;
+    const tanHalfMin = Math.tan(((opts.minAngleDeg ?? 30) * Math.PI) / 360);
     const beta = opts.beta ?? 0.01;
-    const lambda = opts.lambda ?? 0.1;
+    const lambda = opts.lambda ?? 0.02;
     const tau = opts.tau ?? 1;
     // The paper's empirical thickness–weight relation (its reference code: r ≈ 3.36/√α).
     const alpha = (3.36 / r) ** 2;
@@ -209,6 +215,14 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const linkB: number[] = [];
     const linkW: number[] = [];
     const linkSeen = new Set<number>();
+    // Current length of every original edge, and a node's position along its own edge in
+    // segments (1 … pieces−1 for interior points; subdivideGraph's index layout).
+    const edgeLen = new Float64Array(g.edgeA.length);
+    for (let k = 0; k < m; k++) edgeLen[Math.floor(k / g.pieces)] += len[k];
+    const hopIndex = (i: number): number => ((i - g.nodeCount) % (g.pieces - 1)) + 1;
+    // Per node: the stiffness of its pull (per probe in contact, barrier included), averaged
+    // over its probes — what the preconditioner's diagonal has to carry.
+    const contact = new Float64Array(n);
     let minRadius = Infinity;
     for (let i = 0; i < n; i++) {
         const deg = t.nbrStart[i + 1] - t.nbrStart[i];
@@ -245,23 +259,38 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         }
         const ownI = t.own[i];
         grid.forNear(i, 2 * rMax, (j) => {
-            // Skip the node's own edge (and a junction's incident edges): see the file header.
+            // Which rule applies to the pair (i, j):
+            //  - same edge, or a junction and a node of one of its own edges: no interaction
+            //    (along one's own edge the "largest empty circle" is a bend's circumcircle);
+            //  - nodes of two edges that MEET at a junction J: the minimum-angle rule below;
+            //  - anything else: the plain rule.
             const ownJ = t.own[j];
+            let shared = -1; // the junction the two edges share, if they are incident
+            let foldRef = -1; // reference radius of the fold rule, when both are on one edge
             if (ownI >= 0) {
-                if (ownJ === ownI) return;
-                // Two edges that meet at a junction: near it they are always closer than the
-                // range, so letting them repel is a force that never switches off. Measured
-                // on a jittered grid it made every edge wiggle and the drawing swell to 1.5–2.4×
-                // its rest size (the paper's space-FILLING behaviour, through the junctions).
-                if (
-                    ownJ >= 0 &&
-                    (g.edgeA[ownI] === g.edgeA[ownJ] ||
-                        g.edgeA[ownI] === g.edgeB[ownJ] ||
-                        g.edgeB[ownI] === g.edgeA[ownJ] ||
-                        g.edgeB[ownI] === g.edgeB[ownJ])
-                )
-                    return;
-                if (ownJ < 0 && (g.edgeA[ownI] === j || g.edgeB[ownI] === j)) return;
+                const a1 = g.edgeA[ownI];
+                const b1 = g.edgeB[ownI];
+                if (ownJ === ownI || j === a1 || j === b1) {
+                    // Fold rule, for two points of ONE edge. Along a gently bent edge the
+                    // largest empty circle is the bend's own circumcircle, which must not
+                    // count as contact; but with no interaction at all an edge under
+                    // compression folds back onto itself down to a rounding error (measured
+                    // on a 36×36 grid: 5e-18, reported as a crossing). So the circle is
+                    // compared with a quarter of the arc length between the two points:
+                    // tighter than that is a fold, and only a fold is pushed open.
+                    // Neighbours and gentle bends never qualify.
+                    const hopJ = ownJ === ownI ? hopIndex(j) : j === a1 ? 0 : g.pieces;
+                    const arc = (Math.abs(hopIndex(i) - hopJ) * edgeLen[ownI]) / g.pieces;
+                    foldRef = Math.min(rMax, arc / 4);
+                } else if (ownJ >= 0) {
+                    const a2 = g.edgeA[ownJ];
+                    const b2 = g.edgeB[ownJ];
+                    if (a1 === a2 || a1 === b2) shared = a1;
+                    else if (b1 === a2 || b1 === b2) shared = b1;
+                } else if (t.edgeKeys.has(Math.min(a1, j) * g.nodeCount + Math.max(a1, j)))
+                    shared = a1;
+                else if (t.edgeKeys.has(Math.min(b1, j) * g.nodeCount + Math.max(b1, j)))
+                    shared = b1;
             } else if (ownJ >= 0) {
                 if (g.edgeA[ownJ] === i || g.edgeB[ownJ] === i) return;
             } else if (t.edgeKeys.has(Math.min(i, j) * g.nodeCount + Math.max(i, j))) return;
@@ -269,10 +298,29 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
             const dy = x[3 * j + 1] - yi;
             const d2 = dx * dx + dy * dy;
             if (d2 >= reach2 || d2 === 0) return;
+            // Minimum-angle rule. Two edges leaving J at angle θ put, at arc length s from J, a
+            // circle of radius about s·tan(θ/2) between them — always inside the range near J,
+            // so the plain rule would push them apart forever (measured: every edge wiggles and
+            // the drawing swells to 1.5–2.4×). No interaction at all is as wrong the other way:
+            // nothing holds them apart, and they fold onto each other down to a rounding error
+            // (measured: 1e-14, where an orientation test flips and reports a crossing).
+            // So the circle is compared with what the angle `minAngle` would give at this
+            // distance from J, not with rMax: radii are rescaled so that "as open as minAngle"
+            // counts as "nothing in range". Wider than that, the two edges do not interact.
+            let scale = 1;
+            if (foldRef >= 0) {
+                if (foldRef === 0) return;
+                scale = rMax / foldRef;
+            } else if (shared >= 0) {
+                const sJ = Math.hypot(x[3 * shared] - xi, x[3 * shared + 1] - yi);
+                const ref = Math.min(rMax, sJ * tanHalfMin);
+                if (ref <= 0) return;
+                scale = rMax / ref;
+            }
             for (let l = 0; l < nd; l++) {
                 const along = dirX[l] * dx + dirY[l] * dy;
                 if (along <= 0) continue;
-                const R = d2 / (2 * along);
+                const R = (scale * d2) / (2 * along);
                 if (R < rad[l]) {
                     rad[l] = R;
                     hit[l] = j;
@@ -287,13 +335,21 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
         // the first version of this dragged every junction and leaf across empty space).
         let px = 0;
         let py = 0;
+        let stiffSum = 0;
         for (let l = 0; l < nd; l++) {
-            // `barrier` > 0 multiplies the deficit by (rMax/R)^barrier (capped at 1e3): the
-            // push then grows without bound at contact instead of saturating at rMax.
-            const gain =
-                barrier > 0 ? Math.min(1e3, (rMax / Math.max(rad[l], 1e-300)) ** barrier) : 1;
+            // Contact barrier: the deficit is multiplied by (rMax/R)^barrier, so the push grows
+            // without bound as a circle shrinks to nothing. Why: the paper's pull saturates at
+            // rMax, and a spring under 5× compression simply out-pushes it — strands were
+            // pressed together until they were a rounding error apart (4e-17) and the sign of
+            // an orientation test flipped: a "crossing" that no motion limit can prevent,
+            // because nothing ever moved through anything. A force that wins at contact keeps
+            // them apart at a finite distance instead.
+            const Rl = Math.max(rad[l], 1e-12 * rMax);
+            const gain = barrier > 0 ? (rMax / Rl) ** barrier : 1;
             px += gain * (rad[l] - rMax) * dirX[l];
             py += gain * (rad[l] - rMax) * dirY[l];
+            // Its stiffness, relative to the plain pull's: −d/dR of gain·(rMax − R).
+            if (hit[l] >= 0) stiffSum += gain * (1 + (barrier * (rMax - Rl)) / Rl);
             minRadius = Math.min(minRadius, rad[l]);
             const j = hit[l];
             if (j >= 0) {
@@ -309,6 +365,7 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
                 }
             }
         }
+        contact[i] = stiffSum / nd;
         G[3 * i] -= (alpha * w[i] * px) / nd;
         G[3 * i + 1] -= (alpha * w[i] * py) / nd;
     }
@@ -339,7 +396,16 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
 
     // --- P = spring Laplacian + links + λ α M; Jacobi-preconditioned conjugate gradients ------
     const diag = new Float64Array(n);
-    for (let i = 0; i < n; i++) diag[i] = lambda * alpha * w[i];
+    // Mass term = the pull's frozen-centre Hessian, α·w·(share of probes in contact), plus a
+    // floor λ·α·w. Why not a uniform λ: a step of length 1 is stable only where P is at least
+    // half as stiff as the energy. A uniform λ = 1 is stable but makes whole-drawing motion
+    // crawl; λ = 0.1 moves fast but is 10× too soft exactly at the nodes in contact, which then
+    // overshoot every step (measured at 4,896 segments: the move per step stayed at 3.6e-2·r
+    // for 300 steps; with this term it decays to 1.6e-3). Free nodes get (almost) the pure
+    // Laplacian, nodes in contact their full stiffness.
+    // Tried and worse: the same stiffness as LINKS instead of a diagonal (free for two
+    // strands moving together) — strands ended pressed to zero clearance.
+    for (let i = 0; i < n; i++) diag[i] = (lambda + contact[i]) * alpha * w[i];
     for (let k = 0; k < m; k++) {
         diag[segs.a[k]] += stiff[k];
         diag[segs.b[k]] += stiff[k];
