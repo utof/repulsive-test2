@@ -1,5 +1,5 @@
 /**
- * bench/app/medialGraphLayout.ts — bun bench/app/medialGraphLayout.ts [sizes=8,18,36] [maxSteps=300] [budgetSec=120] [tpSteps=10] [tpMaxNodes=6000]
+ * bench/app/medialGraphLayout.ts — bun bench/app/medialGraphLayout.ts [sizes=8,18,36] [maxSteps=300] [budgetSec=120] [tpSteps=10] [tpMaxNodes=6000] [pieces=8]
  *
  * The flat-graph spike of docs/plans/2026-11-24-medial-sphere-method.md: the medial-sphere
  * graph flow (src/core/medialSphereGraph.ts) against the tangent-point flow with the crossing
@@ -36,7 +36,9 @@ const maxSteps = Number(process.argv[3] ?? 300);
 const budgetMs = 1000 * Number(process.argv[4] ?? 120);
 const tpSteps = Number(process.argv[5] ?? 10);
 const tpMaxNodes = Number(process.argv[6] ?? 6000);
-const PIECES = 8;
+// Segments per edge. 8 was needed while probes tested node against node; with segment probes
+// fewer will do, and the cost is proportional. Sixth argument, default 8.
+const PIECES = Number(process.argv[7] ?? 8);
 const R = 0.4;
 const OUT = `bench/results/${new Date().toISOString().slice(0, 10)}-medial-graph-layout.jsonl`;
 
@@ -85,6 +87,7 @@ for (const size of sizes) {
     const segEdges = edgesOf(start);
     const base = {
         fixture: `squeezed ${size}x${size} grid`,
+        pieces: PIECES,
         nodes: start.n,
         segments: segEdges.length,
         crossingsStart: countPlanarCrossings(toVec3(start), segEdges, PIECES),

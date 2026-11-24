@@ -253,3 +253,22 @@ What the cost at 20k is made of, and the levers (not yet pulled):
    Cholesky or a multilevel preconditioner on this graph Laplacian would take a handful.
 3. **Whole-drawing motion.** Opening a band means moving half the drawing; with a better solve
    the mass floor can drop and that mode gets faster.
+
+### Lever 1 measured: points per edge (same day)
+
+With segment probes, fewer points per edge are enough (rows with `pieces` 3 and 2 in the
+results file; the rows without that field are 8 per edge):
+
+| Grid | Points per edge | Segments | Time per step | Clearance | Crossings |
+|---|---|---|---|---|---|
+| 18×18 | 8 | 4,896 | 183 ms | 0.14 → 0.68 | 0 |
+| 18×18 | 3 | 1,836 | 45 ms | 0.14 → 0.67 | 0 |
+| 18×18 | 2 | 1,224 | 21 ms | 0.14 → 0.65 | 0 |
+| 36×36 | 8 | 20,160 | 1,300 ms | 0.146 → 0.157, not opened in 240 s | 0 |
+| 36×36 | 3 | 7,560 | 314 ms | 0.146 → 0.137, not opened in 240 s | 0 |
+| 36×36 | 2 | 5,040 | 106 ms | 0.146 → 0.65, opened (1,500 steps, 158 s) | 0 |
+
+The cost per step is about 21 µs per segment, and CG needs 40 iterations at 2 per edge
+against 157 at 8. A graph is therefore best run at 2 segments per edge; the earlier "20k
+segments" case was the 1,296-node grid at 8 per edge. What remains slow is the NUMBER of steps
+(whole-drawing motion), which is the solver lever, not this one.
