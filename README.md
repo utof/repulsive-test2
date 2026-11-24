@@ -53,3 +53,38 @@ are inert — the descent runs bit-identical to a penalty-free build.
 
 See `docs/superpowers/plans/2026-07-03-sobolev-penalties.md` (§2 derivations, §4 Task 5
 store/UI) and `SelfAvoiding.tex` lines 762–767 for the paper's penalty catalog.
+
+## Tests
+
+Two tiers. Run them with `bun run …`, not bare `bun test` (that is the serial debug mode below).
+
+| Command | What runs | How |
+|---|---|---|
+| `bun run test` | **default tier**: everything except the tests marked full-tier | one `bun test` process per file, 4 at a time (`--jobs N`), longest first |
+| `bun run test:full` | **full tier**: every test (`TEST_TIER=full`) | same runner; **fails if any test was skipped** |
+| `bun run test:serial` | plain `bun test`: all files in one process, default tier (`TEST_TIER=full bun test` for all) | for debugging; the GMRES-bound hierarchical files run x4-6 slower in a shared process |
+
+The runner (`scripts/test.ts`) fails if any file fails, errors or fails to load, prints the output
+of the failing files, then a per-file time table, and in the default tier the number of tests
+**skipped as full-tier**. A subset: `bun scripts/test.ts schur nullspace` (path substrings);
+`--` passes the rest to every `bun test` (e.g. `-- -t 'n=240'`).
+
+**What only the full tier checks** (each site says so in a comment, with what the default tier keeps):
+the n = 960 cells of `schur` and `nullspace` (the 1e-10 bar at the floor of the production range,
+against a refined dense truth), the `schur` tol sweep behind `DEFAULT_SCHUR_TOL`, the θ = 0 streaming
+cross-check on four of six constraint sets, `hierarchicalSaddleReal`'s row-8b cells at n = 960
+(n = 240 runs by default), the `precond` κ ladder's n = 960 rung and its in-band mass-weight sweep,
+`apply`'s n = 2000 `delta_compress` row, the CR gate on `trefoil960` (± pin) and the writer of
+`bench/results/gpu-phase2a-cr.json`, and three wall-clock instruments (`laplacian` O(N), the
+`precond` / `lowOrder` cost logs).
+
+**The full tier is mandatory before merging** any change under `src/core/sobolev/` (the hierarchical
+stack, `linsolve`, the constraint and line-search code), `src/gpu/saddle*`, `src/core/dispatch.ts`,
+`src/core/optimizer.ts`, or to any tolerance or default constant; and before a release. A full run
+rewrites `bench/results/gpu-phase2a-cr.json`: commit it if its numbers changed, otherwise
+`git checkout -- bench/results/gpu-phase2a-cr.json` (the rest is formatter churn, issue #47).
+
+**Marking a test full-tier**: `fullTest` / `fullDescribe` from `test/tier.ts`, never by deleting it
+or loosening it, with a comment saying what the default tier still checks and what waits. bun runs a
+skipped describe's *body*, so heavy work there goes in a `lazy()` getter (also in `test/tier.ts`)
+that the tests call.

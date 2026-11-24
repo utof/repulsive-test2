@@ -71,6 +71,7 @@ import {
 } from '../../../src/core/sobolev/linsolve';
 import { calculateDisjointPairs, gradientAnalytical } from '../../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../../src/core/testConfigs';
+import { fullDescribe } from '../../tier';
 import { cholesky, densify, spectrum } from './denseSpectrum';
 
 setDefaultTimeout(900_000);
@@ -192,6 +193,12 @@ function ddResidual(
  * `x` and `λ` of the dense saddle refined to `~5e-17` relative. Returns `null` with the divergence
  * trace when the refinement does NOT converge -- which is the honest answer on a translation-singular
  * set, and the fact the pure-`edgeLengths` cells rest on.
+ *
+ * Also returns `ldlt`, the UNREFINED `solveSaddleFromA(…, 'ldlt')` result the refinement starts
+ * from. Why: a caller that needs the plain dense-LDLᵀ answer (the n = 960 "oracle over the bar"
+ * test) reads it here instead of factoring the same 3843-dim saddle a second time -- same inputs,
+ * same mode, deterministic, so the repeat was bit-identical and cost ~27 s (test-suite review
+ * 2026-11-24, README.md "Tests").
  */
 function refinedTruth(
     A: Float64Array,
@@ -199,7 +206,12 @@ function refinedTruth(
     C: number[][],
     rhsTop: number[],
     rhsBottom: number[],
-): { z: number[]; trace: number[]; converged: boolean } {
+): {
+    z: number[];
+    trace: number[];
+    converged: boolean;
+    ldlt: { x: number[]; lambda: number[] };
+} {
     const m = 3 * n;
     const ldlt = solveSaddleFromA(A, n, C, rhsTop, rhsBottom, 'ldlt');
     const rhs = [...rhsTop, ...rhsBottom];
@@ -213,7 +225,12 @@ function refinedTruth(
         trace.push(nrm(delta) / nrm(z));
         z = z.map((v, i) => v + delta[i]);
     }
-    return { z, trace, converged: trace[trace.length - 1] < 1e-14 };
+    return {
+        z,
+        trace,
+        converged: trace[trace.length - 1] < 1e-14,
+        ldlt: { x: ldlt.x, lambda: ldlt.lambda },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -1284,7 +1301,12 @@ describe('refusals (all typed, all trippable)', () => {
 // 8. n = 960: the amended bar where it matters, and the oracle's own failure (A35 item 1).
 // ===========================================================================
 
-describe('n = 960 (the amended bar, and the oracle over it)', () => {
+// FULL TIER ONLY (`TEST_TIER=full`, test/tier.ts): one refined dense truth of the 3843-dim saddle
+// (~25 s). Why: the six n = 48/240 cells of 'accuracy against the DD-refined truth' assert the same
+// 1e-10 bar on x and λ in the default tier; what waits for a full run is the bar at n = 960, the
+// floor of the production range, where the n²-conditioned λ recovery bites and the dense oracle
+// itself is over the bar (README.md "Tests").
+fullDescribe('n = 960 (the amended bar, and the oracle over it)', () => {
     test('bary+edge, grad/−φ: within 1e-10 of truth while dense LDLᵀ is NOT', () => {
         const n = 960;
         const fx = fixture(n);
@@ -1307,13 +1329,15 @@ describe('n = 960 (the amended bar, and the oracle over it)', () => {
             S.otherRows,
         );
         const mine = sol.solve(top, S.negPhi);
-        const ldlt = solveSaddleFromA(A, n, S.C, top, S.negPhi, 'ldlt');
-        const lu = solveSaddleFromA(A, n, S.C, top, S.negPhi, 'lu');
+        // The dense LDLᵀ answer is the refinement's own starting point: `refinedTruth` ran exactly
+        // `solveSaddleFromA(A, n, S.C, top, S.negPhi, 'ldlt')`, so re-running it was a bit-identical
+        // ~27 s repeat. The dense-LU solve that used to follow fed one log line and no assertion
+        // (~45 s), and is gone. (test-suite review 2026-11-24, README.md "Tests")
+        const ldlt = truth.ldlt;
         const mineErr = relErr(mine.x, xT);
         const ldltErr = relErr(ldlt.x, xT);
         log('n=960 route vs truth', mineErr);
         log('n=960 dense LDLᵀ vs truth', ldltErr);
-        log('n=960 dense LU vs truth', relErr(lu.x, xT));
         log('n=960 route literal vs LDLᵀ', relErr(mine.x, ldlt.x));
         log('n=960 λ vs truth (relative)', dist(mine.lambda, lT) / Math.max(1, nrm(lT)));
         log(

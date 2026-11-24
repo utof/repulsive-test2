@@ -2,7 +2,7 @@
  * Spec §11.2 task 5 of Phase 2H: the `SobolevOperator` wrapper of the hierarchical apply, the
  * structural `sigma = tr(A_bct)/n`, and the gates SPD / symmetry / trace ratio (§2.2, §2.3).
  *
- * Oracle: `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/out-64-direction.json` `rows[]`
+ * Oracle: `corpus/out-64-direction.json` `rows[]` (tracked copy of the phase2h-queue scratch file)
  * (@issue utof/repulsive-test2#64), fixture = the repo's `src/core/fixtures.ts trefoil(n)`,
  * UNnormalised (`run-64-dense.ts:50-56`), leaf=8, ALPHA=3, BETA=6, EPS=1e-10, endpoint4 near.
  * Its `sigma` column is `tr(A_exact)/n` (`run64_direction.py:148`), NOT the production sigma.
@@ -30,7 +30,15 @@ const BETA = 6;
 const EPS = 1e-10;
 const LEAF = 8;
 const U_F64 = 2.220446049250313e-16;
-const ORACLE = `${import.meta.dir}/../../../.superpowers/sdd/2026-09-11-phase2h-queue/scratch/out-64-direction.json`;
+/**
+ * Tracked copy of the H-queue scratch corpus (originals, the historical record:
+ * `.superpowers/sdd/2026-09-11-phase2h-queue/scratch/`, git-ignored, this machine only). The
+ * copy in `corpus/` is the test input; it was copied 2026-11-24 so the file loads in any
+ * checkout, and differs from the original only by biome formatting (whitespace, `e-08` -> `e-8`):
+ * `JSON.parse` of the two is deep-equal. Edit the copy, not the scratch file.
+ * Why: the scratch folder is git-ignored, so in a fresh checkout this module failed to load.
+ */
+const ORACLE = `${import.meta.dir}/corpus/out-64-direction.json`;
 
 interface OracleRow {
     n: number;
@@ -139,19 +147,29 @@ describe('RULING 1: structural trace == densified diagonal sum', () => {
             });
 });
 
+/**
+ * `assembleAFlat` of `trefoil(n)` (the exact dense `A`), memoised per n. Why: gate 5a needs it
+ * for every theta and gate 5d for n = 960 again, but it depends on n only (one n = 960 build is
+ * ~0.5 s warm). Shared, so READ-ONLY: both gates only sum its diagonal (test-suite review
+ * 2026-11-24, README.md "Tests").
+ */
+const exactCache = new Map<number, Float64Array>();
+function exactA(n: number): Float64Array {
+    let A = exactCache.get(n);
+    if (!A) {
+        const { vertices, edges } = trefoil(n);
+        A = assembleAFlat(vertices, edges, calculateDisjointPairs(edges), ALPHA, BETA, EPS);
+        exactCache.set(n, A);
+    }
+    return A;
+}
+
 describe('gate 5a: trace ratio tr(A_bct)/tr(A)', () => {
     for (const n of [240, 480, 960])
         for (const theta of THETAS)
             test(`n=${n} theta=${theta}`, () => {
-                const { H, vertices, edges } = prep(n, theta);
-                const A = assembleAFlat(
-                    vertices,
-                    edges,
-                    calculateDisjointPairs(edges),
-                    ALPHA,
-                    BETA,
-                    EPS,
-                );
+                const { H } = prep(n, theta);
+                const A = exactA(n);
                 let trA = 0;
                 for (let i = 0; i < n; i++) trA += A[i * n + i];
                 const ratio = traceA(H) / trA;
@@ -225,9 +243,9 @@ describe('gate 5c: symmetry defect (densified)', () => {
 
 describe('gate 5d: sigma is the HIERARCHICAL trace', () => {
     test('n=960 theta=0.5 differs from tr(A_exact)/n by >= 0.5%', () => {
-        const { H, vertices, edges } = prep(960, 0.5);
+        const { H } = prep(960, 0.5);
         const op = makeHierarchicalOperator(H);
-        const A = assembleAFlat(vertices, edges, calculateDisjointPairs(edges), ALPHA, BETA, EPS);
+        const A = exactA(960);
         let trA = 0;
         for (let i = 0; i < 960; i++) trA += A[i * 960 + i];
         const exactSigma = trA / 960;

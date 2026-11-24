@@ -45,6 +45,7 @@ import {
 } from '../../../src/core/sobolev/hierarchical/nearField';
 import { assembleAFlat } from '../../../src/core/sobolev/innerProduct';
 import { calculateDisjointPairs } from '../../../src/core/tangentPointEnergy';
+import { fullTest } from '../../tier';
 import { type Curve, FIXTURES, type FixtureName } from './fixtures';
 
 /** `params` of `out-accuracy.json`. */
@@ -557,11 +558,20 @@ describe('§7.2 H1-a: delta_compress — out-accuracy.json relErrRandom (torusKn
         expect(Math.abs(d400 - 0.06834912244082188) / 0.06834912244082188).toBeLessThan(REL_TOL);
     });
 
-    test('error vs n at theta=0.5: torusKnot n=2000 (row: 0.015248951384356373; ~4 s, O(m^2) reference)', () => {
-        const d2000 = deltaCompress('torusKnot', 2000, 0.5);
-        record('delta_compress torusKnot n=2000 theta=0.5', d2000);
-        expect(Math.abs(d2000 - 0.015248951384356373) / 0.015248951384356373).toBeLessThan(REL_TOL);
-    });
+    // FULL TIER ONLY (test/tier.ts): one O(m²) exact reference at n = 2000 (13.4 s isolated, not
+    // the ~4 s the name says). Why: the n = 400 row above and the n = 960 ladder pin the same
+    // quantity in the default tier; a tree-depth-dependent error beyond n = 960 waits for
+    // `bun run test:full` (README.md "Tests").
+    fullTest(
+        'error vs n at theta=0.5: torusKnot n=2000 (row: 0.015248951384356373; ~4 s, O(m^2) reference)',
+        () => {
+            const d2000 = deltaCompress('torusKnot', 2000, 0.5);
+            record('delta_compress torusKnot n=2000 theta=0.5', d2000);
+            expect(Math.abs(d2000 - 0.015248951384356373) / 0.015248951384356373).toBeLessThan(
+                REL_TOL,
+            );
+        },
+    );
 
     test('H1-a bar: delta_compress(theta_{k+1}) <= 1.001 * delta_compress(theta_k) on {0.5, 0.25, 0.1}; the INVALID tie predicate does not fire', () => {
         const thetas = [0.5, 0.25, 0.1];

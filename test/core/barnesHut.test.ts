@@ -15,7 +15,7 @@
  * accuracy claims about other curves.
  * @see src/core/barnesHut.ts
  */
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import {
     type BarnesHutOptions,
     type BarnesHutStats,
@@ -34,6 +34,12 @@ import {
     gradientAnalytical,
 } from '../../src/core/tangentPointEnergy';
 import type { Edge, Vec3 } from '../../src/core/testConfigs';
+import { lazy } from '../tier';
+
+// Why: the n = 960 far-field references are lazy getters (test/tier.ts `lazy`), so the first test
+// of that describe pays for them (~2.7 s isolated, measured 5.1 s at load average 18 in the
+// four-process runner), which bun's 5 s default per-test timeout does not cover.
+setDefaultTimeout(60_000);
 
 const { alpha: ALPHA, beta: BETA, epsilon: EPS } = DEFAULTS;
 
@@ -155,53 +161,62 @@ describe('θ = 0 reproduces the all-pairs energy and differential to rounding', 
 });
 
 describe('far field on the trefoil, n = 960', () => {
+    // Lazy getters, not describe-body work (test/tier.ts `lazy`). Why: the exact all-pairs
+    // reference and four Barnes–Hut evaluations at n = 960 (~2.7 s) ran at collection, so every
+    // `-t` filtered run of this file paid them. Shared by the tests below, read-only.
     const c = trefoil(960);
-    const ref = exact(c);
+    const ref = lazy(() => exact(c));
     const at = (theta: number, traversal: 'vertex' | 'edge' = 'vertex') => {
         const r = bh(c, { theta, traversal });
         return {
             ...r,
-            eErr: Math.abs(r.E - ref.E) / ref.E,
-            gErr: relErr(r.g, ref.g),
+            eErr: Math.abs(r.E - ref().E) / ref().E,
+            gErr: relErr(r.g, ref().g),
         };
     };
-    const t010 = at(0.1);
-    const t025 = at(0.25);
-    const t050 = at(0.5);
-    const edge025 = at(0.25, 'edge');
+    const t010 = lazy(() => at(0.1));
+    const t025 = lazy(() => at(0.25));
+    const t050 = lazy(() => at(0.5));
+    const edge025 = lazy(() => at(0.25, 'edge'));
 
     test('the default θ = 0.25 lumps nodes, and is accurate', () => {
-        log('n=960 θ=0.25 energy relErr', t025.eErr);
-        log('n=960 θ=0.25 gradient relErr (vertex)', t025.gErr);
-        log('n=960 θ=0.25 energy far/near', `${t025.eStats.farNodes} / ${t025.eStats.nearPairs}`);
-        expect(t025.eStats.farNodes).toBeGreaterThan(0);
-        expect(t025.gStats.farNodes).toBeGreaterThan(0);
+        log('n=960 θ=0.25 energy relErr', t025().eErr);
+        log('n=960 θ=0.25 gradient relErr (vertex)', t025().gErr);
+        log(
+            'n=960 θ=0.25 energy far/near',
+            `${t025().eStats.farNodes} / ${t025().eStats.nearPairs}`,
+        );
+        expect(t025().eStats.farNodes).toBeGreaterThan(0);
+        expect(t025().gStats.farNodes).toBeGreaterThan(0);
         // The exact sum is 960·957 = 918 720 ordered pairs; the far field must have replaced most.
-        expect(t025.eStats.nearPairs).toBeLessThan(918720 / 4);
+        expect(t025().eStats.nearPairs).toBeLessThan(918720 / 4);
         // MEASURED 3.29e-3 (energy) and 1.45e-2 (differential); bars are 2× those.
-        expect(t025.eErr).toBeLessThan(6.6e-3);
-        expect(t025.gErr).toBeLessThan(2.9e-2);
+        expect(t025().eErr).toBeLessThan(6.6e-3);
+        expect(t025().gErr).toBeLessThan(2.9e-2);
     });
 
     test('the error falls as θ falls', () => {
         log(
             'n=960 gradient relErr θ=0.1 / 0.25 / 0.5',
-            `${t010.gErr} / ${t025.gErr} / ${t050.gErr}`,
+            `${t010().gErr} / ${t025().gErr} / ${t050().gErr}`,
         );
-        log('n=960 energy relErr θ=0.1 / 0.25 / 0.5', `${t010.eErr} / ${t025.eErr} / ${t050.eErr}`);
+        log(
+            'n=960 energy relErr θ=0.1 / 0.25 / 0.5',
+            `${t010().eErr} / ${t025().eErr} / ${t050().eErr}`,
+        );
         // MEASURED differential 8.85e-4 / 1.45e-2 / 1.16e-1: each step is at least 5×.
-        expect(t010.gErr * 5).toBeLessThan(t025.gErr);
-        expect(t025.gErr * 5).toBeLessThan(t050.gErr);
+        expect(t010().gErr * 5).toBeLessThan(t025().gErr);
+        expect(t025().gErr * 5).toBeLessThan(t050().gErr);
         // Energy: MEASURED 1.54e-5 at θ = 0.1 against 3.29e-3 at 0.25. θ = 0.5 is NOT asserted
         // above 0.25: its signed error happens to be the smaller in magnitude here (−2.98e-3).
-        expect(t010.eErr * 5).toBeLessThan(t025.eErr);
+        expect(t010().eErr * 5).toBeLessThan(t025().eErr);
     });
 
     test('per-vertex traversal beats the per-edge traversal of the paper', () => {
-        log('n=960 θ=0.25 gradient relErr (edge)', edge025.gErr);
+        log('n=960 θ=0.25 gradient relErr (edge)', edge025().gErr);
         // MEASURED 1.45e-2 (vertex) against 4.97e-2 (edge), a factor 3.4. This is the reason for
         // the default; see barnesHutGradient's TSDoc for the mechanism.
-        expect(t025.gErr * 2).toBeLessThan(edge025.gErr);
+        expect(t025().gErr * 2).toBeLessThan(edge025().gErr);
     });
 });
 
