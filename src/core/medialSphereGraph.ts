@@ -76,6 +76,19 @@ export interface MedialGraph {
      */
     passPairs?: Map<number, number>;
     /**
+     * Edges that TAKE UP SLACK: original edge → the shortest total rest length it may shrink
+     * to. While such an edge's ends are nearer than its rest length, the rest length follows
+     * them down (never up, never below the floor); at the floor the entry is dropped.
+     * Why: a moved group's link is measured when it lands, and at that moment the drawing
+     * around it is still pushed apart by the room that was made. It then settles back, the
+     * link's ends come together, and a link that keeps its landing length has nowhere to put
+     * the excess: measured on a 150-node tree, a link landed 6.3 long between ends that
+     * settled 2.4 apart and stood as a Z. The floor (its length before the move, set by
+     * `landLinks`) is what keeps this from being a ratchet that reels the group in.
+     * @see src/core/medialGraphMove.ts (`landLinks`)
+     */
+    slack?: Map<number, number>;
+    /**
      * Which nodes are at rest and left alone by the step (only kept when the step is run with
      * `sleep`): `asleep[i]`, the number of consecutive steps node `i` has hardly moved, and
      * the positions the last step left — a node found somewhere else has been moved by the
@@ -321,6 +334,24 @@ export function medialGraphStep(g: MedialGraph, opts: MedialGraphOptions): Media
     const alpha = (3.36 / r) ** 2;
     // Carried group and allowed crossings (both usually absent). `fixed` = not moved by the flow.
     const ghostEdge = g.ghost?.edge;
+    if (g.slack?.size) {
+        // See `MedialGraph.slack`. An edge being carried is only drawn: left alone.
+        const P = g.pieces;
+        for (const [e, floor] of g.slack) {
+            if (ghostEdge?.[e]) continue;
+            const ia = g.edgeA[e];
+            const ib = g.edgeB[e];
+            const chord = Math.hypot(x[3 * ia] - x[3 * ib], x[3 * ia + 1] - x[3 * ib + 1]);
+            let total = 0;
+            for (let q = 0; q < P; q++) total += rest[e * P + q];
+            if (chord < total) {
+                const next = Math.max(floor, chord);
+                for (let q = 0; q < P; q++) rest[e * P + q] *= next / total;
+                total = next;
+            }
+            if (total <= floor) g.slack.delete(e);
+        }
+    }
     const pass = g.passPairs && g.passPairs.size > 0 ? g.passPairs : undefined;
     const nEdges = g.edgeA.length;
     const fixed = g.ghost

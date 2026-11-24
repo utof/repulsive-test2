@@ -624,6 +624,72 @@ their neighbours along most of their length. A search that knows about fans (edg
 hub sorted by angle: only angular neighbours can be near) would be output-sized; so would not
 drawing 2,900 children as one fan. Not done.
 
+## Turning and re-attaching a moved group (2026-11-24, afternoon)
+
+A carried group kept the direction it had. Moved to the other side of its parent, a branch
+then points back INTO the map: its root on the far side, its link through its own body.
+
+**Turning** (`setGroupOffset(…, { turn: 'links' })`, `facingAngle`). The group turns about its
+centroid by the angle that brings the nodes carrying its links nearest to those links' other
+ends: least sum of squared link lengths, which in the plane is one `atan2` (the 2-D orthogonal
+Procrustes fit). Two details matter in use:
+
+- It is applied RELATIVE to its value at pick-up, so picking a group up turns nothing; a branch
+  drawn a little askew stays that much askew.
+- In the app the dragged node stays under the pointer (`hold`). The turn depends on where the
+  centroid is and, with a node held, the centroid on the turn; repeated substitution diverges
+  as soon as the held node is farther from the centroid than the centroid is from the parent
+  (measured: 3 units off the pointer), so the angle is found as a root on the circle
+  (`turnHolding`), the one nearest the current angle.
+
+**Hanging** (`hangGroupOn`, `reattachGroup`, `nearestOutsideNode`). The group's one link leaves
+its old parent and goes to another node; the graph itself changes. The group is turned to face
+the new parent and backed off to one link length. When the links land, a hung link goes to the
+NEAREST NODE ITS END CAN SEE if the chosen one is not visible (`rehangOnVisible`): a branch
+dropped "next to" a node is set down in a face of the drawing that need not touch that node
+(tree150: 2 crossings hung blindly, 0 with the rule).
+
+**A landed link takes up slack** (`MedialGraph.slack`). Found on the first turned clip: a link
+is measured when it lands, while the drawing around is still pushed apart by the room that was
+made; then everything settles back and the link has excess length it cannot lose. It landed 6.3
+long between ends that settled 2.4 apart and stood as a Z. Now its rest length follows its ends
+down, to no less than its length before the move (the floor is what keeps it from reeling the
+group in).
+
+### Measured (`bench/app/medialGroupMove.ts … warp <none|links|hang>`, `pkmGraphs.ts` likewise)
+
+| Fixture | keep direction | turn | hang |
+|---|---|---|---|
+| tree, 150 nodes: steps to full size / crossings | 37 / 2 | 26 / 0 | 28 / 0 |
+| tree, 600 nodes | 138 / 0 | 124 / 0 | 92 / 0 |
+| 12×12 grid, 2×2 block (4 links) | 10 / 40 | 7 / 43 | as turn |
+| 36×36 grid | 7 / 132 | 4 / 131 | as turn |
+
+| 14 moves on real maps (a branch to the far side of the root) | keep direction | turn | hang |
+|---|---|---|---|
+| steps to full size, summed | 1,629 | 888 | 663 |
+| crossings added by the moves, summed | +8 | −11 | −8 |
+| moves at full size within 400 steps | 14 | 13 | 14 |
+
+(Negative: a move can also REMOVE crossings the drawing had, by taking a branch out of them.)
+
+**Where it does not help.**
+- A block in a grid has links on several sides; the fit tilts it off the grid's axes for a
+  small gain in link length: 3 more crossings on the small grid and the block's tightest gap
+  at the floor (0.008 against 0.059). A measure of how well the links agree (all pulling one
+  way: turn; from all sides: keep the direction) is the missing guard.
+- One real move (the os map, force layout, 135 nodes) no longer reaches full size in 400 steps
+  (0.71; unturned: 249 steps): turned, it is set down in a tighter place. The angle is chosen
+  for the links alone; it does not look at what is in the way.
+- Hanging is not in the app yet: it changes the graph, and the app's edge list is shared with
+  the other solver.
+
+The research on this (`_local/research/2026-11-24-11-moving-subgraphs-rotation-and-routing.md`)
+found no published method for exactly this problem; what systems do is this fit, a damped
+torque, or a search over some twenty candidate angles scored on link length, crossings and
+overlap. The search is the next step for both open points above; for a tree branch, the wedge
+of free directions at the new parent.
+
 ## What is next
 
 | # | Step | Why |
@@ -631,3 +697,5 @@ drawing 2,900 children as one fan. Not done.
 | 1 | Make the rest of the step local too | with sleeping nodes the probes and motion limits cost only what is awake, but the linear passes and the solve still cover every node: 252 ms per step at 43,000 nodes with 16 % awake |
 | 2 | Points on an edge in proportion to its length | open item 1; also what lets long links curve |
 | 3 | Route a moved group's links around what lies between | open item 2 |
+| 4 | Turn by scored candidates (crossings and overlap, not link length alone); a guard for groups linked on all sides | the two cases above where turning does not help |
+| 5 | Hanging a branch on another node in the app | needs the app's edge list to follow the flow's graph |

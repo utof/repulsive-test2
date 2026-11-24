@@ -57,6 +57,17 @@ export interface GroupMove {
     /** Current offset of the group from `home`. */
     dx: number;
     dy: number;
+    /** Centroid of the group's nodes at pick-up: what it is turned about. */
+    cx: number;
+    cy: number;
+    /** Current turn of the group about its centroid, in radians (0 = as picked up). */
+    angle: number;
+    /** `facingAngle` at pick-up: how far the group was from squarely facing its links where it
+     *  stood. Turning keeps that much (see `setGroupOffset`), so a pick-up turns nothing. */
+    angle0: number;
+    /** Set by `hangGroupOn`: the link that was re-attached. When the links land it goes to the
+     *  nearest node its end can SEE, if the node chosen while carrying is not one. */
+    hung?: number;
 }
 
 /** Index of point `q` (0 … pieces) along original edge `e` (subdivideGraph's layout). */
@@ -108,7 +119,78 @@ export function beginGroupMove(g: MedialGraph, nodes: readonly number[]): GroupM
         home[2 * k + 1] = g.x[3 * points[k] + 1];
     }
     g.ghost = { edge, node };
-    return { nodes: list, internal, connecting, points, home, dx: 0, dy: 0 };
+    let cx = 0;
+    let cy = 0;
+    for (let k = 0; k < list.length; k++) {
+        cx += home[2 * k] / list.length;
+        cy += home[2 * k + 1] / list.length;
+    }
+    const move: GroupMove = {
+        nodes: list,
+        internal,
+        connecting,
+        points,
+        home,
+        dx: 0,
+        dy: 0,
+        cx,
+        cy,
+        angle: 0,
+        angle0: 0,
+    };
+    move.angle0 = facingAngle(g, move);
+    return move;
+}
+
+/**
+ * Where point `k` of a carried group is: its place at pick-up, turned by `move.angle` about the
+ * group's centroid and shifted by the offset. With no turn this is `home + offset` to the last
+ * bit (a turn of exactly 0 must not perturb a plain move by rounding).
+ */
+function placed(move: GroupMove, k: number): [number, number] {
+    if (move.angle === 0) return [move.home[2 * k] + move.dx, move.home[2 * k + 1] + move.dy];
+    const c = Math.cos(move.angle);
+    const s = Math.sin(move.angle);
+    const qx = move.home[2 * k] - move.cx;
+    const qy = move.home[2 * k + 1] - move.cy;
+    return [move.cx + move.dx + c * qx - s * qy, move.cy + move.dy + s * qx + c * qy];
+}
+
+/**
+ * The turn that makes a carried group FACE WHAT IT IS LINKED TO: the angle about its centroid
+ * that brings the nodes carrying its links as close as possible to those links' other ends
+ * (least sum of squared link lengths; in the plane that is one `atan2` — the 2-D case of the
+ * orthogonal Procrustes problem). When there is nothing to go by (no links, or every linked
+ * node sits at the centroid) it returns the answer that leaves the group turned as it is.
+ * `setGroupOffset` and `hangGroupOn` apply it RELATIVE to its value at pick-up.
+ * Why: a branch carried across a map keeps the direction it had, so set down on the other
+ * side of its parent it points back INTO the map, its root on the far side and its link
+ * through its own body. Turned by this rule its root is the point nearest the parent and the
+ * branch opens away from it — what a mind map looks like. With several links it is the
+ * compromise that keeps them shortest, which is also where they cross least.
+ * @see docs/plans/2026-11-24-medial-sphere-method.md ("Turning and re-attaching")
+ */
+export function facingAngle(g: MedialGraph, move: GroupMove): number {
+    const inGroup = new Map<number, number>();
+    for (let k = 0; k < move.nodes.length; k++) inGroup.set(move.nodes[k], k);
+    const cx = move.cx + move.dx;
+    const cy = move.cy + move.dy;
+    let cross = 0;
+    let dot = 0;
+    for (const e of move.connecting) {
+        const ka = inGroup.get(g.edgeA[e]);
+        const k = ka ?? (inGroup.get(g.edgeB[e]) as number);
+        const outside = ka === undefined ? g.edgeA[e] : g.edgeB[e];
+        const qx = move.home[2 * k] - move.cx;
+        const qy = move.home[2 * k + 1] - move.cy;
+        const ox = g.x[3 * outside] - cx;
+        const oy = g.x[3 * outside + 1] - cy;
+        cross += qx * oy - qy * ox;
+        dot += qx * ox + qy * oy;
+    }
+    // Nothing to go by: the answer that leaves the group as it is turned now.
+    if (Math.hypot(cross, dot) < 1e-12) return move.angle + (move.angle0 ?? 0);
+    return Math.atan2(cross, dot);
 }
 
 /** Put a connecting edge's interior points on the straight line between its ends. */
@@ -128,14 +210,249 @@ function straighten(g: MedialGraph, e: number): void {
  * tie it to the rest (whose other ends are wherever the flow has them now).
  * Why straight: while carried these edges are only drawn; any shape would do.
  */
-export function setGroupOffset(g: MedialGraph, move: GroupMove, dx: number, dy: number): void {
+export function setGroupOffset(
+    g: MedialGraph,
+    move: GroupMove,
+    dx: number,
+    dy: number,
+    opts: { turn?: 'none' | 'links'; hold?: number } = {},
+): void {
     move.dx = dx;
     move.dy = dy;
+    // `turn: 'links'`: the group also turns so that it faces what it is linked to the way it
+    // did where it was picked up (`facingAngle` now, minus `facingAngle` then), so what is
+    // seen while carrying is how it will be set down. Default: it keeps its direction.
+    // Why relative to the pick-up and not the best fit itself: a branch drawn a little askew
+    // would otherwise jump straight the moment it is picked up; this way nothing turns until
+    // the group has gone somewhere.
+    if (opts.turn === 'links') {
+        move.angle = facingAngle(g, move) - move.angle0;
+        // `hold`: node of the group that (dx, dy) is the offset OF (the one under the pointer),
+        // instead of the centroid's.
+        const k = opts.hold === undefined ? -1 : move.nodes.indexOf(opts.hold);
+        if (k >= 0) turnHolding(g, move, k, dx, dy);
+    }
     for (let k = 0; k < move.points.length; k++) {
-        g.x[3 * move.points[k]] = move.home[2 * k] + dx;
-        g.x[3 * move.points[k] + 1] = move.home[2 * k + 1] + dy;
+        const [px, py] = placed(move, k);
+        g.x[3 * move.points[k]] = px;
+        g.x[3 * move.points[k] + 1] = py;
     }
     for (const e of move.connecting) straighten(g, e);
+}
+
+/**
+ * Turn a carried group to face its links (as `setGroupOffset` with `turn: 'links'`) while its
+ * node number `k` stays at its pick-up place + (dx, dy) — under the pointer that holds it.
+ * Why this needs a search: the turn depends on where the centroid is, and with a node held
+ * the centroid is where the turn puts it. So the angle is a root of
+ *     f(angle) = facing angle with the centroid placed for `angle` − angle at pick-up − angle
+ * found by sampling the circle (90 samples) and bisecting the sign change nearest to the
+ * current angle, so the group turns steadily instead of jumping between solutions. Plain
+ * repeated substitution diverges as soon as the held node is farther from the centroid than
+ * the centroid is from what the group is linked to (measured: 3.0 units off the pointer).
+ * No root (the held node swings the centroid right round the link's other end): the group
+ * keeps its current angle.
+ */
+function turnHolding(g: MedialGraph, move: GroupMove, k: number, dx: number, dy: number): void {
+    const qx = move.home[2 * k] - move.cx;
+    const qy = move.home[2 * k + 1] - move.cy;
+    const place = (angle: number): void => {
+        const c = Math.cos(angle);
+        const s = Math.sin(angle);
+        move.dx = dx + qx - (c * qx - s * qy);
+        move.dy = dy + qy - (s * qx + c * qy);
+    };
+    const wrap = (a: number): number => a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+    const f = (angle: number): number => {
+        place(angle);
+        return wrap(facingAngle(g, move) - move.angle0 - angle);
+    };
+    const start = move.angle;
+    const N = 90;
+    const h = (2 * Math.PI) / N;
+    let best = Number.NaN;
+    let bestFar = Infinity;
+    let fa = f(start);
+    for (let i = 0; i < N; i++) {
+        const a = start + i * h;
+        const fb = f(a + h);
+        // A sign change between two small values is a root; between two large ones it is the
+        // jump of `wrap` at half a turn.
+        if (fa * fb <= 0 && Math.abs(fa) < 1 && Math.abs(fb) < 1) {
+            let lo = a;
+            let hi = a + h;
+            let flo = fa;
+            for (let it = 0; it < 40; it++) {
+                const mid = 0.5 * (lo + hi);
+                const fm = f(mid);
+                if (flo * fm <= 0) hi = mid;
+                else {
+                    lo = mid;
+                    flo = fm;
+                }
+            }
+            const root = 0.5 * (lo + hi);
+            const far = Math.abs(wrap(root - start));
+            if (far < bestFar) {
+                bestFar = far;
+                best = start + wrap(root - start);
+            }
+        }
+        fa = fb;
+    }
+    move.angle = Number.isNaN(best) ? start : best;
+    place(move.angle);
+}
+
+/**
+ * RE-ATTACH a carried group: its link `edge` (one of `move.connecting`) leaves the node it
+ * went to and goes to `to` instead — "take this branch off its parent and hang it on that
+ * node". The graph itself changes (`edgeA`/`edgeB` and the segment list).
+ * Why: moved far, a branch that keeps its parent has to keep a link across everything in
+ * between, and each thing it crosses is a crossing for good. Hung on a node next to where it
+ * is set down, a tree stays a tree drawn without crossings.
+ * Throws if `to` is in the group, or already linked to the same node of the group.
+ */
+export function reattachGroup(g: MedialGraph, move: GroupMove, edge: number, to: number): void {
+    if (!move.connecting.includes(edge))
+        throw new Error(`medialGraphMove: edge ${edge} is not a link of the carried group`);
+    if (!(to >= 0 && to < g.nodeCount)) throw new Error(`medialGraphMove: ${to} is not a node`);
+    if (move.nodes.includes(to)) throw new Error('medialGraphMove: the new end is in the group');
+    const aInside = move.nodes.includes(g.edgeA[edge]);
+    const inside = aInside ? g.edgeA[edge] : g.edgeB[edge];
+    for (let e = 0; e < g.edgeA.length; e++)
+        if (
+            e !== edge &&
+            ((g.edgeA[e] === inside && g.edgeB[e] === to) ||
+                (g.edgeB[e] === inside && g.edgeA[e] === to))
+        )
+            throw new Error('medialGraphMove: the group is already linked to that node');
+    retarget(g, edge, aInside, to);
+    straighten(g, edge);
+}
+
+/** Make the outside end of `edge` the node `to` (`aInside`: its `edgeA` end is the group's). */
+function retarget(g: MedialGraph, edge: number, aInside: boolean, to: number): void {
+    // A NEW segment list object: the flow keeps what it derives from the topology per list.
+    const a = Int32Array.from(g.segs.a);
+    const b = Int32Array.from(g.segs.b);
+    if (aInside) {
+        g.edgeB[edge] = to;
+        b[edge * g.pieces + g.pieces - 1] = to;
+    } else {
+        g.edgeA[edge] = to;
+        a[edge * g.pieces] = to;
+    }
+    g.segs = { a, b };
+}
+
+/**
+ * At the moment a hung group's links land: if the straight link to the node chosen while
+ * carrying would cross something, re-attach it to the NEAREST NODE ITS END CAN SEE (a straight
+ * link that touches nothing but its two ends), among the 40 nearest. Nothing changes if the
+ * chosen node is visible, or none is.
+ * Why at landing and not when it is dropped: only now is the group at full size in the room
+ * the rest has made, so only now is it known what its end can see. A branch dropped "next to"
+ * a node is set down in a face of the drawing that need not touch that node; hung on the
+ * nearest node regardless, a tree branch landed with 2 crossings, with this rule with none.
+ */
+function rehangOnVisible(
+    g: MedialGraph,
+    edge: number,
+    carried: readonly number[],
+    fullOf: Map<number, [number, number]>,
+    tol: number,
+): void {
+    const { x, segs, pieces } = g;
+    const aInside = fullOf.has(g.edgeA[edge]);
+    const inside = aInside ? g.edgeA[edge] : g.edgeB[edge];
+    const chosen = aInside ? g.edgeB[edge] : g.edgeA[edge];
+    const skipEdge = new Uint8Array(g.edgeA.length);
+    for (const e of carried) skipEdge[e] = 1;
+    const linked = new Set<number>();
+    for (let e = 0; e < g.edgeA.length; e++) {
+        if (e === edge) continue;
+        if (g.edgeA[e] === inside) linked.add(g.edgeB[e]);
+        if (g.edgeB[e] === inside) linked.add(g.edgeA[e]);
+    }
+    const visible = (v: number): boolean => {
+        for (let k = 0; k < segs.a.length; k++) {
+            if (skipEdge[Math.floor(k / pieces)]) continue;
+            const a = segs.a[k];
+            const b = segs.b[k];
+            if (a === inside || b === inside || a === v || b === v) continue;
+            if (planarSegmentDistance(x, inside, v, a, b) <= tol) return false;
+        }
+        return true;
+    };
+    if (visible(chosen)) return;
+    const near: [number, number][] = [];
+    for (let v = 0; v < g.nodeCount; v++) {
+        if (fullOf.has(v) || v === chosen || linked.has(v)) continue;
+        near.push([(x[3 * v] - x[3 * inside]) ** 2 + (x[3 * v + 1] - x[3 * inside + 1]) ** 2, v]);
+    }
+    near.sort((p, q) => p[0] - q[0]);
+    for (const [, v] of near.slice(0, 40))
+        if (visible(v)) {
+            retarget(g, edge, aInside, v);
+            return;
+        }
+}
+
+/**
+ * HANG a carried group on node `to`: re-attach its link (`reattachGroup`), turn it to face
+ * `to` the way it faced its old parent (`facingAngle`, less its value at pick-up), and — if it was brought closer than that — back it off along the line
+ * from `to` through where it is held, until the node carrying the link is one link length
+ * (the link's rest length) from `to`. So the side of `to` the group is dropped on is the side
+ * it hangs on, and it never lands on top of its new parent.
+ * `edge` defaults to the group's only link; a group with several links has to name one.
+ */
+export function hangGroupOn(g: MedialGraph, move: GroupMove, to: number, edge?: number): void {
+    const e = edge ?? (move.connecting.length === 1 ? move.connecting[0] : -1);
+    if (e < 0) throw new Error('medialGraphMove: name the link to re-attach (several, or none)');
+    let natural = 0;
+    for (let q = 0; q < g.pieces; q++) natural += g.rest[e * g.pieces + q];
+    if (g.edgeA[e] !== to && g.edgeB[e] !== to) reattachGroup(g, move, e, to);
+    move.hung = e;
+    move.angle = facingAngle(g, move) - move.angle0;
+    const k = move.nodes.indexOf(move.nodes.includes(g.edgeA[e]) ? g.edgeA[e] : g.edgeB[e]);
+    const reach = Math.hypot(move.home[2 * k] - move.cx, move.home[2 * k + 1] - move.cy);
+    const cx = move.cx + move.dx;
+    const cy = move.cy + move.dy;
+    const ox = g.x[3 * to] - cx;
+    const oy = g.x[3 * to + 1] - cy;
+    const far = Math.hypot(ox, oy);
+    if (far > 0 && far < reach + natural) {
+        const back = reach + natural - far;
+        move.dx -= (back * ox) / far;
+        move.dy -= (back * oy) / far;
+    }
+    for (let q = 0; q < move.points.length; q++) {
+        const [px, py] = placed(move, q);
+        g.x[3 * move.points[q]] = px;
+        g.x[3 * move.points[q] + 1] = py;
+    }
+    for (const c of move.connecting) straighten(g, c);
+}
+
+/**
+ * The node outside a carried group that is nearest to the point (x, y) — the natural node to
+ * re-attach to when the group is set down there. −1 if the group is the whole graph.
+ */
+export function nearestOutsideNode(g: MedialGraph, move: GroupMove, x: number, y: number): number {
+    const inGroup = new Uint8Array(g.nodeCount);
+    for (const v of move.nodes) inGroup[v] = 1;
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < g.nodeCount; i++) {
+        if (inGroup[i]) continue;
+        const d = (g.x[3 * i] - x) ** 2 + (g.x[3 * i + 1] - y) ** 2;
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
 }
 
 /**
@@ -144,6 +461,7 @@ export function setGroupOffset(g: MedialGraph, move: GroupMove, dx: number, dy: 
  * away and may have moved into its place, so the same care is needed as for any other spot.
  */
 export function cancelGroupMove(g: MedialGraph, move: GroupMove, opts: { r: number }): GroupDrop {
+    move.angle = 0;
     setGroupOffset(g, move, 0, 0);
     return dropGroupMove(g, move, opts);
 }
@@ -163,6 +481,8 @@ export interface GroupGrowth {
     connecting: number[];
     targets: Map<number, [number, number]>;
     tol: number;
+    /** The re-attached link, if the group was hung on a node (see `GroupMove.hung`). */
+    hung?: number;
 }
 
 /** What `dropGroupMove` did. */
@@ -216,8 +536,9 @@ export function dropGroupMove(g: MedialGraph, move: GroupMove, opts: { r: number
     let cx = 0;
     let cy = 0;
     for (let k = 0; k < np; k++) {
-        full[2 * k] = move.home[2 * k] + move.dx;
-        full[2 * k + 1] = move.home[2 * k + 1] + move.dy;
+        const [px, py] = placed(move, k);
+        full[2 * k] = px;
+        full[2 * k + 1] = py;
     }
     const ng = move.nodes.length; // the group's nodes come first in `points`
     for (let k = 0; k < ng; k++) {
@@ -329,11 +650,12 @@ export function dropGroupMove(g: MedialGraph, move: GroupMove, opts: { r: number
             connecting: move.connecting,
             targets: fullOf,
             tol,
+            hung: move.hung,
         };
         return { scale, targets: fullOf, crossings: countCrossings(g), groupCrossings: 0, growth };
     }
     g.ghost = undefined;
-    const groupCrossings = landLinks(g, move.connecting, fullOf, tol);
+    const groupCrossings = landLinks(g, move.connecting, fullOf, tol, move.hung);
     return { scale, targets: fullOf, crossings: countCrossings(g), groupCrossings, growth: null };
 }
 
@@ -347,7 +669,9 @@ function landLinks(
     connecting: readonly number[],
     fullOf: Map<number, [number, number]>,
     tol: number,
+    hung?: number,
 ): number {
+    if (hung !== undefined) rehangOnVisible(g, hung, connecting, fullOf, tol);
     const { x, pieces } = g;
     const E = g.edgeA.length;
     const link = new Uint8Array(E);
@@ -357,6 +681,13 @@ function landLinks(
         const inside = fullOf.get(g.edgeA[e]) ?? (fullOf.get(g.edgeB[e]) as [number, number]);
         const outside = fullOf.has(g.edgeA[e]) ? g.edgeB[e] : g.edgeA[e];
         const L = Math.hypot(inside[0] - x[3 * outside], inside[1] - x[3 * outside + 1]) / pieces;
+        // What it may shrink back to as the drawing settles (`MedialGraph.slack`): the length
+        // it had before the move, if that is shorter than where it lands.
+        let before = 0;
+        for (let q = 0; q < pieces; q++) before += g.rest[e * pieces + q];
+        g.slack ??= new Map();
+        if (before < pieces * L) g.slack.set(e, before);
+        else g.slack.delete(e);
         for (let q = 0; q < pieces; q++) g.rest[e * pieces + q] = L;
     }
     // The crossings that exist NOW are the allowed ones (for pairs already allowed this can
@@ -439,7 +770,7 @@ export function growGroup(
         return growth.scale;
     }
     g.ghost = undefined;
-    landLinks(g, growth.connecting, growth.targets, growth.tol);
+    landLinks(g, growth.connecting, growth.targets, growth.tol, growth.hung);
     return 1;
 }
 

@@ -44,6 +44,8 @@ export function ControlPanel() {
     const graphFlow = useSimStore((s) => s.graphFlow);
     const graphFlowMoveThrough = useSimStore((s) => s.graphFlowMoveThrough);
     const setGraphFlowMoveThrough = useSimStore((s) => s.setGraphFlowMoveThrough);
+    const graphFlowTurn = useSimStore((s) => s.graphFlowTurn);
+    const setGraphFlowTurn = useSimStore((s) => s.setGraphFlowTurn);
     const setGraphFlow = useSimStore((s) => s.setGraphFlow);
     const graphFlowClearance = useSimStore((s) => s.graphFlowClearance);
     const setGraphFlowClearance = useSimStore((s) => s.setGraphFlowClearance);
@@ -386,6 +388,25 @@ export function ControlPanel() {
                         onChange={(e) => setGraphFlowMoveThrough(e.target.checked)}
                     />
                     <span>Move through (carry the pinned group; its links may cross)</span>
+                </label>
+                {/* Why: a carried branch that keeps its direction arrives pointing back into the
+                    map. @see src/core/medialGraphMove.ts (`facingAngle`) */}
+                <label
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        cursor: 'pointer',
+                        opacity: graphFlow && graphFlowMoveThrough ? 1 : 0.4,
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={graphFlowTurn}
+                        disabled={!graphFlow || !graphFlowMoveThrough}
+                        onChange={(e) => setGraphFlowTurn(e.target.checked)}
+                    />
+                    <span>Turn the carried group to face its links</span>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ opacity: graphFlow ? 1 : 0.4 }}>Clearance (× edge length):</span>

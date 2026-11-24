@@ -8,8 +8,12 @@ import {
     countCrossings,
     crossingPairs,
     dropGroupMove,
+    facingAngle,
     growGroup,
+    hangGroupOn,
+    nearestOutsideNode,
     prunePassPairs,
+    reattachGroup,
     roomRadius,
     setGroupOffset,
 } from '../../src/core/medialGraphMove';
@@ -329,5 +333,191 @@ describe('group move', () => {
         expect(prunePassPairs(g, 1)).toBe(0); // apart, but not by that much
         expect(prunePassPairs(g, 0.02)).toBe(1);
         expect(g.passPairs.size).toBe(0);
+    });
+
+    describe('turning and re-attaching', () => {
+        /** The radial tree, settled; `branch` is one of its six main branches. */
+        const settled = () => {
+            const { g, branch } = radialTree(2);
+            for (let k = 0; k < 30; k++) medialGraphStep(g, { r: 0.25 });
+            return { g, branch };
+        };
+        const centroid = (g: ReturnType<typeof radialTree>['g'], nodes: number[]) => {
+            let cx = 0;
+            let cy = 0;
+            for (const i of nodes) {
+                cx += g.x[3 * i] / nodes.length;
+                cy += g.x[3 * i + 1] / nodes.length;
+            }
+            return [cx, cy] as const;
+        };
+        test('a carried branch turns to face its parent the way it did where it stood', () => {
+            const { g, branch } = settled();
+            const root = branch[0]; // linked to node 0, the tree's root
+            const [cx, cy] = centroid(g, branch);
+            /** Angle at the branch's centroid from "towards the parent" to "towards its own root". */
+            const bearing = (): number => {
+                const [nx, ny] = centroid(g, branch);
+                const p = [g.x[0] - nx, g.x[1] - ny];
+                const q = [g.x[3 * root] - nx, g.x[3 * root + 1] - ny];
+                return Math.atan2(p[0] * q[1] - p[1] * q[0], p[0] * q[0] + p[1] * q[1]);
+            };
+            const before = bearing();
+            expect(Math.abs(before)).toBeLessThan(0.5); // it faces its parent to begin with
+            const move = beginGroupMove(g, branch);
+            // Picking up turns nothing: every point is where it was, to the last bit.
+            const x0 = Float64Array.from(g.x);
+            setGroupOffset(g, move, 0, 0, { turn: 'links' });
+            expect(Math.abs(move.angle)).toBeLessThan(1e-12);
+            for (const i of branch) expect(Math.abs(g.x[3 * i] - x0[3 * i])).toBeLessThan(1e-12);
+            // To the far side of the root: unturned, the branch would point back at it.
+            setGroupOffset(g, move, -2 * cx, -2 * cy, { turn: 'links' });
+            expect(bearing()).toBeCloseTo(before, 9);
+            expect(Math.abs(Math.abs(move.angle) - Math.PI)).toBeLessThan(0.2); // about half a turn
+            // A turn, not a deformation: every distance inside the group is what it was.
+            const home = (i: number) => {
+                const k = move.nodes.indexOf(i);
+                return [move.home[2 * k], move.home[2 * k + 1]];
+            };
+            for (const a of branch.slice(0, 5))
+                for (const b of branch.slice(5, 10))
+                    expect(
+                        Math.hypot(g.x[3 * a] - g.x[3 * b], g.x[3 * a + 1] - g.x[3 * b + 1]),
+                    ).toBeCloseTo(Math.hypot(home(a)[0] - home(b)[0], home(a)[1] - home(b)[1]), 9);
+        });
+        test('without the option nothing turns: a plain carry is home + offset exactly', () => {
+            const { g, branch } = settled();
+            const move = beginGroupMove(g, branch);
+            setGroupOffset(g, move, 3, 1);
+            expect(move.angle).toBe(0);
+            for (let k = 0; k < move.points.length; k++) {
+                expect(g.x[3 * move.points[k]]).toBe(move.home[2 * k] + 3);
+                expect(g.x[3 * move.points[k] + 1]).toBe(move.home[2 * k + 1] + 1);
+            }
+        });
+        test('the node under the pointer stays under it while the group turns', () => {
+            const { g, branch } = settled();
+            const held = branch[branch.length - 1]; // a leaf, far from the centroid
+            const hx = g.x[3 * held];
+            const hy = g.x[3 * held + 1];
+            const [cx, cy] = centroid(g, branch);
+            const move = beginGroupMove(g, branch);
+            for (const t of [0.25, 0.5, 0.75, 1]) {
+                const dx = -2 * cx * t + 0.3 * t;
+                const dy = -2 * cy * t - 0.2 * t;
+                setGroupOffset(g, move, dx, dy, { turn: 'links', hold: held });
+                expect(
+                    Math.hypot(g.x[3 * held] - hx - dx, g.x[3 * held + 1] - hy - dy),
+                ).toBeLessThan(1e-3);
+            }
+            expect(Math.abs(move.angle)).toBeGreaterThan(1); // and it did turn
+        });
+        test('with several links the turn is the one that keeps them shortest', () => {
+            const g = grid(8, 2);
+            const blob = [27, 28, 35, 36]; // a 2×2 block in the middle: 8 links to the rest
+            const move = beginGroupMove(g, blob);
+            setGroupOffset(g, move, 0.4, -0.3, { turn: 'links' });
+            const cost = (angle: number): number => {
+                move.angle = angle;
+                setGroupOffset(g, move, 0.4, -0.3);
+                let sum = 0;
+                for (const e of move.connecting)
+                    sum +=
+                        (g.x[3 * g.edgeA[e]] - g.x[3 * g.edgeB[e]]) ** 2 +
+                        (g.x[3 * g.edgeA[e] + 1] - g.x[3 * g.edgeB[e] + 1]) ** 2;
+                return sum;
+            };
+            const best = facingAngle(g, move);
+            const atBest = cost(best);
+            for (let k = 0; k < 720; k++)
+                expect(cost((k * Math.PI) / 360)).toBeGreaterThanOrEqual(atBest - 1e-9);
+        });
+        test('a branch hung on another node lands turned towards it, on a visible node, with no crossing', () => {
+            const { g, branch } = settled();
+            const [cx, cy] = centroid(g, branch);
+            const oldParent = 0;
+            const move = beginGroupMove(g, branch);
+            expect(move.connecting.length).toBe(1);
+            const link = move.connecting[0];
+            // Carried a third of a turn round the root: on top of another branch.
+            const c = Math.cos((2 * Math.PI) / 3);
+            const s = Math.sin((2 * Math.PI) / 3);
+            setGroupOffset(g, move, c * cx - s * cy - cx, s * cx + c * cy - cy, { turn: 'links' });
+            const to = nearestOutsideNode(g, move, move.cx + move.dx, move.cy + move.dy);
+            expect(to).not.toBe(oldParent);
+            hangGroupOn(g, move, to);
+            const drop = dropGroupMove(g, move, { r: 0.25 });
+            const growth = drop.growth;
+            let steps = 0;
+            while (growth && growth.scale < 1 && steps < 200) {
+                growGroup(g, growth, 0.25);
+                medialGraphStep(g, { r: 0.25 });
+                steps++;
+            }
+            expect(growth === null || growth.scale === 1).toBe(true);
+            // The link no longer goes to the old parent, and the tree is drawn without crossings.
+            const ends = [g.edgeA[link], g.edgeB[link]];
+            expect(ends).toContain(branch[0]);
+            expect(ends).not.toContain(oldParent);
+            expect(countCrossings(g)).toBe(0);
+            // The flow runs on the changed graph and keeps it so.
+            for (const i of branch) g.pinned[i] = 1;
+            for (let k = 0; k < 60; k++) medialGraphStep(g, { r: 0.25 });
+            expect(countCrossings(g)).toBe(0);
+            expect(finite(g.x)).toBe(true);
+        });
+        test('a landed link takes up its slack as the drawing settles, down to its old length and no further', () => {
+            const { g, branch } = settled();
+            const [cx, cy] = centroid(g, branch);
+            const move = beginGroupMove(g, branch);
+            const link = move.connecting[0];
+            const restOf = (): number => {
+                let sum = 0;
+                for (let q = 0; q < g.pieces; q++) sum += g.rest[link * g.pieces + q];
+                return sum;
+            };
+            const before = restOf();
+            setGroupOffset(g, move, 1.5 * cx, 1.5 * cy); // straight out: the link gets longer
+            const drop = dropGroupMove(g, move, { r: 0.25 });
+            expect(drop.growth).toBeNull(); // out in the open: full size at once, links landed
+            const landed = restOf();
+            expect(landed).toBeGreaterThan(1.5 * before);
+            expect(g.slack?.get(link)).toBeCloseTo(before, 12);
+            // The ends come together (here: the branch's root is put half way back): the rest
+            // length follows, so the link has no excess to fold up.
+            const root = branch[0];
+            g.x[3 * root] -= 0.5 * (g.x[3 * root] - g.x[0]);
+            g.x[3 * root + 1] -= 0.5 * (g.x[3 * root + 1] - g.x[1]);
+            const chord = Math.hypot(g.x[3 * root] - g.x[0], g.x[3 * root + 1] - g.x[1]);
+            for (const i of branch) g.pinned[i] = 1;
+            g.pinned[0] = 1;
+            medialGraphStep(g, { r: 0.25 });
+            expect(restOf()).toBeCloseTo(Math.max(before, chord), 9);
+            expect(restOf()).toBeLessThan(landed);
+            // Pulled right up to its parent: it stops at its old length and the rule retires.
+            g.x[3 * root] = g.x[0] + 0.3 * before * (cx / Math.hypot(cx, cy));
+            g.x[3 * root + 1] = g.x[1] + 0.3 * before * (cy / Math.hypot(cx, cy));
+            medialGraphStep(g, { r: 0.25 });
+            expect(restOf()).toBeCloseTo(before, 9);
+            expect(g.slack?.has(link)).toBe(false);
+            // … and stretching it again does not lengthen it: slack is taken up, never paid out.
+            g.x[3 * root] = g.x[0] + 3 * before * (cx / Math.hypot(cx, cy));
+            g.x[3 * root + 1] = g.x[1] + 3 * before * (cy / Math.hypot(cx, cy));
+            medialGraphStep(g, { r: 0.25 });
+            expect(restOf()).toBeCloseTo(before, 9);
+        });
+        test('re-attaching refuses what would not be a graph', () => {
+            const { g, branch } = settled();
+            const move = beginGroupMove(g, branch);
+            const link = move.connecting[0];
+            expect(() => reattachGroup(g, move, link, branch[3])).toThrow(); // into the group
+            expect(() => reattachGroup(g, move, 9999, 5)).toThrow(); // not a link of the group
+            const g2 = grid(4, 2);
+            const m2 = beginGroupMove(g2, [5]);
+            // Node 5 is already linked to node 6: a second link there would be a double edge.
+            const toFour = m2.connecting.find((e) => g2.edgeA[e] === 4 || g2.edgeB[e] === 4);
+            expect(() => reattachGroup(g2, m2, toFour as number, 6)).toThrow();
+            expect(() => hangGroupOn(g2, m2, 10)).toThrow(); // four links: which one?
+        });
     });
 });
