@@ -35,9 +35,11 @@ export interface MedialSphereOptions {
     nDirections?: number;
     /** Weight of the extra Laplacian links between nodes sharing a sphere. Paper: 0.01. */
     beta?: number;
-    /** Mass weight of the preconditioner `P = L* + λM`. Paper, untangling: 1. */
+    /** Mass weight of the preconditioner `P = L* + (λ/r²)M`, dimensionless. Default 4, which
+     *  is the paper's λ = 1 at the upper end of the dataset's scale (see the step). */
     lambda?: number;
-    /** Fixed step length before the collision backtracking. Paper: 10–20. */
+    /** Step length before the collision bound. Default 1 (the paper uses 10–20; see the step
+     *  for why that is unstable here). */
     tau?: number;
     /** `rMax / r`. Below 1 tightens the curve. Paper, untangling: 0.9. */
     capRatio?: number;
@@ -681,7 +683,7 @@ function segmentDistance(x: Float64Array, a: number, b: number, c: number, d: nu
 /** What one step did. */
 export interface MedialSphereStepResult {
     curve: ClosedCurve;
-    /** Mean pointwise gradient norm per node, divided by `r` — the paper's stopping measure. */
+    /** Mean pointwise gradient norm per node times `r` (dimensionless) — the stopping measure. */
     gradientPerNode: number;
     /** Step length actually taken (0 only when two strands already touch). */
     step: number;
@@ -707,8 +709,16 @@ export function medialSphereStep(
     const { n, x } = c;
     const N = opts.nDirections ?? 16;
     const beta = opts.beta ?? 0.01;
-    const lambda = opts.lambda ?? 1;
-    const tau = opts.tau ?? 10;
+    const lambda = opts.lambda ?? 4;
+    // Step length 1, NOT the paper's 10–20. The preconditioner's Laplacian is the length
+    // term's own Hessian, so P⁻¹H ≈ 1 on those modes and a plain step is stable only below 2.
+    // Measured on dataset knots: at 10 the step is unstable and only the collision bound
+    // holds it (cut short in 91–95% of steps; the gradient per node chatters at 0.1–0.4 and
+    // the paper's stopping rule never fires); at 1 the bound cuts 15% of steps, the gradient
+    // settles under 1e-3 and the stopping rule fires, in fewer steps (about 150 against 210–230).
+    // (The reference code's energy carries a factor 2 ours does not, which does not explain
+    // the paper's larger value; whatever does is not in the paper's text.)
+    const tau = opts.tau ?? 1;
     const { rMax, alpha, r, h } = scales;
     const spheres = medialSpheres(c, rMax, N);
 
@@ -741,7 +751,11 @@ export function medialSphereStep(
         }
         gradSum += Math.hypot(G[3 * i], G[3 * i + 1], G[3 * i + 2]) / w[i];
     }
-    const gradientPerNode = gradSum / n / r;
+    // Pointwise gradient (a curvature, 1/length) TIMES r: dimensionless, so the stopping rule
+    // means the same at any scale. Dividing by r, as a literal reading of "below 5e-3·r"
+    // suggests, is not scale-free: on a curve scaled to extent 2 (r ≈ 0.2) it reads 36× larger
+    // than on the dataset's own units (r ≈ 1.2) and the rule never fired.
+    const gradientPerNode = (gradSum / n) * r;
 
     // Sphere links (i, j), each once, with weight β / |γ_i − γ_j|.
     const linkA: number[] = [];
@@ -775,7 +789,15 @@ export function medialSphereStep(
     const off = new Float64Array(n);
     for (let i = 0; i < n; i++) {
         const p = (i + n - 1) % n;
-        diag[i] = 1 / len[p] + 1 / len[i] + lambda * w[i];
+        // Mass weight λ/r²: the Laplacian entries are 1/length and w is a length, so a bare
+        // λ·w is not scale-free — the paper's λ = 1 means something else on a curve six times
+        // smaller. Measured: the same trefoil stopped on the gradient rule after 107 steps in
+        // the dataset's units (r ≈ 1.2) and never on it when scaled to extent 2 (r ≈ 0.2),
+        // where the mass term was 36× weaker. Dividing by r² makes the flow the same flow at
+        // any size. The default 4 is the paper's λ = 1 at r ≈ 2, the top of the dataset's range
+        // (r = 1.2–1.9): at 2 the knot with the largest r was under-damped — two strands were
+        // driven into contact and the flow stuck there with a zero safe step.
+        diag[i] = 1 / len[p] + 1 / len[i] + (lambda / (r * r)) * w[i];
         off[i] = -1 / len[i];
     }
     const applyP = (v: Float64Array, out: Float64Array): void => {

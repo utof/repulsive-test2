@@ -106,4 +106,61 @@ describe('medialGraphStep', () => {
         expect(angle()).toBeGreaterThan(12);
         expect(countPlanarCrossings(vec(g), segs(g), 2 * PIECES)).toBe(0);
     });
+    test('a right angle at a junction is left alone (no permanent push between its two edges)', () => {
+        const V: Vec3[] = [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+        ];
+        const E: Edge[] = [
+            [0, 1],
+            [0, 2],
+        ];
+        const g = medialGraphFrom(V, E, 2 * PIECES);
+        const x0 = Float64Array.from(g.x);
+        const r = medialGraphStep(g, { r: R, tension: 0 });
+        expect(r.links).toBe(0);
+        expect(Array.from(g.x)).toEqual(Array.from(x0));
+    });
+
+    // One edge of 16 segments, bent by hand: `shape(k)` is the position of its k-th point.
+    function bentEdge(shape: (k: number) => [number, number]): MedialGraph {
+        const [x0, y0] = shape(0);
+        const [x1, y1] = shape(16);
+        const g = medialGraphFrom(
+            [
+                [x0, y0, 0],
+                [x1, y1, 0],
+            ],
+            [[0, 1]],
+            16,
+        );
+        for (let k = 1; k < 16; k++) {
+            const [px, py] = shape(k);
+            g.x[3 * (1 + k)] = px; // interior points follow the 2 original nodes
+            g.x[3 * (1 + k) + 1] = py;
+        }
+        for (let k = 0; k < 16; k++) {
+            const a = g.segs.a[k];
+            const b = g.segs.b[k];
+            g.rest[k] = Math.hypot(g.x[3 * b] - g.x[3 * a], g.x[3 * b + 1] - g.x[3 * a + 1]);
+        }
+        return g;
+    }
+    test('an edge folded back on itself is pushed open; a gentle bend is left alone', () => {
+        // Hairpin: up one leg and down the other, the legs 0.06 apart.
+        const hairpin = bentEdge((k) => (k <= 8 ? [0, 0.25 * k] : [0.06, 0.25 * (16 - k)]));
+        const gap = (g: MedialGraph) =>
+            Math.hypot(g.x[3 * 5] - g.x[3 * 13], g.x[3 * 5 + 1] - g.x[3 * 13 + 1]);
+        const gap0 = gap(hairpin);
+        expect(gap0).toBeCloseTo(0.06, 10);
+        run(hairpin, 100);
+        expect(gap(hairpin)).toBeGreaterThan(3 * gap0);
+
+        // An arc of radius 3 (far wider than the range): nothing may move.
+        const arc = bentEdge((k) => [3 * Math.cos(0.08 * k), 3 * Math.sin(0.08 * k)]);
+        const before = Float64Array.from(arc.x);
+        expect(medialGraphStep(arc, { r: R, tension: 0 }).links).toBe(0);
+        expect(Array.from(arc.x)).toEqual(Array.from(before));
+    });
 });

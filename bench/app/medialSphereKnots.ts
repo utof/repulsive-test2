@@ -12,6 +12,7 @@ import {
     medialSphereStep,
     resampleClosedCurve,
 } from '../../src/core/medialSphere';
+import { UNTANGLE_GRADIENT_TOL } from '../../src/core/untanglePass';
 
 const [file, maxStepsArg, budgetArg, tauArg, capArg, outFile] = process.argv.slice(2);
 if (!file) {
@@ -22,7 +23,7 @@ if (!file) {
 }
 const maxSteps = Number(maxStepsArg ?? 3000);
 const budgetMs = 1000 * Number(budgetArg ?? 120);
-const tau = Number(tauArg ?? 10);
+const tau = Number(tauArg ?? 1);
 
 const coords: number[] = [];
 for (const line of readFileSync(file, 'utf8').split('\n')) {
@@ -70,6 +71,7 @@ const t0 = performance.now();
 let steps = 0;
 let stopped = 'steps';
 let refused = 0;
+let zeroRun = 0;
 let limitedSteps = 0;
 let tryStep = tau;
 let cgMax = 0;
@@ -88,6 +90,11 @@ while (steps < maxSteps) {
     if (r.limited) limitedSteps++;
     cgMax = Math.max(cgMax, r.cgIterations);
     if (r.step === 0) refused++;
+    zeroRun = r.step === 0 ? zeroRun + 1 : 0;
+    if (zeroRun >= 5) {
+        stopped = 'stuck';
+        break;
+    }
     curve = r.curve;
     if (outFile && steps % 4 === 0) frames.push(Array.from(curve.x));
     if (steps <= 5 || steps % 50 === 0)
@@ -100,9 +107,8 @@ while (steps < maxSteps) {
         auditMs += performance.now() - ta;
         if (sig && sig0 && (sig[0] !== sig0[0] || sig[1] !== sig0[1])) brokeAtStep = steps;
     }
-    // Plateau rule (ours, not the paper's): the shortest length seen in the last 100 steps is
-    // within 1% of the shortest in the 100 before. The paper's gradient rule is kept below but
-    // does not fire here: our gradient chatters around 0.1–0.4 once the knot is tight.
+    // Plateau rule (ours), a backstop behind the paper's gradient rule below: the shortest
+    // length seen in the last 100 steps is within 1% of the shortest in the 100 before.
     lengths.push(curveLength(curve));
     if (steps >= 200) {
         let recent = Infinity;
@@ -118,7 +124,7 @@ while (steps < maxSteps) {
         stopped = 'collapsed';
         break;
     }
-    if (grad < 5e-3) {
+    if (grad < UNTANGLE_GRADIENT_TOL) {
         stopped = 'gradient';
         break;
     }

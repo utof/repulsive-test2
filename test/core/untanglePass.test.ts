@@ -103,7 +103,7 @@ describe('untangle pass', () => {
         const run = runToEnd(V, E);
         const res = finishUntangle(run, V);
         expect(res.audit).toBe('kept');
-        expect(res.stopped).toBe('plateau');
+        expect(['gradient', 'plateau']).toContain(res.stopped);
         expect(res.vertices.length).toBe(600);
         expect(totalLength(res.vertices, E)).toBeCloseTo(totalLength(V, E), 9);
         const c0 = centre(V);
@@ -136,7 +136,7 @@ describe('untangle pass', () => {
         const E = ring(600);
         const run = createUntangleRun(V, E);
         if (!run) throw new Error('not a ring');
-        untangleTick(run, 60, Number.POSITIVE_INFINITY);
+        untangleTick(run, 5, Number.POSITIVE_INFINITY); // mid-pass: this curve needs ~50 steps
         expect(run.stopped).toBeNull();
         const out = V.map((p) => [...p] as Vec3);
         untangleDisplay(run, out);
