@@ -211,4 +211,86 @@ describe('medialGraphStep', () => {
         for (let k = 0; k < 60; k++) medialGraphStep(free, { r: R });
         expect(minClearance(free, 1)).toBeGreaterThan(10 * gap0);
     });
+    describe('sleeping: the part of the drawing at rest is left alone', () => {
+        /** A jittered size×size grid, unit spacing, 2 points per edge. */
+        const grid = (size: number): MedialGraph => {
+            let s = 7;
+            const rnd = () => {
+                s = (1664525 * s + 1013904223) % 4294967296;
+                return s / 4294967296;
+            };
+            const V: Vec3[] = [];
+            const E: Edge[] = [];
+            for (let y = 0; y < size; y++)
+                for (let x = 0; x < size; x++)
+                    V.push([x + 0.3 * (rnd() - 0.5), y + 0.3 * (rnd() - 0.5), 0]);
+            for (let y = 0; y < size; y++)
+                for (let x = 0; x < size; x++) {
+                    if (x + 1 < size) E.push([y * size + x, y * size + x + 1]);
+                    if (y + 1 < size) E.push([y * size + x, (y + 1) * size + x]);
+                }
+            return medialGraphFrom(V, E, 2);
+        };
+        // No tension: a grid drawn at its rest lengths is then at rest but for the contacts.
+        const opts = { r: R, tension: 0, sleep: {} };
+        const settle = (g: MedialGraph, most: number): number => {
+            let awake = g.n;
+            for (let k = 0; k < most && awake > 0; k++) awake = medialGraphStep(g, opts).awakeNodes;
+            return awake;
+        };
+        test('a drawing at rest falls asleep; a step then does nothing at all', () => {
+            const g = grid(12);
+            expect(medialGraphStep(g, opts).awakeNodes).toBe(g.n); // everything starts awake
+            expect(settle(g, 400)).toBe(0);
+            const x0 = Float64Array.from(g.x);
+            const st = medialGraphStep(g, opts);
+            expect(st.awakeNodes).toBe(0);
+            expect(st.movePerNode).toBe(0);
+            expect(g.x).toEqual(x0);
+        });
+        test('a node the caller moves wakes with what is near it, and only that', () => {
+            const g = grid(16);
+            expect(settle(g, 400)).toBe(0);
+            // Nudge a corner node; the opposite corner is 20 units away.
+            g.x[0] += 0.2;
+            g.x[1] += 0.2;
+            const st = medialGraphStep(g, opts);
+            expect(st.awakeNodes).toBeGreaterThan(3);
+            expect(st.awakeNodes).toBeLessThan(g.n / 4);
+            const far = 16 * 16 - 1;
+            expect(g.sleepState?.asleep[far]).toBe(1);
+            expect(g.sleepState?.asleep[0]).toBe(0);
+            // … and it all comes to rest again, with nothing crossed.
+            expect(settle(g, 600)).toBe(0);
+            expect(countPlanarCrossings(vec(g), segs(g), 2)).toBe(0);
+        });
+        test('a drag ends where it ends without sleeping, to a fraction of a clearance', () => {
+            const drag = (sleep: boolean): MedialGraph => {
+                const g = grid(10);
+                const o = sleep ? opts : { r: R, tension: 0 };
+                for (let k = 0; k < 60; k++) medialGraphStep(g, o);
+                const mid = 5 * 10 + 5;
+                const from: [number, number] = [g.x[3 * mid], g.x[3 * mid + 1]];
+                for (let k = 1; k <= 80; k++) {
+                    const f = Math.min(1, k / 40);
+                    const to = new Map<number, [number, number]>([
+                        [mid, [from[0] + 1.2 * f, from[1] + 1.2 * f]],
+                    ]);
+                    medialGraphStep(g, { ...o, pinTargets: to });
+                }
+                return g;
+            };
+            const a = drag(true);
+            const b = drag(false);
+            let worst = 0;
+            for (let i = 0; i < a.n; i++)
+                worst = Math.max(
+                    worst,
+                    Math.hypot(a.x[3 * i] - b.x[3 * i], a.x[3 * i + 1] - b.x[3 * i + 1]),
+                );
+            expect(worst).toBeLessThan(0.1 * R); // measured: 0.012
+
+            expect(countPlanarCrossings(vec(a), segs(a), 2)).toBe(0);
+        });
+    });
 });
