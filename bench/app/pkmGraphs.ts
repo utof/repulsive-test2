@@ -1,4 +1,4 @@
-// bench/app/pkmGraphs.ts — bun bench/app/pkmGraphs.ts [dir] [steps=400] [maxNodes=5000] [out]
+// bench/app/pkmGraphs.ts — bun bench/app/pkmGraphs.ts [dir] [steps=400] [maxNodes=5000] [out] [makeRoom=warp|flow]
 // The graph flow and the group move on REAL note collections: mind maps (FreeMind / Freeplane
 // files) and note vaults (Obsidian-style links), as extracted by scripts/pkmExtract.ts into
 // local_files/pkm-graphs/graphs/ (git-ignored; see its README for where they come from).
@@ -34,6 +34,9 @@ const DIR = process.argv[2] ?? 'local_files/pkm-graphs/graphs';
 const STEPS = Number(process.argv[3] ?? 400);
 const MAX_NODES = Number(process.argv[4] ?? 5000);
 const OUT = process.argv[5] ?? 'bench/results/2026-11-24-pkm-graphs.jsonl';
+// How the rest makes room for a group growing back (see `growGroup`). 'flow' is the
+// comparison run: it repeats the moves only, not the hairball count.
+const MAKE_ROOM = (process.argv[6] ?? 'warp') as 'warp' | 'flow';
 const DUMP = process.env.DUMP;
 const PIECES = 2;
 const R = 0.3; // clearance, in units of the spacing between neighbouring leaves (1)
@@ -245,7 +248,7 @@ function runTree(
     for (let k = 0; k < 3 * STEPS && after < STEPS; k++) {
         ran++;
         if (drop.growth && stepsToFullSize === null) {
-            scale = growGroup(g, drop.growth, R);
+            scale = growGroup(g, drop.growth, R, { makeRoom: MAKE_ROOM });
             if (scale >= 1) {
                 stepsToFullSize = k + 1;
                 for (const i of blob) g.pinned[i] = 1;
@@ -278,6 +281,7 @@ function runTree(
         movePerNodeSettled: Number(move.toExponential(2)),
         limitedSettled: limited,
         moveGroupNodes: blob.length,
+        makeRoom: MAKE_ROOM,
         moveSetDownScale: Number(drop.scale.toFixed(3)),
         moveScaleEnd: Number(scale.toFixed(3)),
         moveStepsToFullSize: stepsToFullSize,
@@ -339,21 +343,23 @@ for (const f of files) {
         { length: src.nodes },
         () => [spread * (rnd() - 0.5), spread * (rnd() - 0.5), 0] as Vec3,
     );
-    let t = performance.now();
-    const forced = runForceLayout(V0, src.edges as Edge[]);
-    const layoutMs = performance.now() - t;
-    t = performance.now();
-    const hairball = medialGraphFrom(forced.vertices, src.edges as Edge[], 1);
-    emit({
-        bench: 'pkm-graphs',
-        graph: src.name,
-        layout: 'vault, links (force layout)',
-        nodes: src.nodes,
-        edges: src.edges.length,
-        forceLayoutMs: Math.round(layoutMs),
-        crossings: countCrossings(hairball),
-        countMs: Math.round(performance.now() - t),
-    });
+    if (MAKE_ROOM !== 'flow') {
+        let t = performance.now();
+        const forced = runForceLayout(V0, src.edges as Edge[]);
+        const layoutMs = performance.now() - t;
+        t = performance.now();
+        const hairball = medialGraphFrom(forced.vertices, src.edges as Edge[], 1);
+        emit({
+            bench: 'pkm-graphs',
+            graph: src.name,
+            layout: 'vault, links (force layout)',
+            nodes: src.nodes,
+            edges: src.edges.length,
+            forceLayoutMs: Math.round(layoutMs),
+            crossings: countCrossings(hairball),
+            countMs: Math.round(performance.now() - t),
+        });
+    }
     // Then the same notes as a mind map.
     const { parent, root } = spanningTree(src.nodes, src.edges);
     for (const [layout, make] of LAYOUTS)

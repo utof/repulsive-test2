@@ -1,4 +1,4 @@
-// bench/app/medialGroupMove.ts — bun bench/app/medialGroupMove.ts [fixtures=grid12,grid36,tree150,tree600] [steps=600] [out]
+// bench/app/medialGroupMove.ts — bun bench/app/medialGroupMove.ts [fixtures=grid12,grid36,tree150,tree600] [steps=600] [out] [makeRoom=warp|flow]
 // The mind-map move: carry a group of nodes across a flat drawing, set it down, let the flow
 // make room. One JSON line per fixture: how many crossings the move leaves (and that the
 // number never grows afterwards), how many steps the group needs to grow back to full size
@@ -28,6 +28,9 @@ import type { Edge, Vec3 } from '../../src/core/testConfigs';
 const fixtures = (process.argv[2] ?? 'grid12,grid36,tree150,tree600').split(',');
 const STEPS = Number(process.argv[3] ?? 600);
 const OUT = process.argv[4] ?? 'bench/results/2026-11-24-group-move.jsonl';
+// How the rest makes room while the group grows back (see `growGroup`): both are kept so the
+// two can be compared on the same fixtures.
+const MAKE_ROOM = (process.argv[5] ?? 'warp') as 'warp' | 'flow';
 // DUMP=<prefix> writes <prefix>-<fixture>-{0,1,2}.json (before, at the set-down, at the end):
 // {x, a, b, nodeCount, hi} for a drawing script.
 const DUMP = process.env.DUMP;
@@ -163,6 +166,26 @@ for (const name of fixtures) {
     };
     dump(0);
     const move = beginGroupMove(g, blob);
+    // How far the REST of the drawing is from its own shape: mean |length / rest length − 1|
+    // over the segments of edges that do not touch the group. The price of making room.
+    const touched = new Uint8Array(g.edgeA.length);
+    for (const e of move.internal) touched[e] = 1;
+    for (const e of move.connecting) touched[e] = 1;
+    const restStrain = (): number => {
+        let sum = 0;
+        let count = 0;
+        for (let k = 0; k < g.segs.a.length; k++) {
+            if (touched[Math.floor(k / g.pieces)]) continue;
+            const a = g.segs.a[k];
+            const b = g.segs.b[k];
+            const len = Math.hypot(g.x[3 * b] - g.x[3 * a], g.x[3 * b + 1] - g.x[3 * a + 1]);
+            sum += Math.abs(len / g.rest[k] - 1);
+            count++;
+        }
+        return sum / Math.max(1, count);
+    };
+    const strainBefore = restStrain();
+    let strainAtRelease: number | null = null;
     for (let k = 1; k <= 20; k++) {
         setGroupOffset(g, move, (fx.offset[0] * k) / 20, (fx.offset[1] * k) / 20);
         medialGraphStep(g, { r });
@@ -181,12 +204,13 @@ for (const name of fixtures) {
     for (let k = 0; k < STEPS; k++) {
         t = performance.now();
         if (drop.growth && stepsToFullSize === null) {
-            scale = growGroup(g, drop.growth, r);
+            scale = growGroup(g, drop.growth, r, { makeRoom: MAKE_ROOM });
             if (scale >= 1) {
                 stepsToFullSize = k + 1;
                 for (const i of blob) g.pinned[i] = 1; // held where it was put, as the app does
                 crossingsAtRelease = countCrossings(g);
                 worst = crossingsAtRelease;
+                strainAtRelease = restStrain();
             }
         }
         const st = medialGraphStep(g, { r });
@@ -217,6 +241,10 @@ for (const name of fixtures) {
         r,
         groupNodes: blob.length,
         links: move.connecting.length,
+        makeRoom: MAKE_ROOM,
+        restStrainBefore: Number(strainBefore.toFixed(3)),
+        restStrainAtRelease: strainAtRelease === null ? null : Number(strainAtRelease.toFixed(3)),
+        restStrainEnd: Number(restStrain().toFixed(3)),
         setDownScale: Number(drop.scale.toFixed(3)),
         crossingsBefore,
         crossingsAtRelease,

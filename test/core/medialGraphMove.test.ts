@@ -10,6 +10,7 @@ import {
     dropGroupMove,
     growGroup,
     prunePassPairs,
+    roomRadius,
     setGroupOffset,
 } from '../../src/core/medialGraphMove';
 import { medialGraphFrom, medialGraphStep, minClearance } from '../../src/core/medialSphereGraph';
@@ -37,6 +38,26 @@ function grid(size: number, pieces: number) {
     return medialGraphFrom(V, E, pieces);
 }
 const finite = (x: Float64Array) => x.every(Number.isFinite);
+
+/** A radial tree: 6 branches from the root, every node two children, 4 levels (91 nodes);
+ *  `branch` = the nodes of the first branch (15). */
+function radialTree(pieces: number) {
+    const V: Vec3[] = [[0, 0, 0]];
+    const E: Edge[] = [];
+    const branch: number[] = [];
+    const lay = (parent: number, level: number, a0: number, a1: number, mine: boolean): void => {
+        const a = 0.5 * (a0 + a1);
+        const i = V.length;
+        V.push([1.2 * level * Math.cos(a), 1.2 * level * Math.sin(a), 0]);
+        E.push([parent, i]);
+        if (mine) branch.push(i);
+        if (level === 4) return;
+        lay(i, level + 1, a0, a, mine);
+        lay(i, level + 1, a, a1, mine);
+    };
+    for (let b = 0; b < 6; b++) lay(0, 1, (b * Math.PI) / 3, ((b + 1) * Math.PI) / 3, b === 0);
+    return { g: medialGraphFrom(V, E, pieces), branch };
+}
 
 describe('group move', () => {
     test('a carried group is invisible to the flow and stays where the caller puts it', () => {
@@ -120,6 +141,72 @@ describe('group move', () => {
         expect(worst).toBe(at); // not one more, at any step
         // Everything that is not allowed to cross keeps a real distance.
         expect(minClearance(g, 2)).toBeGreaterThan(0.02);
+    });
+
+    test('the room map is smooth, increasing, enlarges the disc and keeps areas far outside', () => {
+        const c = 2;
+        const k = 1.2;
+        // Inside the disc: a plain enlargement.
+        expect(roomRadius(0.7, c, k)).toBeCloseTo(0.84, 12);
+        // Continuous, with a continuous slope, at the rim and at the end of the band (1.5·c).
+        const slope = (rho: number, h: number) =>
+            (roomRadius(rho + h, c, k) - roomRadius(rho, c, k)) / h;
+        for (const at of [c, 1.5 * c]) {
+            expect(roomRadius(at + 1e-9, c, k)).toBeCloseTo(roomRadius(at - 1e-9, c, k), 7);
+            expect(slope(at, 1e-5)).toBeCloseTo(slope(at - 1e-5, 1e-5), 3);
+        }
+        // Increasing everywhere, and nothing is pulled inwards.
+        let last = 0;
+        for (let rho = 0.05; rho < 20; rho += 0.05) {
+            const to = roomRadius(rho, c, k);
+            expect(to).toBeGreaterThan(last);
+            expect(to).toBeGreaterThanOrEqual(rho);
+            last = to;
+        }
+        // Beyond the band every ring keeps its area: to² − rho² is one constant.
+        const gain = (rho: number) => roomRadius(rho, c, k) ** 2 - rho * rho;
+        expect(gain(9)).toBeCloseTo(gain(4), 9);
+        expect(gain(40)).toBeCloseTo(gain(4), 9);
+        // The shift dies off with distance.
+        expect(roomRadius(40, c, k) - 40).toBeLessThan(0.2 * (roomRadius(4, c, k) - 4));
+    });
+
+    test('a big branch grows back by making room directly; waiting for the flow is far slower', () => {
+        const grow = (makeRoom: 'warp' | 'flow', budget: number) => {
+            const { g, branch } = radialTree(2);
+            const r = 0.25;
+            for (let k = 0; k < 30; k++) medialGraphStep(g, { r });
+            const move = beginGroupMove(g, branch);
+            // Half a turn round the root, as a translation: on top of the opposite branch.
+            let cx = 0;
+            let cy = 0;
+            for (const i of branch) {
+                cx += g.x[3 * i] / branch.length;
+                cy += g.x[3 * i + 1] / branch.length;
+            }
+            setGroupOffset(g, move, -2 * cx, -2 * cy);
+            const drop = dropGroupMove(g, move, { r });
+            const growth = drop.growth;
+            if (!growth) throw new Error('expected a set-down below full size');
+            let steps = 0;
+            let crossed = 0;
+            while (growth.scale < 1 && steps < budget) {
+                const sc = growGroup(g, growth, r, { makeRoom });
+                // The rest is moved out of the way without anything passing through anything.
+                if (sc < 1) crossed = Math.max(crossed, countCrossings(g));
+                medialGraphStep(g, { r });
+                steps++;
+            }
+            return { g, steps, scale: growth.scale, setDown: drop.scale, crossed };
+        };
+        const direct = grow('warp', 60); // measured: full size after 10 steps
+        expect(direct.setDown).toBeLessThanOrEqual(0.5);
+        expect(direct.scale).toBe(1);
+        expect(direct.crossed).toBe(0);
+        expect(finite(direct.g.x)).toBe(true);
+        // The comparison: the same move, the rest pushed away by the flow's contact forces only.
+        const waiting = grow('flow', direct.steps); // measured: 0.56 of its size by then
+        expect(waiting.scale).toBeLessThan(0.8);
     });
 
     test('an allowed pair cannot get more crossings than allowed: the step undoes the move', () => {

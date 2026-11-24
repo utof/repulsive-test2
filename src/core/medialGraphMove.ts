@@ -382,12 +382,22 @@ function landLinks(
  * while the push on the rest keeps growing — the rest gives way before they touch. Why not
  * simply stop at a fixed gap: on a grid the rest settled closer than any margin worth having,
  * and the group never grew at all.
+ *
+ * `makeRoom` — what happens when the gaps allow less than the wanted rate: `'warp'` (default)
+ * moves the rest of the drawing out of the way directly, by at most `roomStep·r` per call
+ * (see `makeRoom` below); `'flow'` only waits for the flow's contact forces — the first
+ * version, kept as the comparison.
  */
 export function growGroup(
     g: MedialGraph,
     growth: GroupGrowth,
     r: number,
-    opts: { rate?: number; margin?: number } = {},
+    opts: {
+        rate?: number;
+        margin?: number;
+        makeRoom?: 'warp' | 'flow';
+        roomStep?: number;
+    } = {},
 ): number {
     if (growth.scale >= 1) return 1;
     const rate = opts.rate ?? 0.25;
@@ -412,6 +422,13 @@ export function growGroup(
         const d = gap[points[k]];
         ds = Math.min(ds, (0.45 * d * Math.min(1, d / margin)) / rho);
     }
+    // MAKE ROOM (default): where the gaps allow less than the wanted rate, move the REST out of
+    // the way directly (see `makeRoom`) and grow by what that allows instead.
+    const dsWanted = Math.min(1 - growth.scale, rate * growth.scale + 1e-3);
+    if ((opts.makeRoom ?? 'warp') === 'warp' && ds < 0.999 * dsWanted) {
+        const made = makeRoom(g, growth, r, (opts.roomStep ?? 1) * r, dsWanted, ds);
+        if (made > 0) ds = made;
+    }
     growth.scale = growth.scale + ds >= 1 - 1e-12 ? 1 : growth.scale + ds;
     for (let k = 0; k < points.length; k++) {
         x[3 * points[k]] = ax + growth.scale * (full[2 * k] - ax);
@@ -424,6 +441,206 @@ export function growGroup(
     g.ghost = undefined;
     landLinks(g, growth.connecting, growth.targets, growth.tol);
     return 1;
+}
+
+/**
+ * Where a point at distance `rho` from the anchor goes when a disc of radius `c` around the
+ * anchor is enlarged `k` times (k ≥ 1) and everything else has to make room for it.
+ *
+ *  - inside the disc (`rho ≤ c`): `k·rho` — a plain enlargement, so whatever is in there
+ *    (the growing group, and anything lying between its branches) keeps its shape exactly;
+ *  - far outside (`rho ≥ beta·c`): `sqrt(rho² + const)` — every ring keeps its AREA and just
+ *    moves outwards, so nothing far away is squeezed; the shift dies off like 1/rho;
+ *  - in between: the area magnification falls linearly from k² to 1.
+ * Why the band in between: an enlargement stretches radially by k, an area-keeping push
+ * compresses radially by 1/k; glued directly the map has a crease at the disc's rim, and a
+ * straight segment across a crease does not stay where the map puts its ends. With the band
+ * the map is smooth (continuous first derivative), increasing, and never shrinks an area.
+ * @see docs/plans/2026-11-24-medial-sphere-method.md ("Making room directly")
+ */
+export function roomRadius(rho: number, c: number, k: number, beta = 1.5): number {
+    if (rho <= c) return k * rho;
+    const b = beta * c;
+    const k2 = k * k;
+    // ∫ 2ρ·m(ρ) dρ from 0, with m = k² up to c and linear from k² to 1 between c and b.
+    const band = (q: number): number =>
+        k2 * q * q + ((1 - k2) / (b - c)) * ((2 / 3) * (q ** 3 - c ** 3) - c * (q * q - c * c));
+    return Math.sqrt(rho <= b ? band(rho) : band(b) + rho * rho - b * b);
+}
+
+/**
+ * Does point `p` land on segment (`q`, `r`) at some moment while all three move in straight
+ * lines from their place in `x0` to their place in `x1`? Exact for that motion: the signed
+ * area of (q, r, p) is a quadratic in time; at each of its zeros in (0, 1] the point is on
+ * the segment's line, and it is a hit if it is between the ends then.
+ * Why exact and not the flow's "nobody moves more than 0.45 of the gap": making room moves
+ * neighbours TOGETHER by many times the gap between them; a limit on each one's own motion
+ * would forbid nearly all of it.
+ */
+function meetsWhileMoving(
+    x0: Float64Array,
+    x1: Float64Array,
+    p: number,
+    q: number,
+    r: number,
+): boolean {
+    const e0x = x0[3 * r] - x0[3 * q];
+    const e0y = x0[3 * r + 1] - x0[3 * q + 1];
+    const w0x = x0[3 * p] - x0[3 * q];
+    const w0y = x0[3 * p + 1] - x0[3 * q + 1];
+    const e1x = x1[3 * r] - x1[3 * q] - e0x;
+    const e1y = x1[3 * r + 1] - x1[3 * q + 1] - e0y;
+    const w1x = x1[3 * p] - x1[3 * q] - w0x;
+    const w1y = x1[3 * p + 1] - x1[3 * q + 1] - w0y;
+    const f0 = e0x * w0y - e0y * w0x;
+    const f1 = e0x * w1y - e0y * w1x + e1x * w0y - e1y * w0x;
+    const f2 = e1x * w1y - e1y * w1x;
+    const onSegmentAt = (t: number): boolean => {
+        if (!(t > 0 && t <= 1)) return false;
+        const ex = e0x + t * e1x;
+        const ey = e0y + t * e1y;
+        const along = (w0x + t * w1x) * ex + (w0y + t * w1y) * ey;
+        const L = ex * ex + ey * ey;
+        return along >= -1e-9 * L && along <= (1 + 1e-9) * L;
+    };
+    const scale = Math.abs(f0) + Math.abs(f1) + Math.abs(f2);
+    if (scale === 0) return false;
+    if (Math.abs(f2) <= 1e-14 * scale) return f1 !== 0 && onSegmentAt(-f0 / f1);
+    const disc = f1 * f1 - 4 * f2 * f0;
+    if (disc < 0) return false;
+    // The numerically stable pair of roots.
+    const qv = -0.5 * (f1 + (f1 >= 0 ? 1 : -1) * Math.sqrt(disc));
+    return onSegmentAt(qv / f2) || (qv !== 0 && onSegmentAt(f0 / qv));
+}
+
+/**
+ * MAKING ROOM DIRECTLY. Move everything that is not held along `roomRadius` so that the group
+ * can grow from its scale `s` to `s + ds`, and report the `ds` that was possible (0 = none;
+ * then nothing was moved). The group's own points are NOT moved here (the caller places them
+ * by the scale); they are only taken into account.
+ *
+ * Why this exists: waiting for the flow to push the rest away grows a group only as fast as
+ * the TIGHTEST gap around it opens, and a big group has a long boundary — a 134-node branch
+ * of a 600-node tree went from 0.25 to 0.45 of its size in 400 steps and stopped. The room a
+ * group needs is known in advance (a disc around its anchor, `k` times bigger), so the rest
+ * can be moved there in one smooth motion of the whole drawing.
+ *
+ * Why it cannot create a crossing: the trial positions are accepted only if, moving every
+ * node in a straight line from old to new, no node meets a segment (`meetsWhileMoving`, for
+ * every pair of segments within reach of each other; pairs farther apart than twice the
+ * largest displacement cannot meet). On top of that no gap under half a clearance may lose
+ * more than 30% (a looser bound let a gap close geometrically over a few calls), and pairs
+ * that are allowed to cross may not cross more often. A trial that fails is halved, down to
+ * `dsFloor` (what the gaps allow anyway).
+ * Held nodes (pinned by the caller) stay where they are; the check then simply limits how
+ * far their neighbours may go.
+ *
+ * Tried and dropped: clearing a region of the group's own OUTLINE (its reach from the anchor
+ * per direction) instead of a whole disc, so that a group that is not round moves less of
+ * the drawing. Measured: the rest was a little less distorted (mean length error 0.059
+ * against 0.071 on the 600-node tree), but the sheared band along the outline's flanks made
+ * the check refuse — the 2×2 block on the 12×12 grid stopped at 0.61 of its size — and left
+ * more crossings and a tenth of the clearance on the tree. The disc is the robust one.
+ */
+function makeRoom(
+    g: MedialGraph,
+    growth: GroupGrowth,
+    r: number,
+    maxMove: number,
+    dsWanted: number,
+    dsFloor: number,
+): number {
+    const { points, full, ax, ay, internalSeg } = growth;
+    const { x, segs, pieces } = g;
+    const n = g.n;
+    const ghost = g.ghost;
+    let radius = 0;
+    for (let k = 0; k < points.length; k++)
+        radius = Math.max(radius, Math.hypot(full[2 * k] - ax, full[2 * k + 1] - ay));
+    if (radius === 0) return 0;
+    const s = growth.scale;
+    // The enlarged disc reaches 2r beyond the group. Why: the group's farthest point would
+    // otherwise sit exactly on the rim, where the map changes character; a segment of the rest
+    // lying across the rim next to it lags a little behind it at every call, and the gap
+    // between the two closed geometrically (measured: 5e-7 after 40 calls, and the group
+    // stopped at 0.998 of its size). With the margin everything within the flow's reach of
+    // the group is enlarged WITH it, and only the rest's own segments cross the rim.
+    const c = s * radius + 2 * r;
+    const isGroup = new Uint8Array(n);
+    for (let k = 0; k < points.length; k++) isGroup[points[k]] = 1;
+    const x1 = new Float64Array(x.length);
+    let pairs: Int32Array | null = null;
+    let gaps: Float64Array | null = null;
+    // 1.06: the largest displacement is a little beyond the disc's rim (see `roomRadius`).
+    let ds = Math.min(dsWanted, (maxMove * s) / (1.06 * c));
+    for (let trial = 0; trial < 6 && ds > dsFloor; trial++, ds *= 0.5) {
+        const k = (s + ds) / s;
+        x1.set(x);
+        let moved = 0;
+        for (let i = 0; i < n; i++) {
+            if (isGroup[i]) continue;
+            if (g.pinned[i] || ghost?.node[i]) continue; // held, or a carried link's point
+            const dx = x[3 * i] - ax;
+            const dy = x[3 * i + 1] - ay;
+            const rho = Math.hypot(dx, dy);
+            if (rho === 0) continue;
+            const f = roomRadius(rho, c, k) / rho;
+            x1[3 * i] = ax + f * dx;
+            x1[3 * i + 1] = ay + f * dy;
+            moved = Math.max(moved, (f - 1) * rho);
+        }
+        for (let q = 0; q < points.length; q++) {
+            x1[3 * points[q]] = ax + (s + ds) * (full[2 * q] - ax);
+            x1[3 * points[q] + 1] = ay + (s + ds) * (full[2 * q + 1] - ay);
+            moved = Math.max(moved, ds * Math.hypot(full[2 * q] - ax, full[2 * q + 1] - ay));
+        }
+        if (!pairs || !gaps) {
+            // Every pair that could meet in the FIRST (largest) trial; smaller trials move
+            // less, so the same list serves them.
+            const list: number[] = [];
+            const dist: number[] = [];
+            const E = g.edgeA.length;
+            forNearSegmentPairs(x, n, segs, 2.2 * moved, (e, f) => {
+                if (internalSeg[e] && internalSeg[f]) return; // both of the group: same shape
+                const e1 = Math.floor(e / pieces);
+                const e2 = Math.floor(f / pieces);
+                if (ghost && (ghost.edge[e1] || ghost.edge[e2])) return;
+                if (g.passPairs?.has(Math.min(e1, e2) * E + Math.max(e1, e2))) return;
+                list.push(e, f);
+                dist.push(planarSegmentDistance(x, segs.a[e], segs.b[e], segs.a[f], segs.b[f]));
+            });
+            pairs = Int32Array.from(list);
+            gaps = Float64Array.from(dist);
+        }
+        let ok = true;
+        for (let q = 0; ok && q < gaps.length; q++) {
+            const a1 = segs.a[pairs[2 * q]];
+            const b1 = segs.b[pairs[2 * q]];
+            const a2 = segs.a[pairs[2 * q + 1]];
+            const b2 = segs.b[pairs[2 * q + 1]];
+            ok =
+                !meetsWhileMoving(x, x1, a1, a2, b2) &&
+                !meetsWhileMoving(x, x1, b1, a2, b2) &&
+                !meetsWhileMoving(x, x1, a2, a1, b1) &&
+                !meetsWhileMoving(x, x1, b2, a1, b1) &&
+                planarSegmentDistance(x1, a1, b1, a2, b2) >= Math.min(0.7 * gaps[q], 0.5 * r);
+        }
+        if (!ok) continue;
+        const old = Float64Array.from(x);
+        x.set(x1);
+        let within = true;
+        if (g.passPairs) {
+            const E = g.edgeA.length;
+            for (const [key, allowed] of g.passPairs)
+                if (crossingsBetween(g, Math.floor(key / E), key % E) > allowed) {
+                    within = false;
+                    break;
+                }
+        }
+        if (within) return ds;
+        x.set(old);
+    }
+    return 0;
 }
 
 /** Visit every pair of segments sharing no node whose distance is at most `tol`. */
